@@ -782,7 +782,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v1_responses_rejects_chat_only_backend_with_openai_style_error() {
+    async fn v1_responses_converts_to_chat_only_backend() {
+        let (upstream_base_url, _upstream_task) = spawn_openai_chat_mock().await;
         let (server, db) = build_test_server();
         db.save_provider(
             "hermes",
@@ -790,7 +791,7 @@ mod tests {
                 "selected".to_string(),
                 "Selected".to_string(),
                 json!({
-                    "base_url": "https://selected.example/v1",
+                    "base_url": upstream_base_url,
                     "api_key": "sk-selected",
                     "models": ["visible-model"]
                 }),
@@ -837,13 +838,11 @@ mod tests {
             .await
             .expect("response");
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
-        assert_eq!(body["error"]["type"], "invalid_request_error");
-        assert_eq!(
-            body["error"]["code"],
-            "external_openai_api_unsupported_backend"
-        );
+        assert_eq!(body["object"], "response");
+        assert_eq!(body["output"][0]["type"], "message");
+        assert_eq!(body["output"][0]["content"][0]["text"], "pong");
     }
 
     /// 启动一个只服务 OpenAI Chat Completions 的本地 mock upstream。

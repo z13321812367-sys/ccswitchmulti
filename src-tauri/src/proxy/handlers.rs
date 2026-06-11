@@ -1127,6 +1127,7 @@ fn external_openai_api_route_error_response(model: &str) -> axum::response::Resp
 }
 
 /// 生成 External OpenAI-compatible API 的暂不支持能力错误响应。
+#[cfg(test)]
 fn external_openai_api_unsupported_response(
     message: impl Into<String>,
     param: &str,
@@ -1357,12 +1358,6 @@ pub async fn handle_responses(
                 ))
             }
         };
-        if !provider.is_codex_oauth() {
-            return Ok(external_openai_api_unsupported_response(
-                "/v1/responses is only available for OpenAI Official/Codex OAuth backends in the External OpenAI-compatible API. Use /v1/chat/completions for this backend.",
-                "backend",
-            ));
-        }
         RequestContext::new_with_provider(
             &state,
             &body,

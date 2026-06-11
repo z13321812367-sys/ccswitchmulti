@@ -1,6 +1,6 @@
 {
   "name": "cc-switch-multi",
-  "version": "3.16.2-1",
+  "version": "3.16.2-2",
   "description": "All-in-One Assistant for Claude Code, Codex & Gemini CLI",
   "type": "module",
   "scripts": {
@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit",
     "format": "prettier --write \"src/**/*.{js,jsx,ts,tsx,css,json}\"",
     "format:check": "prettier --check \"src/**/*.{js,jsx,ts,tsx,css,json}\"",
+    "release:export": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/export-latest-ccswitchmulti.ps1",
     "test:unit": "vitest run",
     "test:unit:watch": "vitest watch"
   },

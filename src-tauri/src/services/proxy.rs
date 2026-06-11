@@ -899,6 +899,96 @@ impl ProxyService {
         Ok(())
     }
 
+    /// 在 ProviderService 已经持有 app 切换锁时启用单应用接管，并切到指定 provider。
+    ///
+    /// 这个方法专门服务 Codex 的 Chat Completions/本地多路路由 provider：这些 provider 不能
+    /// 被直接写入 Codex live config，否则 Codex 会把 `/responses` 拼到真实上游导致 404。
+    /// 调用方必须已经持有 `switch_locks`，避免和普通接管/切换流程互相覆盖 live config。
+    pub(crate) async fn takeover_app_and_switch_provider_after_switch_lock(
+        &self,
+        app_type: &AppType,
+        provider_id: &str,
+    ) -> Result<(), String> {
+        let app_type_str = app_type.as_str();
+        let previous_current = crate::settings::get_effective_current_provider(&self.db, app_type)
+            .map_err(|e| format!("读取当前 provider 失败: {e}"))?;
+
+        if !self.is_running().await {
+            self.start().await?;
+        }
+
+        let current_config = self
+            .db
+            .get_proxy_config_for_app(app_type_str)
+            .await
+            .map_err(|e| format!("读取 {app_type_str} 接管配置失败: {e}"))?;
+        let has_backup = self
+            .db
+            .get_live_backup(app_type_str)
+            .await
+            .map_err(|e| format!("读取 {app_type_str} Live 备份失败: {e}"))?
+            .is_some();
+        let live_matches_current_proxy = self
+            .live_takeover_matches_current_proxy(app_type)
+            .await
+            .unwrap_or(false);
+
+        if !current_config.enabled || !has_backup || !live_matches_current_proxy {
+            if has_backup {
+                self.restore_live_config_for_app_inner(app_type).await?;
+            } else {
+                self.backup_live_config_strict(app_type).await?;
+                if let Err(e) = self.sync_live_to_provider(app_type).await {
+                    let _ = self.db.delete_live_backup(app_type_str).await;
+                    return Err(e);
+                }
+            }
+        }
+
+        self.db
+            .set_current_provider(app_type_str, provider_id)
+            .map_err(|e| format!("更新当前 provider 失败: {e}"))?;
+        crate::settings::set_current_provider(app_type, Some(provider_id))
+            .map_err(|e| format!("更新本地当前 provider 失败: {e}"))?;
+
+        if let Err(e) = self.takeover_live_config_strict(app_type).await {
+            if let Some(previous_id) = previous_current.as_deref() {
+                let _ = self.db.set_current_provider(app_type_str, previous_id);
+                let _ = crate::settings::set_current_provider(app_type, Some(previous_id));
+            }
+            let _ = self.restore_live_config_for_app_inner(app_type).await;
+            return Err(e);
+        }
+
+        let provider = self
+            .db
+            .get_provider_by_id(provider_id, app_type_str)
+            .map_err(|e| format!("读取目标 provider 失败: {e}"))?
+            .ok_or_else(|| format!("provider 不存在: {provider_id}"))?;
+        self.update_live_backup_from_provider_inner(app_type_str, &provider)
+            .await?;
+
+        let mut updated_config = self
+            .db
+            .get_proxy_config_for_app(app_type_str)
+            .await
+            .map_err(|e| format!("读取 {app_type_str} 接管配置失败: {e}"))?;
+        updated_config.enabled = true;
+        self.db
+            .update_proxy_config_for_app(updated_config)
+            .await
+            .map_err(|e| format!("设置 {app_type_str} 接管状态失败: {e}"))?;
+        let _ = self.db.set_live_takeover_active(true).await;
+
+        if let Some(server) = self.server.read().await.as_ref() {
+            server
+                .set_active_target(app_type_str, &provider.id, &provider.name)
+                .await;
+        }
+
+        Ok(())
+    }
+
     async fn sync_live_to_provider(&self, app_type: &AppType) -> Result<(), String> {
         let live_config = match app_type {
             AppType::Claude => self.read_claude_live()?,
@@ -2396,32 +2486,42 @@ impl ProxyService {
     // ==================== Live 配置读写辅助方法 ====================
 
     /// 更新 TOML 字符串中的 base_url（委托给 codex_config 共享实现）
+    #[cfg(test)]
     fn update_toml_base_url(toml_str: &str, new_url: &str) -> String {
         crate::codex_config::update_codex_toml_field(toml_str, "base_url", new_url)
             .unwrap_or_else(|_| toml_str.to_string())
     }
 
     /// 接管 Codex 时，本地客户端必须继续以 Responses wire API 访问代理。
-    /// 真实上游是否走 Chat Completions 由 provider 配置决定，并在代理内部转换。
+    ///
+    /// 这里故意把 live `config.toml` 投影成 Codex 内置 `openai` provider，而不是
+    /// 暴露真实上游 provider id。这样 Codex 仍按官方 OpenAI/Codex 模型目录体验展示
+    /// 可选模型，真实 DeepSeek/Qwen/路由 provider 只保留在 CC Switch 后端目标里。
+    /// 上游是否走 Chat Completions 由 provider 配置决定，并在代理内部转换。
     fn apply_codex_proxy_toml_config_for_provider(
         toml_str: &str,
         proxy_url: &str,
         provider: Option<&Provider>,
     ) -> String {
-        let updated = Self::update_toml_base_url(toml_str, proxy_url);
-        let mut updated =
-            crate::codex_config::update_codex_toml_field(&updated, "wire_api", "responses")
-                .unwrap_or(updated);
+        let mut doc = match toml_str.parse::<DocumentMut>() {
+            Ok(doc) => doc,
+            Err(_) => return toml_str.to_string(),
+        };
+
+        doc["model_provider"] = toml_edit::value("openai");
+        doc["openai_base_url"] = toml_edit::value(proxy_url.trim());
+        doc.as_table_mut().remove("base_url");
+        doc.as_table_mut().remove("wire_api");
+        doc.as_table_mut().remove("experimental_bearer_token");
+        doc.as_table_mut().remove("model_providers");
 
         if let Some(upstream_model) =
             provider.and_then(crate::proxy::providers::codex_provider_upstream_model)
         {
-            updated =
-                crate::codex_config::update_codex_toml_field(&updated, "model", &upstream_model)
-                    .unwrap_or(updated);
+            doc["model"] = toml_edit::value(upstream_model);
         }
 
-        updated
+        doc.to_string()
     }
 
     fn attach_codex_model_catalog_from_provider(
@@ -4232,7 +4332,7 @@ openai_base_url = "http://127.0.0.1:15721/v1"
     }
 
     #[test]
-    fn apply_codex_proxy_toml_config_forces_local_responses_wire_api() {
+    fn apply_codex_proxy_toml_config_uses_builtin_openai_proxy_provider() {
         let input = r#"
 model_provider = "chat_only"
 model = "gpt-5.1-codex"
@@ -4249,18 +4349,21 @@ wire_api = "chat"
         let parsed: toml::Value =
             toml::from_str(&output).expect("updated config should be valid TOML");
 
-        let provider = parsed
-            .get("model_providers")
-            .and_then(|v| v.get("chat_only"))
-            .expect("model_providers.chat_only should exist");
-
         assert_eq!(
-            provider.get("base_url").and_then(|v| v.as_str()),
+            parsed.get("model_provider").and_then(|v| v.as_str()),
+            Some("openai")
+        );
+        assert_eq!(
+            parsed.get("openai_base_url").and_then(|v| v.as_str()),
             Some(proxy_url)
         );
         assert_eq!(
-            provider.get("wire_api").and_then(|v| v.as_str()),
-            Some("responses")
+            parsed.get("model").and_then(|v| v.as_str()),
+            Some("gpt-5.1-codex")
+        );
+        assert!(
+            parsed.get("model_providers").is_none(),
+            "takeover live config should not expose upstream provider tables to Codex"
         );
     }
 
@@ -4302,13 +4405,14 @@ wire_api = "responses"
             Some("deepseek-v4-flash")
         );
         assert_eq!(
-            parsed
-                .get("model_providers")
-                .and_then(|v| v.get("deepseek"))
-                .and_then(|v| v.get("base_url"))
-                .and_then(|v| v.as_str()),
+            parsed.get("model_provider").and_then(|v| v.as_str()),
+            Some("openai")
+        );
+        assert_eq!(
+            parsed.get("openai_base_url").and_then(|v| v.as_str()),
             Some(proxy_url)
         );
+        assert!(parsed.get("model_providers").is_none());
     }
 
     #[test]
@@ -5235,26 +5339,17 @@ requires_openai_auth = true
         let parsed_live: toml::Value = toml::from_str(live_config).expect("parse live config");
         assert_eq!(
             parsed_live.get("model_provider").and_then(|v| v.as_str()),
-            Some("aihubmix"),
-            "hot-switched Codex live config should expose the selected provider"
+            Some("openai"),
+            "hot-switched takeover live config should keep Codex on the built-in OpenAI provider"
         );
         assert_eq!(
-            parsed_live
-                .get("model_providers")
-                .and_then(|v| v.get("aihubmix"))
-                .and_then(|v| v.get("name"))
-                .and_then(|v| v.as_str()),
-            Some("AiHubMix"),
-            "Codex app provider label should follow the selected provider"
-        );
-        assert_eq!(
-            parsed_live
-                .get("model_providers")
-                .and_then(|v| v.get("aihubmix"))
-                .and_then(|v| v.get("base_url"))
-                .and_then(|v| v.as_str()),
+            parsed_live.get("openai_base_url").and_then(|v| v.as_str()),
             Some("http://127.0.0.1:15721/v1"),
-            "taken-over live config should stay pointed at the local proxy"
+            "built-in OpenAI provider should point at the local proxy during takeover"
+        );
+        assert!(
+            parsed_live.get("model_providers").is_none(),
+            "taken-over live config should not expose upstream provider tables"
         );
 
         service
@@ -5379,23 +5474,17 @@ requires_openai_auth = true
 
         assert_eq!(
             parsed_live.get("model_provider").and_then(|v| v.as_str()),
-            Some("deepseek")
+            Some("openai"),
+            "taken-over Codex live config should keep the built-in OpenAI model picker"
         );
         assert_eq!(
-            parsed_live
-                .get("model_providers")
-                .and_then(|v| v.get("deepseek"))
-                .and_then(|v| v.get("name"))
-                .and_then(|v| v.as_str()),
-            Some("DeepSeek")
+            parsed_live.get("openai_base_url").and_then(|v| v.as_str()),
+            Some("http://127.0.0.1:15721/v1"),
+            "built-in OpenAI provider should be routed through the local proxy"
         );
-        assert_eq!(
-            parsed_live
-                .get("model_providers")
-                .and_then(|v| v.get("deepseek"))
-                .and_then(|v| v.get("base_url"))
-                .and_then(|v| v.as_str()),
-            Some("http://127.0.0.1:15721/v1")
+        assert!(
+            parsed_live.get("model_providers").is_none(),
+            "upstream provider tables must stay hidden from Codex during takeover"
         );
         assert_eq!(
             parsed_live.get("model").and_then(|v| v.as_str()),

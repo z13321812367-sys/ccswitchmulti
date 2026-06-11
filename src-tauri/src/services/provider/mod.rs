@@ -390,6 +390,107 @@ base_url = "http://localhost:8080"
 
     #[tokio::test]
     #[serial]
+    async fn switching_codex_chat_provider_auto_enables_local_proxy_takeover() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+        let mut proxy_config = db.get_proxy_config().await.expect("get proxy config");
+        proxy_config.listen_port = 0;
+        db.update_proxy_config(proxy_config)
+            .await
+            .expect("use ephemeral proxy port");
+
+        let current_config = r#"model_provider = "openai"
+model = "gpt-5.4-mini"
+
+[model_providers.openai]
+name = "OpenAI"
+base_url = "https://api.openai.com/v1"
+wire_api = "responses"
+"#;
+        crate::codex_config::write_codex_live_atomic(
+            &json!({ "OPENAI_API_KEY": "old-openai-key" }),
+            Some(current_config),
+        )
+        .expect("seed Codex live config");
+
+        let current = Provider::with_id(
+            "openai".to_string(),
+            "OpenAI".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "old-openai-key" },
+                "config": current_config,
+            }),
+            None,
+        );
+        let mut deepseek = Provider::with_id(
+            "deepseek".to_string(),
+            "DeepSeek".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "deepseek-key" },
+                "config": r#"model_provider = "deepseek"
+model = "deepseek-chat"
+
+[model_providers.deepseek]
+name = "DeepSeek"
+base_url = "https://api.deepseek.com"
+wire_api = "responses"
+"#,
+            }),
+            None,
+        );
+        deepseek.category = Some("custom".to_string());
+        deepseek.meta = Some(ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            ..Default::default()
+        });
+
+        db.save_provider("codex", &current)
+            .expect("save current provider");
+        db.save_provider("codex", &deepseek)
+            .expect("save DeepSeek provider");
+        db.set_current_provider("codex", "openai")
+            .expect("set current provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some("openai"))
+            .expect("set local current provider");
+
+        ProviderService::switch(&state, AppType::Codex, "deepseek")
+            .expect("switch to DeepSeek through local proxy");
+
+        let live_config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read Codex live config");
+        assert!(
+            live_config.contains("http://127.0.0.1:") && live_config.contains("/v1"),
+            "Codex live config should point to the local proxy, got:\n{live_config}"
+        );
+        assert!(
+            !live_config.contains("https://api.deepseek.com"),
+            "Chat Completions provider must not be written directly to Codex live config"
+        );
+        let live_auth: Value =
+            crate::config::read_json_file(&crate::codex_config::get_codex_auth_path())
+                .expect("read Codex live auth");
+        assert_eq!(
+            live_auth
+                .get("OPENAI_API_KEY")
+                .and_then(|value| value.as_str()),
+            Some("PROXY_MANAGED")
+        );
+        assert!(
+            db.get_proxy_config_for_app("codex")
+                .await
+                .expect("read Codex proxy config")
+                .enabled,
+            "switching a Codex Chat Completions provider should enable Codex takeover"
+        );
+
+        state.proxy_service.stop().await.expect("stop proxy");
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn update_current_claude_provider_syncs_live_when_proxy_takeover_detected_without_backup()
     {
         let _home = TempHome::new();
@@ -1152,6 +1253,33 @@ impl ProviderService {
             .live_config_managed = Some(managed);
     }
 
+    /// 判断 Codex provider 是否必须通过本地代理接管，而不能直写到 Codex live config。
+    ///
+    /// Chat Completions 后端和多模型路由都需要由 CC Switch 把 Codex 的 `/responses`
+    /// 请求转换/分流后再访问真实上游。若这里漏判，Codex 会直接请求上游 `/responses`，
+    /// 例如 DeepSeek 官方 API 会返回 404。
+    fn codex_provider_requires_local_proxy(provider: &Provider) -> bool {
+        if crate::proxy::providers::codex_provider_uses_chat_completions(provider) {
+            return true;
+        }
+
+        let Some(routing) = provider.settings_config.get("codexRouting") else {
+            return false;
+        };
+
+        let enabled = routing
+            .get("enabled")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let has_routes = routing
+            .get("routes")
+            .and_then(|value| value.as_array())
+            .map(|routes| !routes.is_empty())
+            .unwrap_or(false);
+
+        enabled || has_routes
+    }
+
     /// List all providers for an app type
     pub fn list(
         state: &AppState,
@@ -1635,6 +1763,24 @@ impl ProviderService {
             state.db.set_current_provider(app_type.as_str(), id)?;
             write_live_with_common_config(state.db.as_ref(), &app_type, _provider)?;
             McpService::sync_all_enabled(state)?;
+            return Ok(SwitchResult::default());
+        }
+
+        if matches!(app_type, AppType::Codex)
+            && !should_hot_switch
+            && Self::codex_provider_requires_local_proxy(_provider)
+        {
+            log::info!(
+                "Codex provider '{}' 需要本地路由映射，自动启用 Codex 接管并通过本地代理转换",
+                id
+            );
+            futures::executor::block_on(
+                state
+                    .proxy_service
+                    .takeover_app_and_switch_provider_after_switch_lock(&app_type, id),
+            )
+            .map_err(|e| AppError::Message(format!("启用 Codex 本地代理接管失败: {e}")))?;
+
             return Ok(SwitchResult::default());
         }
 

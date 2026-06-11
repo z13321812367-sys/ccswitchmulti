@@ -1101,7 +1101,12 @@ fn remove_codex_provider_owned_fields_missing_from_provider(
     live_doc: &mut DocumentMut,
     provider_doc: &DocumentMut,
 ) {
-    if provider_doc.get("model_provider").is_none() {
+    let provider_model_provider = active_codex_model_provider_id(provider_doc);
+    if provider_doc.get("model_provider").is_none()
+        || provider_model_provider
+            .as_deref()
+            .is_some_and(|id| id.eq_ignore_ascii_case(CODEX_OPENAI_MODEL_PROVIDER_ID))
+    {
         remove_active_custom_codex_model_provider_section(live_doc);
     }
 
@@ -1492,6 +1497,7 @@ pub fn restore_codex_settings_for_backfill(
 /// - `"model"` / `"model_catalog_json"`: writes to top-level field.
 ///
 /// Empty value removes the field.
+#[cfg(test)]
 pub fn update_codex_toml_field(toml_str: &str, field: &str, value: &str) -> Result<String, String> {
     let mut doc = toml_str
         .parse::<DocumentMut>()
