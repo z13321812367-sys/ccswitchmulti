@@ -12,6 +12,11 @@ use std::process::Command;
 use toml_edit::{DocumentMut, Item, TableLike};
 
 pub const CC_SWITCH_CODEX_MODEL_PROVIDER_ID: &str = "custom";
+/// Codex MultiRouter 专用的本地 provider id。
+///
+/// 普通第三方 Codex provider 继续使用 `custom` 桶；MultiRouter 使用旧版稳定的
+/// `codex_model_router_v2`，避免候选模型、历史会话和诊断状态混入 generic custom 桶。
+pub const CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID: &str = "codex_model_router_v2";
 pub const CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME: &str = "cc-switch-model-catalog.json";
 const CODEX_MODELS_CACHE_FILENAME: &str = "models_cache.json";
 const CODEX_MODELS_CACHE_BACKUP_FILENAME: &str = "models_cache.cc-switch-backup.json";

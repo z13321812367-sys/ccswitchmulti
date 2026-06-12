@@ -505,9 +505,43 @@ wire_api = "responses"
 
     #[tokio::test]
     #[serial]
-    async fn switching_codex_router_provider_auto_enables_custom_local_takeover() {
+    async fn switching_codex_router_provider_auto_enables_dedicated_local_takeover() {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
+        let cache_path = crate::codex_config::get_codex_config_dir().join("models_cache.json");
+        std::fs::create_dir_all(cache_path.parent().expect("cache path has parent"))
+            .expect("create Codex config dir");
+        std::fs::write(
+            &cache_path,
+            serde_json::to_string_pretty(&json!({
+                "fetched_at": "2026-06-12T00:00:00.000000000Z",
+                "etag": "official-cache",
+                "client_version": "0.140.0",
+                "models": [
+                    {
+                        "slug": "gpt-5.5",
+                        "display_name": "GPT-5.5",
+                        "model_messages": { "instructions_template": "template" },
+                        "context_window": 272000,
+                        "max_context_window": 272000,
+                        "visibility": "list",
+                        "supported_in_api": true,
+                        "priority": 1,
+                        "additional_speed_tiers": ["fast"],
+                        "service_tiers": [
+                            {
+                                "id": "priority",
+                                "name": "Fast",
+                                "description": "1.5x speed, increased usage"
+                            }
+                        ],
+                        "default_service_tier": "auto"
+                    }
+                ]
+            }))
+            .expect("serialize seeded model cache"),
+        )
+        .expect("seed Codex models cache");
 
         let db = Arc::new(Database::memory().expect("init db"));
         let state = AppState::new(db.clone());
@@ -594,8 +628,12 @@ openai_base_url = "http://127.0.0.1:15721/v1"
         let live_config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
             .expect("read Codex live config");
         assert!(
-            live_config.contains("model_provider = \"custom\""),
-            "router takeover must use a custom Codex provider to avoid the built-in OpenAI websocket path, got:\n{live_config}"
+            live_config.contains("model_provider = \"codex_model_router_v2\""),
+            "router takeover must use the dedicated Codex router provider bucket, got:\n{live_config}"
+        );
+        assert!(
+            live_config.contains("[model_providers.codex_model_router_v2]"),
+            "router takeover must define the dedicated local provider table, got:\n{live_config}"
         );
         assert!(
             live_config.contains("supports_websockets = false"),
@@ -608,6 +646,10 @@ openai_base_url = "http://127.0.0.1:15721/v1"
         assert!(
             !live_config.contains("openai_base_url"),
             "router takeover must not leave the built-in OpenAI base-url override in live config"
+        );
+        assert!(
+            !live_config.contains("model_provider = \"openai\""),
+            "router takeover must not fall back to the built-in OpenAI provider, got:\n{live_config}"
         );
         let catalog_text =
             std::fs::read_to_string(crate::codex_config::get_codex_model_catalog_path())
@@ -657,6 +699,40 @@ openai_base_url = "http://127.0.0.1:15721/v1"
                 .is_some_and(|tiers| tiers.is_empty()),
             "third-party/local route models must not inherit OpenAI service tiers"
         );
+        let cache_text = std::fs::read_to_string(&cache_path).expect("read synced models cache");
+        let cache: serde_json::Value =
+            serde_json::from_str(&cache_text).expect("parse synced models cache");
+        assert_eq!(
+            cache.get("etag").and_then(|value| value.as_str()),
+            Some("cc-switch-model-catalog"),
+            "router takeover must replace the hot picker cache with the CC Switch catalog"
+        );
+        assert_eq!(
+            cache.get("client_version").and_then(|value| value.as_str()),
+            Some("0.140.0"),
+            "cache sync must preserve Codex's client_version so app-server accepts it"
+        );
+        let cache_slugs: Vec<&str> = cache
+            .get("models")
+            .and_then(|value| value.as_array())
+            .expect("synced cache should contain models")
+            .iter()
+            .filter_map(|model| model.get("slug").and_then(|value| value.as_str()))
+            .collect();
+        for expected in [
+            "gpt-5.5",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+            "gpt-5.3-codex-spark",
+            "qwen3.6",
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
+        ] {
+            assert!(
+                cache_slugs.contains(&expected),
+                "synced models cache should include {expected}, got: {cache_slugs:?}"
+            );
+        }
         assert!(
             db.get_proxy_config_for_app("codex")
                 .await

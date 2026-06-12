@@ -2598,7 +2598,15 @@ impl ProxyService {
             Err(_) => return toml_str.to_string(),
         };
 
-        let proxy_provider_id = crate::codex_config::CC_SWITCH_CODEX_MODEL_PROVIDER_ID;
+        let proxy_provider_id = if Self::codex_provider_has_enabled_routing(provider) {
+            crate::codex_config::CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID
+        } else {
+            crate::codex_config::CC_SWITCH_CODEX_MODEL_PROVIDER_ID
+        };
+        let proxy_provider_name = provider
+            .map(|provider| provider.name.as_str())
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or(CODEX_LOCAL_PROXY_PROVIDER_NAME);
 
         doc["model_provider"] = toml_edit::value(proxy_provider_id);
         doc.as_table_mut().remove("base_url");
@@ -2608,8 +2616,7 @@ impl ProxyService {
         doc.as_table_mut().remove("model_providers");
         doc["model_providers"] = toml_edit::table();
         doc["model_providers"][proxy_provider_id] = toml_edit::table();
-        doc["model_providers"][proxy_provider_id]["name"] =
-            toml_edit::value(CODEX_LOCAL_PROXY_PROVIDER_NAME);
+        doc["model_providers"][proxy_provider_id]["name"] = toml_edit::value(proxy_provider_name);
         doc["model_providers"][proxy_provider_id]["base_url"] = toml_edit::value(proxy_url.trim());
         doc["model_providers"][proxy_provider_id]["wire_api"] = toml_edit::value("responses");
         doc["model_providers"][proxy_provider_id]["requires_openai_auth"] = toml_edit::value(false);
@@ -2622,6 +2629,30 @@ impl ProxyService {
         }
 
         doc.to_string()
+    }
+
+    /// 判断当前 Codex provider 是否是启用中的 MultiRouter。
+    ///
+    /// takeover 写入 live config 时，普通第三方 provider 继续压到 `custom`，而
+    /// MultiRouter 需要恢复旧版稳定的 `codex_model_router_v2` 桶。这里只读取
+    /// cc-switch 私有的 `codexRouting` 配置，不访问数据库，也不改变 route 状态。
+    fn codex_provider_has_enabled_routing(provider: Option<&Provider>) -> bool {
+        let Some(routing) =
+            provider.and_then(|provider| provider.settings_config.get("codexRouting"))
+        else {
+            return false;
+        };
+        if routing
+            .get("enabled")
+            .and_then(|value| value.as_bool())
+            .is_some_and(|enabled| !enabled)
+        {
+            return false;
+        }
+        routing
+            .get("routes")
+            .and_then(|value| value.as_array())
+            .is_some_and(|routes| !routes.is_empty())
     }
 
     fn attach_codex_model_catalog_from_provider(
