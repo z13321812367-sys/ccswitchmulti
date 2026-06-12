@@ -503,6 +503,108 @@ wire_api = "responses"
         state.proxy_service.stop().await.expect("stop proxy");
     }
 
+    #[tokio::test]
+    #[serial]
+    async fn switching_codex_router_provider_auto_enables_custom_local_takeover() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+        let mut proxy_config = db.get_proxy_config().await.expect("get proxy config");
+        proxy_config.listen_port = 0;
+        db.update_proxy_config(proxy_config)
+            .await
+            .expect("use ephemeral proxy port");
+
+        let current_config = r#"model_provider = "openai"
+model = "gpt-5.4-mini"
+"#;
+        crate::codex_config::write_codex_live_atomic(
+            &json!({ "OPENAI_API_KEY": "old-openai-key" }),
+            Some(current_config),
+        )
+        .expect("seed Codex live config");
+
+        let current = Provider::with_id(
+            "openai".to_string(),
+            "OpenAI".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "old-openai-key" },
+                "config": current_config,
+            }),
+            None,
+        );
+        let mut router = Provider::with_id(
+            "codex-openai-router".to_string(),
+            "OpenAI Multi-Model Router".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "router-placeholder" },
+                "config": r#"model = "gpt-5.5"
+model_provider = "openai"
+openai_base_url = "http://127.0.0.1:15721/v1"
+"#,
+                "codexRouting": {
+                    "enabled": true,
+                    "routes": [
+                        {
+                            "id": "openai-official",
+                            "enabled": true,
+                            "match": {
+                                "models": ["gpt-5.5"],
+                                "prefixes": ["gpt-"]
+                            },
+                            "upstream": {
+                                "baseUrl": "https://chatgpt.com/backend-api/codex",
+                                "apiFormat": "openai_responses",
+                                "auth": { "source": "managed_codex_oauth" },
+                                "modelMap": { "gpt-5.5": "gpt-5.5" }
+                            }
+                        }
+                    ]
+                }
+            }),
+            None,
+        );
+        router.category = Some("custom".to_string());
+
+        db.save_provider("codex", &current)
+            .expect("save current provider");
+        db.save_provider("codex", &router)
+            .expect("save router provider");
+        db.set_current_provider("codex", "openai")
+            .expect("set current provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some("openai"))
+            .expect("set local current provider");
+
+        ProviderService::switch(&state, AppType::Codex, "codex-openai-router")
+            .expect("switch router through local proxy takeover");
+
+        let live_config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read Codex live config");
+        assert!(
+            live_config.contains("model_provider = \"custom\""),
+            "router takeover must use a custom Codex provider to avoid the built-in OpenAI websocket path, got:\n{live_config}"
+        );
+        assert!(
+            live_config.contains("supports_websockets = false"),
+            "router takeover must disable Codex websocket attempts, got:\n{live_config}"
+        );
+        assert!(
+            !live_config.contains("openai_base_url"),
+            "router takeover must not leave the built-in OpenAI base-url override in live config"
+        );
+        assert!(
+            db.get_proxy_config_for_app("codex")
+                .await
+                .expect("read Codex proxy config")
+                .enabled,
+            "switching a Codex MultiRouter provider should enable Codex takeover"
+        );
+
+        state.proxy_service.stop().await.expect("stop proxy");
+    }
+
     #[test]
     #[serial]
     fn switching_codex_chat_provider_from_sync_command_has_tokio_reactor() {
