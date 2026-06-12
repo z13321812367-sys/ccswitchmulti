@@ -10,6 +10,7 @@ import type {
   ExternalOpenAIAPIProfileUpdate,
   ExternalOpenAIAPIRuntimeStatus,
   GeneratedExternalOpenAIAPIKey,
+  CodexMultiRouterDiagnostics,
 } from "@/types/proxy";
 
 export const proxyApi = {
@@ -28,6 +29,12 @@ export const proxyApi = {
   // 获取代理服务器状态
   async getProxyStatus(): Promise<ProxyStatus> {
     return invoke("get_proxy_status");
+  },
+
+  async diagnoseCodexMultiRouter(
+    providerId?: string | null,
+  ): Promise<CodexMultiRouterDiagnostics> {
+    return invoke("diagnose_codex_multirouter", { providerId });
   },
 
   async startExternalOpenAIAPIServer(): Promise<ProxyServerInfo> {

@@ -1305,6 +1305,7 @@ pub fn run() {
             commands::get_proxy_takeover_status,
             commands::set_proxy_takeover_for_app,
             commands::get_proxy_status,
+            commands::diagnose_codex_multirouter,
             commands::start_external_openai_api_server,
             commands::get_external_openai_api_server_status,
             commands::get_proxy_config,

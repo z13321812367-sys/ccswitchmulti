@@ -51,6 +51,89 @@ export interface ProxyTakeoverStatus {
   hermes: boolean;
 }
 
+export type CodexDiagnosticStatus = "pass" | "warn" | "fail" | "info";
+
+export interface CodexDiagnosticCheck {
+  id: string;
+  label: string;
+  status: CodexDiagnosticStatus;
+  detail: string;
+  evidence: string[];
+}
+
+export interface CodexLiveConfigDiagnostics {
+  path: string;
+  exists: boolean;
+  parseError: string | null;
+  modelProvider: string | null;
+  activeBaseUrl: string | null;
+  openaiBaseUrl: string | null;
+  providerBaseUrl: string | null;
+  supportsWebsockets: boolean | null;
+  wireApi: string | null;
+  modelCatalogJson: string | null;
+  usesBuiltinOpenAIWithLocalBase: boolean;
+  pointsToLocalProxy: boolean;
+}
+
+export interface CodexRouterLogEvent {
+  timestamp: string;
+  event: string;
+  model: string | null;
+  provider: string | null;
+  status: string | null;
+  error: string | null;
+  line: string;
+}
+
+export interface CodexRouterLogDiagnostics {
+  path: string;
+  exists: boolean;
+  totalScanned: number;
+  hasRecentRequest: boolean;
+  latestRequestAt: string | null;
+  latestError: string | null;
+  recentEvents: CodexRouterLogEvent[];
+}
+
+export interface CodexRouteSummary {
+  id: string | null;
+  label: string | null;
+  enabled: boolean;
+  targetProviderId: string | null;
+  targetProviderName: string | null;
+  targetExists: boolean;
+  apiFormat: string | null;
+  baseUrl: string | null;
+  models: string[];
+  prefixes: string[];
+}
+
+export interface CodexRoutePlanDiagnostics {
+  providerId: string | null;
+  providerName: string | null;
+  exists: boolean;
+  routingEnabled: boolean;
+  routeCount: number;
+  enabledRouteCount: number;
+  defaultRouteId: string | null;
+  routeSummaries: CodexRouteSummary[];
+}
+
+export interface CodexMultiRouterDiagnostics {
+  generatedAt: string;
+  ready: boolean;
+  nextAction: string;
+  blockingIssues: string[];
+  warnings: string[];
+  checks: CodexDiagnosticCheck[];
+  proxyStatus: ProxyStatus;
+  takeover: ProxyTakeoverStatus;
+  liveConfig: CodexLiveConfigDiagnostics;
+  routerLog: CodexRouterLogDiagnostics;
+  routePlan: CodexRoutePlanDiagnostics;
+}
+
 export interface ProviderHealth {
   provider_id: string;
   app_type: string;

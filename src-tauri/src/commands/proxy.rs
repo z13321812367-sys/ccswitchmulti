@@ -3,6 +3,7 @@
 //! 提供前端调用的 API 接口
 
 use crate::error::AppError;
+use crate::provider::Provider;
 use crate::proxy::external_openai_api::{
     self, ExternalOpenAiApiProfileUpdate, ExternalOpenAiApiProfileView,
     ExternalOpenAiApiRuntimeStatusView, GeneratedExternalOpenAiApiKey,
@@ -10,6 +11,123 @@ use crate::proxy::external_openai_api::{
 use crate::proxy::types::*;
 use crate::proxy::{CircuitBreakerConfig, CircuitBreakerStats};
 use crate::store::AppState;
+use serde::Serialize;
+use serde_json::Value;
+use std::time::Duration;
+use tokio::net::TcpStream;
+use tokio::time::timeout;
+
+/// Codex MultiRouter 单项诊断状态。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexDiagnosticStatus {
+    Pass,
+    Warn,
+    Fail,
+    Info,
+}
+
+/// Codex MultiRouter 单项诊断结果。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexDiagnosticCheck {
+    pub id: String,
+    pub label: String,
+    pub status: CodexDiagnosticStatus,
+    pub detail: String,
+    pub evidence: Vec<String>,
+}
+
+/// `~/.codex/config.toml` 中与本地路由相关的现场配置摘要。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexLiveConfigDiagnostics {
+    pub path: String,
+    pub exists: bool,
+    pub parse_error: Option<String>,
+    pub model_provider: Option<String>,
+    pub active_base_url: Option<String>,
+    pub openai_base_url: Option<String>,
+    pub provider_base_url: Option<String>,
+    pub supports_websockets: Option<bool>,
+    pub wire_api: Option<String>,
+    pub model_catalog_json: Option<String>,
+    pub uses_builtin_openai_with_local_base: bool,
+    pub points_to_local_proxy: bool,
+}
+
+/// 单条 `codex-router.log` 事件的清洗后展示结构。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexRouterLogEvent {
+    pub timestamp: String,
+    pub event: String,
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub status: Option<String>,
+    pub error: Option<String>,
+    pub line: String,
+}
+
+/// Codex router 诊断日志的聚合摘要。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexRouterLogDiagnostics {
+    pub path: String,
+    pub exists: bool,
+    pub total_scanned: usize,
+    pub has_recent_request: bool,
+    pub latest_request_at: Option<String>,
+    pub latest_error: Option<String>,
+    pub recent_events: Vec<CodexRouterLogEvent>,
+}
+
+/// 单条 MultiRouter route 的可读摘要。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexRouteSummary {
+    pub id: Option<String>,
+    pub label: Option<String>,
+    pub enabled: bool,
+    pub target_provider_id: Option<String>,
+    pub target_provider_name: Option<String>,
+    pub target_exists: bool,
+    pub api_format: Option<String>,
+    pub base_url: Option<String>,
+    pub models: Vec<String>,
+    pub prefixes: Vec<String>,
+}
+
+/// MultiRouter provider 内 `codexRouting` 的摘要。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexRoutePlanDiagnostics {
+    pub provider_id: Option<String>,
+    pub provider_name: Option<String>,
+    pub exists: bool,
+    pub routing_enabled: bool,
+    pub route_count: usize,
+    pub enabled_route_count: usize,
+    pub default_route_id: Option<String>,
+    pub route_summaries: Vec<CodexRouteSummary>,
+}
+
+/// Codex MultiRouter 一键诊断的完整返回值。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexMultiRouterDiagnostics {
+    pub generated_at: String,
+    pub ready: bool,
+    pub next_action: String,
+    pub blocking_issues: Vec<String>,
+    pub warnings: Vec<String>,
+    pub checks: Vec<CodexDiagnosticCheck>,
+    pub proxy_status: ProxyStatus,
+    pub takeover: ProxyTakeoverStatus,
+    pub live_config: CodexLiveConfigDiagnostics,
+    pub router_log: CodexRouterLogDiagnostics,
+    pub route_plan: CodexRoutePlanDiagnostics,
+}
 
 /// 启动代理服务器（仅启动服务，不接管 Live 配置）
 #[tauri::command]
@@ -68,6 +186,774 @@ pub async fn set_proxy_takeover_for_app(
 #[tauri::command]
 pub async fn get_proxy_status(state: tauri::State<'_, AppState>) -> Result<ProxyStatus, String> {
     state.proxy_service.get_status().await
+}
+
+/// 运行 Codex MultiRouter 一键诊断。
+///
+/// 该命令只读取本机配置、探测本地代理端口和读取本地 router 日志；不会向真实上游发送
+/// `/v1/responses` POST，也不会改写 Codex/CCSwitch 配置。
+#[tauri::command]
+pub async fn diagnose_codex_multirouter(
+    state: tauri::State<'_, AppState>,
+    provider_id: Option<String>,
+) -> Result<CodexMultiRouterDiagnostics, String> {
+    let proxy_status = state.proxy_service.get_status().await?;
+    let proxy_config = state.proxy_service.get_config().await?;
+    let takeover = state.proxy_service.get_takeover_status().await?;
+    let live_taken_over = state
+        .proxy_service
+        .detect_takeover_in_live_config_for_app(&crate::app_config::AppType::Codex);
+
+    let probe_host = codex_diagnostic_connect_host(if proxy_status.address.trim().is_empty() {
+        &proxy_config.listen_address
+    } else {
+        &proxy_status.address
+    });
+    let probe_port = if proxy_status.port > 0 {
+        proxy_status.port
+    } else {
+        proxy_config.listen_port
+    };
+    let (socket_ok, socket_detail) = codex_probe_tcp(&probe_host, probe_port).await;
+    let (websocket_status, websocket_detail) =
+        codex_probe_websocket_fallback(&probe_host, probe_port).await;
+
+    let live_config = codex_live_config_diagnostics(probe_port);
+    let route_plan = codex_route_plan_diagnostics(&state, provider_id.as_deref())?;
+    let router_log = codex_router_log_diagnostics();
+
+    let mut checks = Vec::new();
+    checks.push(codex_check(
+        "proxy_running",
+        "本地代理进程",
+        if proxy_status.running {
+            CodexDiagnosticStatus::Pass
+        } else {
+            CodexDiagnosticStatus::Fail
+        },
+        if proxy_status.running {
+            "代理服务已运行。"
+        } else {
+            "代理服务未运行；Codex 不可能进入 MultiRouter。"
+        },
+        vec![format!(
+            "status={}:{} running={}",
+            proxy_status.address, proxy_status.port, proxy_status.running
+        )],
+    ));
+    checks.push(codex_check(
+        "socket_connect",
+        "本地端口可达",
+        if socket_ok {
+            CodexDiagnosticStatus::Pass
+        } else {
+            CodexDiagnosticStatus::Fail
+        },
+        socket_detail,
+        vec![format!("{probe_host}:{probe_port}")],
+    ));
+    checks.push(codex_check(
+        "websocket_fallback",
+        "Responses WebSocket 回退",
+        websocket_status,
+        websocket_detail,
+        vec!["GET /v1/responses + Upgrade: websocket".to_string()],
+    ));
+    checks.push(codex_check(
+        "codex_takeover",
+        "Codex live 接管",
+        if takeover.codex && live_taken_over {
+            CodexDiagnosticStatus::Pass
+        } else {
+            CodexDiagnosticStatus::Fail
+        },
+        if takeover.codex && live_taken_over {
+            "数据库接管状态和 live config 现场状态一致。"
+        } else if takeover.codex && !live_taken_over {
+            "数据库显示已接管，但 live config 现场没有指向本地 MultiRouter。"
+        } else {
+            "Codex 当前没有被 CC Switch MultiRouter 接管。"
+        },
+        vec![
+            format!("takeover.codex={}", takeover.codex),
+            format!("live_detected={live_taken_over}"),
+        ],
+    ));
+    checks.push(codex_check(
+        "live_model_provider",
+        "Codex provider 写法",
+        if live_config.model_provider.as_deref() == Some("custom") {
+            CodexDiagnosticStatus::Pass
+        } else if live_config.uses_builtin_openai_with_local_base {
+            CodexDiagnosticStatus::Fail
+        } else {
+            CodexDiagnosticStatus::Warn
+        },
+        if live_config.model_provider.as_deref() == Some("custom") {
+            "live config 使用 custom model_provider，符合本地 MultiRouter 接管要求。"
+        } else if live_config.uses_builtin_openai_with_local_base {
+            "live config 仍用内置 openai provider 指向本地地址，这会触发 Codex 官方 WebSocket/OpenAI 语义。"
+        } else {
+            "live config 当前不是 CC Switch MultiRouter custom provider。"
+        },
+        vec![
+            format!("model_provider={:?}", live_config.model_provider),
+            format!("openai_base_url={:?}", live_config.openai_base_url),
+        ],
+    ));
+    checks.push(codex_check(
+        "live_base_url",
+        "Codex base_url",
+        if live_config.points_to_local_proxy {
+            CodexDiagnosticStatus::Pass
+        } else {
+            CodexDiagnosticStatus::Fail
+        },
+        if live_config.points_to_local_proxy {
+            "active base_url 指向当前本地代理端口。"
+        } else {
+            "active base_url 没有指向当前本地代理端口；请求不会进入 MultiRouter。"
+        },
+        vec![format!("active_base_url={:?}", live_config.active_base_url)],
+    ));
+    checks.push(codex_check(
+        "live_websocket_disabled",
+        "Codex WebSocket 策略",
+        if live_config.supports_websockets == Some(false) {
+            CodexDiagnosticStatus::Pass
+        } else if live_config.supports_websockets == Some(true) {
+            CodexDiagnosticStatus::Fail
+        } else {
+            CodexDiagnosticStatus::Warn
+        },
+        if live_config.supports_websockets == Some(false) {
+            "live config 已禁用 Responses WebSocket，Codex 应直接走 HTTP Responses。"
+        } else if live_config.supports_websockets == Some(true) {
+            "live config 仍允许 Responses WebSocket，可能再次出现 WS 断开类错误。"
+        } else {
+            "live config 未显式声明 supports_websockets=false；建议重新接管写入 custom provider。"
+        },
+        vec![format!(
+            "supports_websockets={:?}",
+            live_config.supports_websockets
+        )],
+    ));
+    checks.push(codex_check(
+        "route_plan",
+        "MultiRouter 规则",
+        if route_plan.exists && route_plan.routing_enabled && route_plan.enabled_route_count > 0 {
+            CodexDiagnosticStatus::Pass
+        } else {
+            CodexDiagnosticStatus::Fail
+        },
+        if route_plan.exists && route_plan.routing_enabled && route_plan.enabled_route_count > 0 {
+            "已找到启用的 MultiRouter provider 和匹配规则。"
+        } else if !route_plan.exists {
+            "当前页面选择的 MultiRouter provider 在数据库中不存在。"
+        } else if !route_plan.routing_enabled {
+            "MultiRouter 入口已关闭。"
+        } else {
+            "MultiRouter 没有启用的 route。"
+        },
+        vec![
+            format!("provider_id={:?}", route_plan.provider_id),
+            format!(
+                "enabled_routes={}/{}",
+                route_plan.enabled_route_count, route_plan.route_count
+            ),
+        ],
+    ));
+    checks.push(codex_check(
+        "recent_router_events",
+        "近期路由日志",
+        if router_log.has_recent_request {
+            CodexDiagnosticStatus::Pass
+        } else {
+            CodexDiagnosticStatus::Warn
+        },
+        if router_log.has_recent_request {
+            "已看到近期请求进入 Codex router 转发链路。"
+        } else {
+            "未看到近期请求进入 Codex router；如果你刚刚在 Codex 发过请求，优先检查 live config 是否被接管。"
+        },
+        vec![
+            format!("log_exists={}", router_log.exists),
+            format!("events_scanned={}", router_log.total_scanned),
+        ],
+    ));
+    checks.push(codex_check(
+        "recent_router_error",
+        "近期路由错误",
+        if router_log.latest_error.is_some() {
+            CodexDiagnosticStatus::Fail
+        } else {
+            CodexDiagnosticStatus::Pass
+        },
+        router_log
+            .latest_error
+            .clone()
+            .unwrap_or_else(|| "未发现近期 router 错误事件。".to_string()),
+        vec![],
+    ));
+
+    let blocking_issues = checks
+        .iter()
+        .filter(|check| check.status == CodexDiagnosticStatus::Fail)
+        .map(|check| format!("{}：{}", check.label, check.detail))
+        .collect::<Vec<_>>();
+    let warnings = checks
+        .iter()
+        .filter(|check| check.status == CodexDiagnosticStatus::Warn)
+        .map(|check| format!("{}：{}", check.label, check.detail))
+        .collect::<Vec<_>>();
+    let ready = blocking_issues.is_empty();
+    let next_action = codex_next_action(&checks, &router_log);
+
+    Ok(CodexMultiRouterDiagnostics {
+        generated_at: chrono::Local::now().to_rfc3339(),
+        ready,
+        next_action,
+        blocking_issues,
+        warnings,
+        checks,
+        proxy_status,
+        takeover,
+        live_config,
+        router_log,
+        route_plan,
+    })
+}
+
+/// 构造一个诊断检查项，统一字符串转换和证据字段。
+fn codex_check(
+    id: &str,
+    label: &str,
+    status: CodexDiagnosticStatus,
+    detail: impl Into<String>,
+    evidence: Vec<String>,
+) -> CodexDiagnosticCheck {
+    CodexDiagnosticCheck {
+        id: id.to_string(),
+        label: label.to_string(),
+        status,
+        detail: detail.into(),
+        evidence,
+    }
+}
+
+/// 根据监听地址生成本机可连接地址；`0.0.0.0` 只能监听，不能作为客户端目标。
+fn codex_diagnostic_connect_host(listen_address: &str) -> String {
+    match listen_address.trim() {
+        "" | "0.0.0.0" => "127.0.0.1".to_string(),
+        "::" => "::1".to_string(),
+        value => value.trim_matches(['[', ']']).to_string(),
+    }
+}
+
+/// 将 host 转成可拼接进 HTTP URL 的形式，IPv6 地址需要方括号。
+fn codex_diagnostic_url_host(host: &str) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
+}
+
+/// 探测本地代理 TCP 端口是否可连接。
+async fn codex_probe_tcp(host: &str, port: u16) -> (bool, String) {
+    match timeout(Duration::from_secs(2), TcpStream::connect((host, port))).await {
+        Ok(Ok(_stream)) => (true, "TCP 连接成功。".to_string()),
+        Ok(Err(err)) => (false, format!("TCP 连接失败：{err}")),
+        Err(_) => (false, "TCP 连接超时。".to_string()),
+    }
+}
+
+/// 探测本地代理对 Responses WebSocket 是否返回 426 回退。
+async fn codex_probe_websocket_fallback(host: &str, port: u16) -> (CodexDiagnosticStatus, String) {
+    let url = format!(
+        "http://{}:{}/v1/responses",
+        codex_diagnostic_url_host(host),
+        port
+    );
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+    {
+        Ok(client) => client,
+        Err(err) => {
+            return (
+                CodexDiagnosticStatus::Warn,
+                format!("创建本地探针客户端失败：{err}"),
+            )
+        }
+    };
+    let response = client
+        .get(url)
+        .header(reqwest::header::CONNECTION, "Upgrade")
+        .header(reqwest::header::UPGRADE, "websocket")
+        .header("OpenAI-Beta", "responses_websockets=2026-02-06")
+        .send()
+        .await;
+
+    match response {
+        Ok(response) if response.status().as_u16() == 426 => (
+            CodexDiagnosticStatus::Pass,
+            "本地代理对 Responses WebSocket 返回 426，HTTP 回退路径正常。".to_string(),
+        ),
+        Ok(response) => (
+            CodexDiagnosticStatus::Warn,
+            format!(
+                "本地代理 WebSocket 探针返回 HTTP {}，预期是 426。",
+                response.status().as_u16()
+            ),
+        ),
+        Err(err) => (
+            CodexDiagnosticStatus::Fail,
+            format!("本地代理 WebSocket 探针失败：{err}"),
+        ),
+    }
+}
+
+/// 读取并解析 Codex live config 中 MultiRouter 必需字段。
+fn codex_live_config_diagnostics(proxy_port: u16) -> CodexLiveConfigDiagnostics {
+    let path = crate::codex_config::get_codex_config_path();
+    let path_text = path.display().to_string();
+    let exists = path.exists();
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) => {
+            return CodexLiveConfigDiagnostics {
+                path: path_text,
+                exists,
+                parse_error: Some(format!("读取失败：{err}")),
+                model_provider: None,
+                active_base_url: None,
+                openai_base_url: None,
+                provider_base_url: None,
+                supports_websockets: None,
+                wire_api: None,
+                model_catalog_json: None,
+                uses_builtin_openai_with_local_base: false,
+                points_to_local_proxy: false,
+            };
+        }
+    };
+
+    let parsed = match text.parse::<toml::Value>() {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            return CodexLiveConfigDiagnostics {
+                path: path_text,
+                exists,
+                parse_error: Some(format!("TOML 解析失败：{err}")),
+                model_provider: None,
+                active_base_url: crate::codex_config::extract_codex_base_url(&text),
+                openai_base_url: None,
+                provider_base_url: None,
+                supports_websockets: None,
+                wire_api: None,
+                model_catalog_json: None,
+                uses_builtin_openai_with_local_base: false,
+                points_to_local_proxy: false,
+            };
+        }
+    };
+
+    let model_provider = parsed
+        .get("model_provider")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let openai_base_url = parsed
+        .get("openai_base_url")
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string);
+    let active_provider_table = model_provider.as_deref().and_then(|provider| {
+        parsed
+            .get("model_providers")
+            .and_then(|providers| providers.get(provider))
+    });
+    let provider_base_url = active_provider_table
+        .and_then(|provider| provider.get("base_url"))
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string);
+    let active_base_url = provider_base_url
+        .clone()
+        .or_else(|| match model_provider.as_deref() {
+            None | Some("openai") => openai_base_url.clone(),
+            _ => None,
+        })
+        .or_else(|| crate::codex_config::extract_codex_base_url(&text));
+    let supports_websockets = active_provider_table
+        .and_then(|provider| provider.get("supports_websockets"))
+        .and_then(|value| value.as_bool());
+    let wire_api = active_provider_table
+        .and_then(|provider| provider.get("wire_api"))
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string);
+    let model_catalog_json = active_provider_table
+        .and_then(|provider| provider.get("model_catalog_json"))
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string);
+    let uses_builtin_openai_with_local_base = model_provider
+        .as_deref()
+        .is_none_or(|provider| provider.eq_ignore_ascii_case("openai"))
+        && openai_base_url
+            .as_deref()
+            .is_some_and(|url| codex_url_points_to_local_proxy(url, proxy_port));
+    let points_to_local_proxy = active_base_url
+        .as_deref()
+        .is_some_and(|url| codex_url_points_to_local_proxy(url, proxy_port));
+
+    CodexLiveConfigDiagnostics {
+        path: path_text,
+        exists,
+        parse_error: None,
+        model_provider,
+        active_base_url,
+        openai_base_url,
+        provider_base_url,
+        supports_websockets,
+        wire_api,
+        model_catalog_json,
+        uses_builtin_openai_with_local_base,
+        points_to_local_proxy,
+    }
+}
+
+/// 判断 URL 是否指向当前本地代理端口。
+fn codex_url_points_to_local_proxy(url: &str, proxy_port: u16) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    if parsed.scheme() != "http" {
+        return false;
+    }
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    let is_local_host = matches!(host, "127.0.0.1" | "localhost" | "::1");
+    is_local_host && parsed.port_or_known_default() == Some(proxy_port)
+}
+
+/// 读取当前页面选择的 MultiRouter provider，并汇总 `codexRouting` 规则。
+fn codex_route_plan_diagnostics(
+    state: &AppState,
+    provider_id: Option<&str>,
+) -> Result<CodexRoutePlanDiagnostics, String> {
+    let selected_provider_id = provider_id
+        .map(ToString::to_string)
+        .or_else(|| state.db.get_current_provider("codex").ok().flatten());
+    let provider = selected_provider_id
+        .as_deref()
+        .map(|id| {
+            state
+                .db
+                .get_provider_by_id(id, "codex")
+                .map_err(|err| format!("读取 Codex provider 失败：{err}"))
+        })
+        .transpose()?
+        .flatten();
+
+    let Some(provider) = provider else {
+        return Ok(CodexRoutePlanDiagnostics {
+            provider_id: selected_provider_id,
+            provider_name: None,
+            exists: false,
+            routing_enabled: false,
+            route_count: 0,
+            enabled_route_count: 0,
+            default_route_id: None,
+            route_summaries: Vec::new(),
+        });
+    };
+
+    let routing = provider.settings_config.get("codexRouting");
+    let routing_enabled = routing
+        .and_then(|value| value.get("enabled"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
+    let routes = routing
+        .and_then(|value| value.get("routes"))
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let default_route_id = routing
+        .and_then(|value| {
+            value
+                .get("defaultRouteId")
+                .or_else(|| value.get("default_route_id"))
+        })
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string);
+    let route_summaries = routes
+        .iter()
+        .map(|route| codex_route_summary(state, route))
+        .collect::<Vec<_>>();
+    let enabled_route_count = route_summaries.iter().filter(|route| route.enabled).count();
+
+    Ok(CodexRoutePlanDiagnostics {
+        provider_id: Some(provider.id),
+        provider_name: Some(provider.name),
+        exists: true,
+        routing_enabled,
+        route_count: route_summaries.len(),
+        enabled_route_count,
+        default_route_id,
+        route_summaries,
+    })
+}
+
+/// 将一条 route JSON 摘要成前端状态页可展示的信息。
+fn codex_route_summary(state: &AppState, route: &Value) -> CodexRouteSummary {
+    let target_provider_id = codex_route_target_provider_id(route);
+    let target_provider = target_provider_id
+        .as_deref()
+        .and_then(|id| state.db.get_provider_by_id(id, "codex").ok().flatten());
+    let upstream = route.get("upstream").unwrap_or(route);
+    let api_format = target_provider
+        .as_ref()
+        .and_then(provider_api_format)
+        .or_else(|| codex_first_json_string(upstream, &["wire_api", "wireApi", "apiFormat"]))
+        .or_else(|| codex_first_json_string(route, &["wire_api", "wireApi", "apiFormat"]));
+    let base_url = target_provider
+        .as_ref()
+        .and_then(provider_base_url)
+        .or_else(|| {
+            codex_first_json_string(upstream, &["baseUrl", "baseURL", "base_url"])
+                .or_else(|| codex_first_json_string(route, &["baseUrl", "baseURL", "base_url"]))
+        });
+    let match_config = route.get("match").unwrap_or(route);
+
+    CodexRouteSummary {
+        id: codex_first_json_string(route, &["id"]),
+        label: codex_first_json_string(route, &["label", "name"]),
+        enabled: route
+            .get("enabled")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true),
+        target_provider_name: target_provider
+            .as_ref()
+            .map(|provider| provider.name.clone()),
+        target_exists: target_provider.is_some(),
+        target_provider_id,
+        api_format,
+        base_url,
+        models: codex_json_string_array(match_config, "models"),
+        prefixes: codex_json_string_array(match_config, "prefixes"),
+    }
+}
+
+/// 读取 route 引用的真实目标 provider id，兼容历史字段名。
+fn codex_route_target_provider_id(route: &Value) -> Option<String> {
+    let upstream = route.get("upstream").unwrap_or(route);
+    codex_first_json_string(
+        upstream,
+        &[
+            "targetProviderId",
+            "target_provider_id",
+            "providerId",
+            "provider_id",
+            "upstreamProviderId",
+            "upstream_provider_id",
+            "provider",
+        ],
+    )
+    .or_else(|| {
+        codex_first_json_string(
+            route,
+            &[
+                "targetProviderId",
+                "target_provider_id",
+                "providerId",
+                "provider_id",
+                "upstreamProviderId",
+                "upstream_provider_id",
+                "provider",
+            ],
+        )
+    })
+}
+
+/// 从 provider 配置中提取可读 base_url。
+fn provider_base_url(provider: &Provider) -> Option<String> {
+    codex_first_json_string(
+        &provider.settings_config,
+        &["base_url", "baseUrl", "baseURL"],
+    )
+    .or_else(|| {
+        provider
+            .settings_config
+            .get("config")
+            .and_then(|value| value.as_str())
+            .and_then(crate::codex_config::extract_codex_base_url)
+    })
+}
+
+/// 从 provider 配置和 meta 中提取 API 格式。
+fn provider_api_format(provider: &Provider) -> Option<String> {
+    provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.api_format.clone())
+        .or_else(|| {
+            codex_first_json_string(
+                &provider.settings_config,
+                &["apiFormat", "api_format", "wireApi", "wire_api"],
+            )
+        })
+}
+
+/// 读取第一个非空字符串字段。
+fn codex_first_json_string(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        value
+            .get(*key)
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+    })
+}
+
+/// 读取字符串数组字段，并过滤空值。
+fn codex_json_string_array(value: &Value, key: &str) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// 读取 Codex router 本地诊断日志，并提取最近事件和错误。
+fn codex_router_log_diagnostics() -> CodexRouterLogDiagnostics {
+    let path = crate::config::get_app_config_dir()
+        .join("logs")
+        .join("codex-router.log");
+    let path_text = path.display().to_string();
+    let exists = path.exists();
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(_) => {
+            return CodexRouterLogDiagnostics {
+                path: path_text,
+                exists,
+                total_scanned: 0,
+                has_recent_request: false,
+                latest_request_at: None,
+                latest_error: None,
+                recent_events: Vec::new(),
+            };
+        }
+    };
+
+    let mut recent_events = text
+        .lines()
+        .rev()
+        .take(200)
+        .filter_map(codex_parse_router_log_line)
+        .collect::<Vec<_>>();
+    let total_scanned = recent_events.len();
+    let latest_request_at = recent_events
+        .iter()
+        .find(|event| {
+            matches!(
+                event.event.as_str(),
+                "route_resolved" | "request_prepared" | "upstream_send" | "upstream_status"
+            )
+        })
+        .map(|event| event.timestamp.clone());
+    let latest_error = recent_events
+        .iter()
+        .find(|event| event.event.contains("error"))
+        .and_then(|event| event.error.clone().or_else(|| Some(event.line.clone())));
+    let has_recent_request = latest_request_at.is_some();
+    recent_events.truncate(30);
+
+    CodexRouterLogDiagnostics {
+        path: path_text,
+        exists,
+        total_scanned,
+        has_recent_request,
+        latest_request_at,
+        latest_error,
+        recent_events,
+    }
+}
+
+/// 解析一行 `codex-router.log`，字段均为已清洗的 key=value 片段。
+fn codex_parse_router_log_line(line: &str) -> Option<CodexRouterLogEvent> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let (timestamp, payload) = line
+        .split_once(" event=")
+        .map(|(timestamp, payload)| (timestamp.to_string(), format!("event={payload}")))
+        .unwrap_or_else(|| ("<unknown>".to_string(), line.to_string()));
+    let fields = payload
+        .split_whitespace()
+        .filter_map(|part| part.split_once('='))
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect::<std::collections::HashMap<_, _>>();
+    let event = fields.get("event")?.clone();
+    let error = fields
+        .get("error")
+        .cloned()
+        .or_else(|| fields.get("reason").cloned())
+        .or_else(|| fields.get("body_summary").cloned());
+
+    Some(CodexRouterLogEvent {
+        timestamp,
+        event,
+        model: fields.get("model").cloned(),
+        provider: fields
+            .get("provider")
+            .cloned()
+            .or_else(|| fields.get("effective_provider").cloned()),
+        status: fields.get("status").cloned(),
+        error,
+        line: line.to_string(),
+    })
+}
+
+/// 根据失败/告警项生成最短下一步动作。
+fn codex_next_action(
+    checks: &[CodexDiagnosticCheck],
+    router_log: &CodexRouterLogDiagnostics,
+) -> String {
+    if let Some(check) = checks
+        .iter()
+        .find(|check| check.status == CodexDiagnosticStatus::Fail)
+    {
+        return match check.id.as_str() {
+            "proxy_running" => "先在 CC Switch 开启本地代理服务。".to_string(),
+            "socket_connect" => "本地进程已记录为运行但端口不可达，重启 CC Switch 本地代理。".to_string(),
+            "codex_takeover" => "把 Codex 当前 provider 切回 MultiRouter 并重新启用 Codex 接管。"
+                .to_string(),
+            "live_model_provider" | "live_base_url" | "live_websocket_disabled" => {
+                "重新启用 MultiRouter provider，让 CC Switch 写入 custom provider + supports_websockets=false。"
+                    .to_string()
+            }
+            "route_plan" => "编辑 MultiRouter provider，启用入口并保留至少一条 route。".to_string(),
+            "recent_router_error" => {
+                "请求已经进入 MultiRouter，优先展开近期 router 日志定位上游或转换层错误。"
+                    .to_string()
+            }
+            _ => check.detail.clone(),
+        };
+    }
+    if !router_log.has_recent_request {
+        return "配置看起来可用；请在 Codex 发起一次请求，再回到这里重新运行 Debug 检查。"
+            .to_string();
+    }
+    "链路检查通过；如 Codex 仍报错，下一步看近期 router 事件里的上游状态和转换错误。".to_string()
 }
 
 /// 获取代理配置

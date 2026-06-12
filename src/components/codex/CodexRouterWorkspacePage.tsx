@@ -1,33 +1,44 @@
 import { useMemo, useState } from "react";
 import {
   Activity,
+  AlertTriangle,
   ArrowRight,
+  Bug,
   CheckCircle2,
   Clipboard,
   Database,
   FileClock,
   GitFork,
   GitBranch,
+  Info,
   Layers3,
   Pencil,
   Play,
   Plus,
   RadioTower,
+  RefreshCw,
   Route,
   Server,
   Settings2,
   ShieldCheck,
   Trash2,
   Wand2,
+  XCircle,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { proxyApi } from "@/lib/api/proxy";
 import { useRequestLogs } from "@/lib/query/usage";
 import { cn } from "@/lib/utils";
 import type { Provider } from "@/types";
 import type { RequestLog } from "@/types/usage";
-import type { ProxyStatus } from "@/types/proxy";
+import type {
+  CodexDiagnosticCheck,
+  CodexDiagnosticStatus,
+  CodexMultiRouterDiagnostics,
+  ProxyStatus,
+} from "@/types/proxy";
 
 type WorkspaceTab =
   | "overview"
@@ -1139,6 +1150,10 @@ function StatusTab({
     pageSize: 500,
     options: { refetchInterval: 5000 },
   });
+  const [diagnostics, setDiagnostics] =
+    useState<CodexMultiRouterDiagnostics | null>(null);
+  const [diagnoseError, setDiagnoseError] = useState<string | null>(null);
+  const [isDiagnosing, setIsDiagnosing] = useState(false);
   const logs = requestLogs?.data ?? [];
   const proxyLogs = logs.filter(
     (log) => (log.dataSource ?? "proxy") === "proxy",
@@ -1204,6 +1219,22 @@ function StatusTab({
       : "",
   ].filter(Boolean);
 
+  /// 一键诊断只读取本地现场和 router 日志，不向真实上游发起模型请求。
+  async function runDiagnostics() {
+    setIsDiagnosing(true);
+    setDiagnoseError(null);
+    try {
+      const result = await proxyApi.diagnoseCodexMultiRouter(
+        selectedPlan?.id ?? null,
+      );
+      setDiagnostics(result);
+    } catch (error) {
+      setDiagnoseError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsDiagnosing(false);
+    }
+  }
+
   return (
     <div className="space-y-4">
       <section className="rounded-lg border border-slate-700 bg-slate-950/40 p-4">
@@ -1212,16 +1243,32 @@ function StatusTab({
           title="链路状态"
           detail="默认先看这里：只有监听、Codex 接管、路由入口和至少一条匹配规则都通过，Codex 请求才会进入 MultiRouter。"
           action={
-            selectedPlan ? (
+            <div className="flex flex-wrap gap-2">
               <Button
                 size="sm"
-                onClick={() => onEditPlan(selectedPlan, "打开多路路由配置")}
-                className="gap-2 bg-blue-600 hover:bg-blue-500"
+                variant="outline"
+                onClick={runDiagnostics}
+                disabled={isDiagnosing}
+                className="gap-2 border-amber-500/50 bg-amber-500/10 text-amber-100 hover:bg-amber-500/20"
               >
-                <Pencil className="h-4 w-4" />
-                编辑配置
+                {isDiagnosing ? (
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Bug className="h-4 w-4" />
+                )}
+                Debug 检查
               </Button>
-            ) : null
+              {selectedPlan ? (
+                <Button
+                  size="sm"
+                  onClick={() => onEditPlan(selectedPlan, "打开多路路由配置")}
+                  className="gap-2 bg-blue-600 hover:bg-blue-500"
+                >
+                  <Pencil className="h-4 w-4" />
+                  编辑配置
+                </Button>
+              ) : null}
+            </div>
           }
         />
         <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
@@ -1292,6 +1339,12 @@ function StatusTab({
             value={proxyStatus?.last_error || latestLog?.errorMessage || "无"}
           />
         </div>
+        <DiagnosticsPanel
+          diagnostics={diagnostics}
+          isLoading={isDiagnosing}
+          error={diagnoseError}
+          onRun={runDiagnostics}
+        />
       </section>
 
       <section className="rounded-lg border border-blue-700/40 bg-blue-950/15 p-4">
@@ -1561,6 +1614,359 @@ function RecordsTab({
       </div>
     </section>
   );
+}
+
+/// MultiRouter Debug 面板展示后端真实检查结果，重点区分“没进入本地路由”和“进入后上游失败”。
+function DiagnosticsPanel({
+  diagnostics,
+  isLoading,
+  error,
+  onRun,
+}: {
+  diagnostics: CodexMultiRouterDiagnostics | null;
+  isLoading: boolean;
+  error: string | null;
+  onRun: () => void;
+}) {
+  const failedChecks =
+    diagnostics?.checks.filter((check) => check.status === "fail") ?? [];
+  const warningChecks =
+    diagnostics?.checks.filter((check) => check.status === "warn") ?? [];
+
+  return (
+    <div className="mt-4 rounded-lg border border-amber-600/40 bg-amber-950/10 p-4">
+      <SectionHeader
+        icon={Bug}
+        title="Debug 检查"
+        detail="只检查本机监听、Codex live config、WebSocket 回退、路由规则和 router 日志，不会向真实上游发送模型请求。"
+        action={
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={onRun}
+            disabled={isLoading}
+            className="gap-2 border-amber-500/50 bg-amber-500/10 text-amber-100 hover:bg-amber-500/20"
+          >
+            {isLoading ? (
+              <RefreshCw className="h-4 w-4 animate-spin" />
+            ) : (
+              <RefreshCw className="h-4 w-4" />
+            )}
+            重新检查
+          </Button>
+        }
+      />
+
+      {error && (
+        <div className="mt-3 rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-100">
+          {error}
+        </div>
+      )}
+
+      {!diagnostics && !error && (
+        <div className="mt-3 rounded-lg border border-slate-700 bg-slate-950/50 p-3 text-sm leading-6 text-slate-300">
+          尚未运行 Debug 检查。点击按钮后会读取真实 Codex live
+          配置和本地路由日志，用来确认请求是否进入 MultiRouter。
+        </div>
+      )}
+
+      {diagnostics && (
+        <div className="mt-4 space-y-4">
+          <div
+            className={cn(
+              "rounded-lg border p-3",
+              diagnostics.ready
+                ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-100"
+                : "border-rose-500/40 bg-rose-500/10 text-rose-100",
+            )}
+          >
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold">
+                  {diagnostics.ready ? "关键链路通过" : "发现阻塞项"}
+                </div>
+                <div className="mt-1 text-xs leading-5 opacity-80">
+                  {diagnostics.nextAction}
+                </div>
+              </div>
+              <Badge
+                className={cn(
+                  "border",
+                  diagnostics.ready
+                    ? "border-emerald-500/50 bg-emerald-500/15 text-emerald-100"
+                    : "border-rose-500/50 bg-rose-500/15 text-rose-100",
+                )}
+              >
+                {diagnostics.generatedAt}
+              </Badge>
+            </div>
+          </div>
+
+          {(failedChecks.length > 0 || warningChecks.length > 0) && (
+            <div className="grid gap-3 md:grid-cols-2">
+              {failedChecks.length > 0 && (
+                <DebugIssueList
+                  title="阻塞项"
+                  tone="fail"
+                  items={diagnostics.blockingIssues}
+                />
+              )}
+              {warningChecks.length > 0 && (
+                <DebugIssueList
+                  title="警告"
+                  tone="warn"
+                  items={diagnostics.warnings}
+                />
+              )}
+            </div>
+          )}
+
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {diagnostics.checks.map((check) => (
+              <DiagnosticCheckCard key={check.id} check={check} />
+            ))}
+          </div>
+
+          <div className="grid gap-3 text-sm xl:grid-cols-3">
+            <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+              <div className="mb-3 flex items-center gap-2 font-semibold text-slate-100">
+                <Settings2 className="h-4 w-4 text-blue-300" />
+                Codex Live Config
+              </div>
+              <div className="space-y-2">
+                <DetailRow
+                  label="配置文件"
+                  value={diagnostics.liveConfig.path}
+                />
+                <DetailRow
+                  label="model_provider"
+                  value={diagnostics.liveConfig.modelProvider ?? "未设置"}
+                />
+                <DetailRow
+                  label="active base_url"
+                  value={diagnostics.liveConfig.activeBaseUrl ?? "未设置"}
+                />
+                <DetailRow
+                  label="supports_websockets"
+                  value={String(diagnostics.liveConfig.supportsWebsockets)}
+                />
+                <DetailRow
+                  label="wire_api"
+                  value={diagnostics.liveConfig.wireApi ?? "未设置"}
+                />
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+              <div className="mb-3 flex items-center gap-2 font-semibold text-slate-100">
+                <Route className="h-4 w-4 text-emerald-300" />
+                Route Plan
+              </div>
+              <div className="space-y-2">
+                <DetailRow
+                  label="Provider"
+                  value={
+                    diagnostics.routePlan.providerName ??
+                    diagnostics.routePlan.providerId ??
+                    "未找到"
+                  }
+                />
+                <DetailRow
+                  label="入口状态"
+                  value={
+                    diagnostics.routePlan.routingEnabled ? "启用" : "关闭"
+                  }
+                />
+                <DetailRow
+                  label="启用规则"
+                  value={`${diagnostics.routePlan.enabledRouteCount} / ${diagnostics.routePlan.routeCount}`}
+                />
+                <DetailRow
+                  label="默认路由"
+                  value={diagnostics.routePlan.defaultRouteId ?? "未设置"}
+                />
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-slate-700 bg-slate-950/50 p-3">
+              <div className="mb-3 flex items-center gap-2 font-semibold text-slate-100">
+                <FileClock className="h-4 w-4 text-amber-300" />
+                Router Log
+              </div>
+              <div className="space-y-2">
+                <DetailRow
+                  label="日志文件"
+                  value={diagnostics.routerLog.exists ? "存在" : "不存在"}
+                />
+                <DetailRow
+                  label="已扫描事件"
+                  value={`${diagnostics.routerLog.totalScanned}`}
+                />
+                <DetailRow
+                  label="最近请求"
+                  value={diagnostics.routerLog.latestRequestAt ?? "无"}
+                />
+                <DetailRow
+                  label="最近错误"
+                  value={diagnostics.routerLog.latestError ?? "无"}
+                />
+              </div>
+            </div>
+          </div>
+
+          {diagnostics.routePlan.routeSummaries.length > 0 && (
+            <div className="overflow-hidden rounded-lg border border-slate-700">
+              <div className="grid grid-cols-[1fr_1fr_0.8fr_0.8fr] gap-2 bg-slate-900/80 px-3 py-2 text-xs font-semibold text-slate-300">
+                <span>规则</span>
+                <span>目标 Provider</span>
+                <span>接口</span>
+                <span>模型</span>
+              </div>
+              {diagnostics.routePlan.routeSummaries.map((route, index) => (
+                <div
+                  key={`${route.id ?? index}-${route.targetProviderId ?? "inline"}`}
+                  className="grid grid-cols-[1fr_1fr_0.8fr_0.8fr] gap-2 border-t border-slate-800 px-3 py-2 text-xs text-slate-300"
+                >
+                  <span className="truncate">
+                    {route.label ?? route.id ?? `规则 ${index + 1}`}
+                    {route.enabled ? "" : "（停用）"}
+                  </span>
+                  <span className="truncate">
+                    {route.targetProviderName ??
+                      route.targetProviderId ??
+                      "内联配置"}
+                    {route.targetProviderId && !route.targetExists
+                      ? "（不存在）"
+                      : ""}
+                  </span>
+                  <span className="truncate">{route.apiFormat ?? "跟随"}</span>
+                  <span className="truncate">
+                    {[...route.models, ...route.prefixes.map((prefix) => `${prefix}*`)]
+                      .slice(0, 3)
+                      .join(", ") || "默认"}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {diagnostics.routerLog.recentEvents.length > 0 && (
+            <div className="overflow-hidden rounded-lg border border-slate-700">
+              <div className="grid grid-cols-[1fr_0.9fr_0.9fr_0.6fr_2fr] gap-2 bg-slate-900/80 px-3 py-2 text-xs font-semibold text-slate-300">
+                <span>时间</span>
+                <span>事件</span>
+                <span>Provider</span>
+                <span>状态</span>
+                <span>摘要</span>
+              </div>
+              {diagnostics.routerLog.recentEvents.slice(0, 12).map((event) => (
+                <div
+                  key={`${event.timestamp}-${event.event}-${event.line}`}
+                  className="grid grid-cols-[1fr_0.9fr_0.9fr_0.6fr_2fr] gap-2 border-t border-slate-800 px-3 py-2 text-xs text-slate-300"
+                >
+                  <span className="truncate">{event.timestamp}</span>
+                  <span className="truncate font-mono">{event.event}</span>
+                  <span className="truncate">{event.provider ?? "-"}</span>
+                  <span className="truncate">{event.status ?? "-"}</span>
+                  <span className="truncate" title={event.line}>
+                    {event.error ?? event.model ?? event.line}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/// Debug 阻塞项/警告列表，避免用户在检查卡片里逐项翻找最关键结论。
+function DebugIssueList({
+  title,
+  tone,
+  items,
+}: {
+  title: string;
+  tone: "fail" | "warn";
+  items: string[];
+}) {
+  return (
+    <div
+      className={cn(
+        "rounded-lg border p-3 text-sm",
+        tone === "fail"
+          ? "border-rose-500/40 bg-rose-500/10 text-rose-100"
+          : "border-amber-500/40 bg-amber-500/10 text-amber-100",
+      )}
+    >
+      <div className="mb-2 font-semibold">{title}</div>
+      <div className="space-y-1 text-xs leading-5 opacity-85">
+        {items.map((item) => (
+          <div key={item}>{item}</div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/// 单个 Debug 检查项卡片，展示状态、说明和后端返回的关键证据。
+function DiagnosticCheckCard({ check }: { check: CodexDiagnosticCheck }) {
+  const meta = diagnosticStatusMeta(check.status);
+  const Icon = meta.icon;
+
+  return (
+    <div className={cn("rounded-lg border p-3", meta.className)}>
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="truncate text-sm font-semibold">{check.label}</div>
+          <div className="mt-1 text-xs leading-5 opacity-80">
+            {check.detail}
+          </div>
+        </div>
+        <Icon className="h-4 w-4 shrink-0 opacity-85" />
+      </div>
+      {check.evidence.length > 0 && (
+        <div className="mt-2 space-y-1 font-mono text-[11px] opacity-70">
+          {check.evidence.slice(0, 3).map((item) => (
+            <div key={item} className="truncate" title={item}>
+              {item}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/// 将后端诊断状态映射成 UI 颜色和图标。
+function diagnosticStatusMeta(status: CodexDiagnosticStatus): {
+  icon: React.ComponentType<{ className?: string }>;
+  className: string;
+} {
+  switch (status) {
+    case "pass":
+      return {
+        icon: CheckCircle2,
+        className: "border-emerald-500/40 bg-emerald-500/10 text-emerald-100",
+      };
+    case "warn":
+      return {
+        icon: AlertTriangle,
+        className: "border-amber-500/40 bg-amber-500/10 text-amber-100",
+      };
+    case "fail":
+      return {
+        icon: XCircle,
+        className: "border-rose-500/40 bg-rose-500/10 text-rose-100",
+      };
+    case "info":
+    default:
+      return {
+        icon: Info,
+        className: "border-blue-500/40 bg-blue-500/10 text-blue-100",
+      };
+  }
 }
 
 /// 状态卡用于表达在线/离线这类二值信号，避免用户在长文本里找关键状态。
