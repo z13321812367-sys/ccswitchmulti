@@ -79,6 +79,7 @@ export interface CodexLiveConfigDiagnostics {
 export interface CodexRouterLogEvent {
   timestamp: string;
   event: string;
+  routeId: string | null;
   model: string | null;
   provider: string | null;
   outerProvider: string | null;
@@ -135,6 +136,13 @@ export interface CodexMultiRouterDiagnostics {
   liveConfig: CodexLiveConfigDiagnostics;
   routerLog: CodexRouterLogDiagnostics;
   routePlan: CodexRoutePlanDiagnostics;
+}
+
+export interface CodexHistoryProviderBucketSyncOutcome {
+  sourceProviderIds: string[];
+  migratedJsonlFiles: number;
+  migratedStateRows: number;
+  skippedReason: string | null;
 }
 
 export interface ProviderHealth {

@@ -14,6 +14,7 @@ use crate::settings::{
 };
 use chrono::{Local, Utc};
 use rusqlite::{backup::Backup, params_from_iter, Connection};
+use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashSet};
@@ -25,6 +26,8 @@ use toml_edit::DocumentMut;
 
 const MIGRATION_NAME: &str = "codex-history-provider-migration-v1";
 const OPENAI_HISTORY_MIGRATION_NAME: &str = "codex-history-openai-provider-migration-v2";
+const MULTIROUTER_CUSTOM_HISTORY_SYNC_NAME: &str =
+    "codex-history-multirouter-custom-provider-sync-v1";
 const CODEX_STATE_DB_FILENAME: &str = "state_5.sqlite";
 const OPENAI_CODEX_MODEL_PROVIDER_ID: &str = "openai";
 const LEGACY_CC_SWITCH_CODEX_MODEL_PROVIDER_ID: &str = "ccswitch";
@@ -88,7 +91,8 @@ const CC_SWITCH_OPENAI_HISTORY_SOURCE_PROVIDER_IDS: &[&str] = &[
     "codex_model_router_v2",
 ];
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CodexHistoryProviderBucketMigrationOutcome {
     pub source_provider_ids: Vec<String>,
     pub migrated_jsonl_files: usize,
@@ -202,6 +206,50 @@ pub fn maybe_migrate_codex_openai_history_provider_bucket(
 
     Ok(CodexHistoryProviderBucketMigrationOutcome {
         source_provider_ids: source_provider_ids_vec,
+        migrated_jsonl_files,
+        migrated_state_rows,
+        skipped_reason: None,
+    })
+}
+
+/// 显式把 Codex 历史同步到 MultiRouter 运行时使用的 `custom` provider 桶。
+///
+/// MultiRouter 不能再使用内置 `openai` provider，否则 Codex 会重新走官方
+/// OpenAI/WebSocket 语义；因此历史可见性只能通过用户主动触发的 provider 桶同步解决。
+pub fn sync_codex_history_provider_bucket_to_multirouter(
+    db: &Database,
+) -> Result<CodexHistoryProviderBucketMigrationOutcome, AppError> {
+    let mut source_provider_ids = collect_source_model_provider_ids(db)?;
+    source_provider_ids.insert(OPENAI_CODEX_MODEL_PROVIDER_ID.to_string());
+    for provider_id in CC_SWITCH_OPENAI_HISTORY_SOURCE_PROVIDER_IDS {
+        source_provider_ids.insert((*provider_id).to_string());
+    }
+    source_provider_ids.remove(CC_SWITCH_CODEX_MODEL_PROVIDER_ID);
+
+    if source_provider_ids.is_empty() {
+        return Ok(CodexHistoryProviderBucketMigrationOutcome {
+            skipped_reason: Some("no_source_provider_ids".to_string()),
+            ..Default::default()
+        });
+    }
+
+    let backup_root = multirouter_custom_history_sync_backup_root();
+    let codex_dir = get_codex_config_dir();
+    let migrated_jsonl_files = migrate_codex_jsonl_files_to_target(
+        &codex_dir,
+        &source_provider_ids,
+        &backup_root,
+        CC_SWITCH_CODEX_MODEL_PROVIDER_ID,
+    )?;
+    let migrated_state_rows = migrate_codex_state_dbs_to_target(
+        &codex_dir,
+        &source_provider_ids,
+        &backup_root,
+        CC_SWITCH_CODEX_MODEL_PROVIDER_ID,
+    )?;
+
+    Ok(CodexHistoryProviderBucketMigrationOutcome {
+        source_provider_ids: source_provider_ids.iter().cloned().collect(),
         migrated_jsonl_files,
         migrated_state_rows,
         skipped_reason: None,
@@ -329,6 +377,13 @@ fn openai_history_migration_backup_root() -> PathBuf {
     get_app_config_dir()
         .join("backups")
         .join(OPENAI_HISTORY_MIGRATION_NAME)
+        .join(Local::now().format("%Y%m%d_%H%M%S").to_string())
+}
+
+fn multirouter_custom_history_sync_backup_root() -> PathBuf {
+    get_app_config_dir()
+        .join("backups")
+        .join(MULTIROUTER_CUSTOM_HISTORY_SYNC_NAME)
         .join(Local::now().format("%Y%m%d_%H%M%S").to_string())
 }
 
@@ -1225,6 +1280,80 @@ base_url = "https://proxy.example/v1"
                 .and_then(|value| value.as_str()),
             Some("custom")
         );
+    }
+
+    #[test]
+    fn multirouter_custom_sync_rewrites_openai_and_router_history_buckets() {
+        let dir = tempdir().expect("tempdir");
+        let codex_dir = dir.path().join(".codex");
+        let backup_root = dir.path().join("backup");
+        fs::create_dir_all(&codex_dir).expect("create codex dir");
+
+        let source_provider_ids = source_ids(&["openai", "codex_model_router_v2"]);
+        let session_dir = codex_dir.join("sessions/2026/06/13");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+        let session_path = session_dir.join("router-sync.jsonl");
+        fs::write(
+            &session_path,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s-openai\",\"model_provider\":\"openai\"}}\n",
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s-router\",\"model_provider\":\"codex_model_router_v2\"}}\n",
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s-custom\",\"model_provider\":\"custom\"}}\n",
+            ),
+        )
+        .expect("write session");
+
+        let migrated_jsonl = migrate_codex_jsonl_files_to_target(
+            &codex_dir,
+            &source_provider_ids,
+            &backup_root,
+            CC_SWITCH_CODEX_MODEL_PROVIDER_ID,
+        )
+        .expect("migrate jsonl to custom");
+        assert_eq!(migrated_jsonl, 1);
+        let session_text = fs::read_to_string(&session_path).expect("read session");
+        assert_eq!(
+            session_text
+                .matches("\"model_provider\":\"custom\"")
+                .count(),
+            3,
+            "openai/router histories should be visible under the custom MultiRouter bucket"
+        );
+
+        let state_db_path = codex_dir.join(CODEX_STATE_DB_FILENAME);
+        let conn = Connection::open(&state_db_path).expect("open state db");
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                model_provider TEXT NOT NULL
+            );
+            INSERT INTO threads (id, model_provider) VALUES
+                ('openai-thread', 'openai'),
+                ('router-thread', 'codex_model_router_v2'),
+                ('custom-thread', 'custom');",
+        )
+        .expect("seed state db");
+        drop(conn);
+
+        let migrated_rows = migrate_codex_state_db_provider_bucket_to_target(
+            &state_db_path,
+            &codex_dir,
+            &source_provider_ids,
+            &backup_root,
+            CC_SWITCH_CODEX_MODEL_PROVIDER_ID,
+        )
+        .expect("migrate state db to custom");
+        assert_eq!(migrated_rows, 2);
+
+        let conn = Connection::open(&state_db_path).expect("reopen state db");
+        let custom_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM threads WHERE model_provider = 'custom'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count custom rows");
+        assert_eq!(custom_count, 3);
     }
 
     #[test]

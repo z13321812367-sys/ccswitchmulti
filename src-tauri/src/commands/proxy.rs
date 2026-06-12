@@ -62,6 +62,7 @@ pub struct CodexLiveConfigDiagnostics {
 pub struct CodexRouterLogEvent {
     pub timestamp: String,
     pub event: String,
+    pub route_id: Option<String>,
     pub model: Option<String>,
     pub provider: Option<String>,
     pub outer_provider: Option<String>,
@@ -428,6 +429,20 @@ pub async fn diagnose_codex_multirouter(
     })
 }
 
+/// 显式把 Codex 历史 provider 桶同步到 MultiRouter 的 `custom` 运行桶。
+///
+/// 该命令会备份并重写本机 Codex session/jsonl 与 state sqlite；前端必须由用户主动触发，
+/// 不能在启动或诊断时自动执行。
+#[tauri::command]
+pub async fn sync_codex_history_to_multirouter(
+    state: tauri::State<'_, AppState>,
+) -> Result<crate::codex_history_migration::CodexHistoryProviderBucketMigrationOutcome, String> {
+    crate::codex_history_migration::sync_codex_history_provider_bucket_to_multirouter(
+        state.db.as_ref(),
+    )
+    .map_err(|error| error.to_string())
+}
+
 /// 构造一个诊断检查项，统一字符串转换和证据字段。
 fn codex_check(
     id: &str,
@@ -596,10 +611,18 @@ fn codex_live_config_diagnostics(proxy_port: u16) -> CodexLiveConfigDiagnostics 
         .and_then(|provider| provider.get("wire_api"))
         .and_then(|value| value.as_str())
         .map(ToString::to_string);
-    let model_catalog_json = active_provider_table
-        .and_then(|provider| provider.get("model_catalog_json"))
+    // Codex 官方只读取顶层 `model_catalog_json`。旧诊断只看 active provider 表，
+    // 会把已经正确写入的 catalog 指针误判为缺失，导致状态页误导排查方向。
+    let model_catalog_json = parsed
+        .get("model_catalog_json")
         .and_then(|value| value.as_str())
-        .map(ToString::to_string);
+        .map(ToString::to_string)
+        .or_else(|| {
+            active_provider_table
+                .and_then(|provider| provider.get("model_catalog_json"))
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string)
+        });
     let uses_builtin_openai_with_local_base = model_provider
         .as_deref()
         .is_none_or(|provider| provider.eq_ignore_ascii_case("openai"))
@@ -992,6 +1015,7 @@ fn codex_parse_router_log_line(line: &str) -> Option<CodexRouterLogEvent> {
     Some(CodexRouterLogEvent {
         timestamp,
         event,
+        route_id: fields.get("route_id").cloned(),
         model: fields.get("model").cloned(),
         provider: fields
             .get("provider")

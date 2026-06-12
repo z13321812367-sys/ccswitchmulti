@@ -544,6 +544,17 @@ model = "gpt-5.4-mini"
 model_provider = "openai"
 openai_base_url = "http://127.0.0.1:15721/v1"
 "#,
+                "modelCatalog": {
+                    "models": [
+                        { "model": "gpt-5.5", "displayName": "GPT-5.5", "contextWindow": 272000 },
+                        { "model": "gpt-5.4", "displayName": "GPT-5.4", "contextWindow": 272000 },
+                        { "model": "gpt-5.4-mini", "displayName": "GPT-5.4 Mini", "contextWindow": 128000 },
+                        { "model": "gpt-5.3-codex-spark", "displayName": "Codex Spark", "contextWindow": 128000 },
+                        { "model": "qwen3.6", "displayName": "Qwen 3.6", "contextWindow": 128000 },
+                        { "model": "deepseek-v4-flash", "displayName": "DeepSeek V4 Flash", "contextWindow": 1000000 },
+                        { "model": "deepseek-v4-pro", "displayName": "DeepSeek V4 Pro", "contextWindow": 1000000 }
+                    ]
+                },
                 "codexRouting": {
                     "enabled": true,
                     "routes": [
@@ -591,8 +602,60 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             "router takeover must disable Codex websocket attempts, got:\n{live_config}"
         );
         assert!(
+            live_config.contains("model_catalog_json = \"cc-switch-model-catalog.json\""),
+            "router takeover must expose the generated model catalog to Codex, got:\n{live_config}"
+        );
+        assert!(
             !live_config.contains("openai_base_url"),
             "router takeover must not leave the built-in OpenAI base-url override in live config"
+        );
+        let catalog_text =
+            std::fs::read_to_string(crate::codex_config::get_codex_model_catalog_path())
+                .expect("read generated router catalog");
+        let catalog: serde_json::Value =
+            serde_json::from_str(&catalog_text).expect("parse generated router catalog");
+        let models = catalog
+            .get("models")
+            .and_then(|value| value.as_array())
+            .expect("router catalog should contain a models array");
+        let slugs: Vec<&str> = models
+            .iter()
+            .filter_map(|model| model.get("slug").and_then(|value| value.as_str()))
+            .collect();
+        for expected in [
+            "gpt-5.5",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+            "gpt-5.3-codex-spark",
+            "qwen3.6",
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
+        ] {
+            assert!(
+                slugs.contains(&expected),
+                "router catalog should include {expected}, got: {slugs:?}"
+            );
+        }
+        let gpt55 = models
+            .iter()
+            .find(|model| model.get("slug").and_then(|value| value.as_str()) == Some("gpt-5.5"))
+            .expect("gpt-5.5 should exist in router catalog");
+        assert!(
+            gpt55
+                .get("service_tiers")
+                .and_then(|value| value.as_array())
+                .is_some_and(|tiers| !tiers.is_empty()),
+            "OpenAI GPT route should keep Codex speed/service tiers"
+        );
+        let qwen = models
+            .iter()
+            .find(|model| model.get("slug").and_then(|value| value.as_str()) == Some("qwen3.6"))
+            .expect("qwen3.6 should exist in router catalog");
+        assert!(
+            qwen.get("service_tiers")
+                .and_then(|value| value.as_array())
+                .is_some_and(|tiers| tiers.is_empty()),
+            "third-party/local route models must not inherit OpenAI service tiers"
         );
         assert!(
             db.get_proxy_config_for_app("codex")

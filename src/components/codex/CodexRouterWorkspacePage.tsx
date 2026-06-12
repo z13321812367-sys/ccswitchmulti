@@ -36,7 +36,9 @@ import type { RequestLog } from "@/types/usage";
 import type {
   CodexDiagnosticCheck,
   CodexDiagnosticStatus,
+  CodexHistoryProviderBucketSyncOutcome,
   CodexMultiRouterDiagnostics,
+  CodexRouterLogEvent,
   ProxyStatus,
 } from "@/types/proxy";
 
@@ -117,6 +119,11 @@ type RouteTrafficRow = {
   failedCount: number;
   totalTokens: number;
   avgLatencyMs: number;
+};
+
+type RouteTrafficTarget = {
+  providerId: string;
+  providerName: string;
 };
 
 /// 从 Provider 私有配置里读取 Codex 多模型路由配置；没有配置时返回 null，避免把普通模型源误判成路由方案。
@@ -271,14 +278,88 @@ function collectTargetProviderIds(
   return ids;
 }
 
+/// 为内联 route 生成稳定统计 ID。内联 route 没有真实 providerId，但在状态页里
+/// 仍然应该作为一个“子 Provider”展示，否则 Qwen/DeepSeek 会被统计成 0。
+function routeTrafficId(entry: RouteEntry): string {
+  const routeId =
+    entry.route.id?.trim() ||
+    entry.route.label?.trim() ||
+    `route-${entry.index + 1}`;
+  return `route:${entry.provider.id}:${routeId}`;
+}
+
+/// 把 route 映射成状态页可聚合的流量目标；优先使用真实 target provider，
+/// 没有 targetProviderId 时退化为内联 route 自身。
+function routeTrafficTarget(
+  entry: RouteEntry,
+  providersById: Map<string, Provider>,
+): RouteTrafficTarget {
+  const targetProviderId = routeTargetProviderId(entry.route);
+  const targetProvider = targetProviderId
+    ? providersById.get(targetProviderId)
+    : undefined;
+  if (targetProviderId) {
+    return {
+      providerId: targetProviderId,
+      providerName: targetProvider?.name ?? targetProviderId,
+    };
+  }
+  return {
+    providerId: routeTrafficId(entry),
+    providerName:
+      entry.route.label?.trim() ||
+      entry.route.id?.trim() ||
+      `Route ${entry.index + 1}`,
+  };
+}
+
+/// 从 router 日志反推 route id，兼容旧日志只写 effective_provider 的情况。
+function routeIdFromRouterEvent(event: CodexRouterLogEvent): string | null {
+  if (event.routeId?.trim()) return event.routeId.trim();
+  const provider = event.effectiveProvider ?? event.provider ?? "";
+  const marker = "::route::";
+  const index = provider.indexOf(marker);
+  return index >= 0
+    ? provider.slice(index + marker.length).trim() || null
+    : null;
+}
+
+/// 根据 route_id 或 model 匹配 router 日志对应的 route。
+function routeEntryForRouterEvent(
+  event: CodexRouterLogEvent,
+  routes: RouteEntry[],
+): RouteEntry | undefined {
+  const routeId = routeIdFromRouterEvent(event);
+  if (routeId) {
+    const byId = routes.find(
+      ({ route }) => route.id?.trim().toLowerCase() === routeId.toLowerCase(),
+    );
+    if (byId) return byId;
+  }
+  const model = event.model?.trim();
+  return model
+    ? routes.find(({ route }) => routeMatchesModel(route, model))
+    : undefined;
+}
+
+/// router 诊断事件没有完整 token 和 latency 信息，只把可确认的 route/model
+/// 请求计入请求数和失败数，避免把“没有外部 targetProviderId”误报为无流量。
+function routerEventStatusCode(event: CodexRouterLogEvent): number {
+  const parsed = Number.parseInt(event.status ?? "", 10);
+  if (Number.isFinite(parsed)) return parsed;
+  return event.event.includes("error") ? 500 : 0;
+}
+
 /// 从请求日志聚合 MultiRouter 子 provider / model 流量；无法归属的日志留给状态页单独提示。
 function buildRouteTrafficRows({
   logs,
+  routerEvents = [],
   routes,
   selectedPlan,
   providersById,
 }: {
   logs: RequestLog[];
+  routerEvents?: CodexRouterLogEvent[];
   routes: RouteEntry[];
   selectedPlan: Provider | null;
   providersById: Map<string, Provider>;
@@ -292,29 +373,19 @@ function buildRouteTrafficRows({
     RouteTrafficRow & { latencyTotalMs: number }
   >();
 
-  for (const log of logs) {
-    if (log.appType !== "codex") continue;
-    if ((log.dataSource ?? "proxy") !== "proxy") continue;
-    const requestedModel = log.requestModel || log.model;
-    const matchedRoute = selectedRoutes.find(({ route }) =>
-      routeMatchesModel(route, requestedModel),
-    );
-    const routeTargetId = matchedRoute
-      ? routeTargetProviderId(matchedRoute.route)
-      : undefined;
-    const providerId =
-      routeTargetId ||
-      (targetProviderIds.has(log.providerId) ? log.providerId : undefined);
-    if (!providerId) continue;
-
-    const provider = providersById.get(providerId);
-    const model = requestedModel || log.model || "unknown";
-    const key = `${providerId}::${model}`;
+  function addTrafficSample(
+    target: RouteTrafficTarget,
+    model: string,
+    statusCode: number,
+    tokens: number,
+    latencyMs: number,
+  ) {
+    const key = `${target.providerId}::${model}`;
     const current =
       buckets.get(key) ??
       ({
-        providerId,
-        providerName: provider?.name ?? log.providerName ?? providerId,
+        providerId: target.providerId,
+        providerName: target.providerName,
         model,
         requestCount: 0,
         successCount: 0,
@@ -325,21 +396,74 @@ function buildRouteTrafficRows({
       } satisfies RouteTrafficRow & { latencyTotalMs: number });
 
     current.requestCount += 1;
-    if (log.statusCode >= 200 && log.statusCode < 400) {
+    if (statusCode >= 200 && statusCode < 400) {
       current.successCount += 1;
-    } else {
+    } else if (statusCode >= 400) {
       current.failedCount += 1;
     }
-    current.totalTokens +=
-      log.inputTokens +
-      log.outputTokens +
-      log.cacheReadTokens +
-      log.cacheCreationTokens;
-    current.latencyTotalMs += log.latencyMs;
+    current.totalTokens += tokens;
+    current.latencyTotalMs += latencyMs;
     current.avgLatencyMs = Math.round(
       current.latencyTotalMs / current.requestCount,
     );
     buckets.set(key, current);
+  }
+
+  for (const log of logs) {
+    if (log.appType !== "codex") continue;
+    if ((log.dataSource ?? "proxy") !== "proxy") continue;
+    const requestedModel = log.requestModel || log.model;
+    const matchedRoute = selectedRoutes.find(({ route }) =>
+      routeMatchesModel(route, requestedModel),
+    );
+    const model = requestedModel || log.model || "unknown";
+    const target = matchedRoute
+      ? routeTrafficTarget(matchedRoute, providersById)
+      : targetProviderIds.has(log.providerId)
+        ? {
+            providerId: log.providerId,
+            providerName:
+              providersById.get(log.providerId)?.name ??
+              log.providerName ??
+              log.providerId,
+          }
+        : undefined;
+    if (!target) continue;
+
+    addTrafficSample(
+      target,
+      model,
+      log.statusCode,
+      log.inputTokens +
+        log.outputTokens +
+        log.cacheReadTokens +
+        log.cacheCreationTokens,
+      log.latencyMs,
+    );
+  }
+
+  const terminalRouterEvents = routerEvents.filter((event) =>
+    ["upstream_status", "upstream_error", "upstream_send_error"].includes(
+      event.event,
+    ),
+  );
+  const countableRouterEvents =
+    terminalRouterEvents.length > 0
+      ? terminalRouterEvents
+      : routerEvents.filter((event) =>
+          ["route_resolved", "request_prepared"].includes(event.event),
+        );
+
+  for (const event of countableRouterEvents) {
+    const matchedRoute = routeEntryForRouterEvent(event, selectedRoutes);
+    if (!matchedRoute) continue;
+    addTrafficSample(
+      routeTrafficTarget(matchedRoute, providersById),
+      event.model || matchedRoute.route.match?.models?.[0] || "unknown",
+      routerEventStatusCode(event),
+      0,
+      0,
+    );
   }
 
   return Array.from(buckets.values())
@@ -1156,6 +1280,10 @@ function StatusTab({
     useState<CodexMultiRouterDiagnostics | null>(null);
   const [diagnoseError, setDiagnoseError] = useState<string | null>(null);
   const [isDiagnosing, setIsDiagnosing] = useState(false);
+  const [historySyncResult, setHistorySyncResult] =
+    useState<CodexHistoryProviderBucketSyncOutcome | null>(null);
+  const [historySyncError, setHistorySyncError] = useState<string | null>(null);
+  const [isSyncingHistory, setIsSyncingHistory] = useState(false);
   const [statusView, setStatusView] = useState<StatusView>("link");
   const logs = requestLogs?.data ?? [];
   const proxyLogs = logs.filter(
@@ -1167,19 +1295,30 @@ function StatusTab({
   const selectedRoutes = selectedPlan
     ? routeEntries.filter(({ provider }) => provider.id === selectedPlan.id)
     : routeEntries;
-  const targetProviderIds = collectTargetProviderIds(
-    routeEntries,
-    selectedPlan,
+  const routerEvents = diagnostics?.routerLog.recentEvents ?? [];
+  const routerRequestEvents = routerEvents.filter((event) =>
+    [
+      "route_resolved",
+      "request_prepared",
+      "upstream_send",
+      "upstream_status",
+      "upstream_error",
+      "upstream_send_error",
+    ].includes(event.event),
   );
+  const routeTargetCount = new Set(
+    selectedRoutes.map(
+      (entry) => routeTrafficTarget(entry, providersById).providerId,
+    ),
+  ).size;
   const trafficRows = buildRouteTrafficRows({
     logs: proxyLogs,
+    routerEvents,
     routes: routeEntries,
     selectedPlan,
     providersById,
   });
-  const routerLogs = selectedPlan
-    ? proxyLogs.filter((log) => log.providerId === selectedPlan.id)
-    : [];
+  const routerLogs = routerEvents;
   const routedLogs = proxyLogs.filter((log) =>
     trafficRows.some(
       (row) =>
@@ -1210,7 +1349,9 @@ function StatusTab({
       hasEnabledRoutes,
   );
   const trafficVerified =
-    proxyLogs.length > 0 || (proxyStatus?.total_requests ?? 0) > 0;
+    proxyLogs.length > 0 ||
+    routerRequestEvents.length > 0 ||
+    (proxyStatus?.total_requests ?? 0) > 0;
   const linkOnline = Boolean(configReady && trafficVerified);
   const readinessIssues = [
     !isProxyRunning ? "本地代理未监听" : "",
@@ -1236,6 +1377,27 @@ function StatusTab({
       setDiagnoseError(error instanceof Error ? error.message : String(error));
     } finally {
       setIsDiagnosing(false);
+    }
+  }
+
+  /// 历史同步会改写 Codex 本机索引，因此必须由用户显式确认；它只解决
+  /// custom MultiRouter 桶下看不到 openai 历史的问题，不参与请求路由。
+  async function syncHistoryToMultiRouter() {
+    const confirmed = window.confirm(
+      "这会把 Codex 的 openai/旧 router 历史同步到 MultiRouter 使用的 custom 历史桶，并先创建本地备份。继续吗？",
+    );
+    if (!confirmed) return;
+    setIsSyncingHistory(true);
+    setHistorySyncError(null);
+    try {
+      const result = await proxyApi.syncCodexHistoryToMultiRouter();
+      setHistorySyncResult(result);
+    } catch (error) {
+      setHistorySyncError(
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      setIsSyncingHistory(false);
     }
   }
 
@@ -1270,6 +1432,20 @@ function StatusTab({
                     <Bug className="h-4 w-4" />
                   )}
                   Debug 检查
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={syncHistoryToMultiRouter}
+                  disabled={isSyncingHistory}
+                  className="gap-2 border-sky-500/50 bg-sky-500/10 text-sky-100 hover:bg-sky-500/20"
+                >
+                  {isSyncingHistory ? (
+                    <RefreshCw className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <FileClock className="h-4 w-4" />
+                  )}
+                  同步历史桶
                 </Button>
                 {selectedPlan ? (
                   <Button
@@ -1337,6 +1513,21 @@ function StatusTab({
               }
             />
           </div>
+          {historySyncError ? (
+            <div className="mt-3 rounded-lg border border-rose-700/50 bg-rose-950/30 p-3 text-xs text-rose-100">
+              历史同步失败：{historySyncError}
+            </div>
+          ) : null}
+          {historySyncResult ? (
+            <div className="mt-3 rounded-lg border border-sky-700/50 bg-sky-950/25 p-3 text-xs leading-5 text-sky-100">
+              历史同步完成：SQLite {historySyncResult.migratedStateRows}{" "}
+              行，JSONL {historySyncResult.migratedJsonlFiles} 个文件，来源{" "}
+              {historySyncResult.sourceProviderIds.join(", ") || "无"}
+              {historySyncResult.skippedReason
+                ? `，跳过原因：${historySyncResult.skippedReason}`
+                : ""}
+            </div>
+          ) : null}
           <div className="mt-4 grid gap-3 text-sm md:grid-cols-3">
             <DetailRow label="当前代理目标" value={activeTargetLabel} />
             <DetailRow
@@ -1465,14 +1656,14 @@ function StatusTab({
                 暂无可归属到子 Provider 的请求日志。今日 Codex 日志{" "}
                 {logs.length} 条，其中真实代理转发 {proxyLogs.length} 条，Codex
                 会话同步 {sessionLogs.length} 条，外层 MultiRouter 日志{" "}
-                {routerLogs.length} 条，目标 Provider 数{" "}
-                {targetProviderIds.size} 个。
+                {routerLogs.length} 条，目标 Provider 数 {routeTargetCount} 个。
               </div>
             )}
           </div>
           <div className="mt-3 text-xs text-slate-500">
-            已尝试归属真实代理日志 {routedLogs.length} 条；这里不把
-            codex_session 历史同步当作转发。
+            已尝试归属真实代理日志 {routedLogs.length} 条、router 诊断事件{" "}
+            {routerRequestEvents.length} 条；这里不把 codex_session
+            历史同步当作转发。
           </div>
         </section>
       )}
@@ -1993,7 +2184,7 @@ function DiagnosticsPanel({
                   <span className="truncate">
                     {event.outerProvider && event.effectiveProvider
                       ? `${event.outerProvider} -> ${event.effectiveProvider}`
-                      : event.provider ?? "-"}
+                      : (event.provider ?? "-")}
                   </span>
                   <span className="truncate">{event.status ?? "-"}</span>
                   <span className="truncate" title={event.line}>
