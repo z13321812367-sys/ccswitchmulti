@@ -469,7 +469,55 @@ mod tests {
     use http::{header, Method, Request, StatusCode};
     use http_body_util::BodyExt;
     use serde_json::{json, Value};
+    use serial_test::serial;
     use tower::ServiceExt;
+
+    /// 测试专用 home，用于隔离 Codex live config/catalog 文件。
+    struct TestHomeGuard {
+        _dir: tempfile::TempDir,
+        original_home: Option<String>,
+        original_userprofile: Option<String>,
+        original_test_home: Option<String>,
+    }
+
+    impl TestHomeGuard {
+        /// 创建临时 home 并覆盖环境变量，避免 endpoint 测试读取真实用户 `.codex`。
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("create temp home");
+            let original_home = std::env::var("HOME").ok();
+            let original_userprofile = std::env::var("USERPROFILE").ok();
+            let original_test_home = std::env::var("CC_SWITCH_TEST_HOME").ok();
+
+            std::env::set_var("HOME", dir.path());
+            std::env::set_var("USERPROFILE", dir.path());
+            std::env::set_var("CC_SWITCH_TEST_HOME", dir.path());
+
+            Self {
+                _dir: dir,
+                original_home,
+                original_userprofile,
+                original_test_home,
+            }
+        }
+    }
+
+    impl Drop for TestHomeGuard {
+        /// 测试结束后恢复调用方环境变量，避免影响后续用例。
+        fn drop(&mut self) {
+            match &self.original_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match &self.original_userprofile {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+            match &self.original_test_home {
+                Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+                None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+            }
+        }
+    }
 
     /// 构造只用于 router 测试的内存数据库和 proxy server。
     fn build_test_server() -> (ProxyServer, Arc<Database>) {
@@ -525,6 +573,69 @@ mod tests {
         let body = response_json(response).await;
         assert_eq!(body["error"]["type"], "authentication_error");
         assert_eq!(body["error"]["code"], "external_openai_api_disabled");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn v1_models_for_codex_client_returns_catalog_and_openai_data() {
+        let _home = TestHomeGuard::new();
+        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
+            .expect("create codex dir");
+        std::fs::write(
+            crate::codex_config::get_codex_config_path(),
+            r#"model_provider = "custom"
+model_catalog_json = "cc-switch-model-catalog.json"
+
+[model_providers.custom]
+base_url = "http://127.0.0.1:15721/v1"
+"#,
+        )
+        .expect("write config");
+        std::fs::write(
+            crate::codex_config::get_codex_model_catalog_path(),
+            serde_json::to_string_pretty(&json!({
+                "models": [
+                    { "slug": "qwen3.6", "model": "qwen3.6", "display_name": "Qwen 3.6" },
+                    {
+                        "slug": "deepseek-v4-flash",
+                        "model": "deepseek-v4-flash",
+                        "display_name": "DeepSeek V4 Flash"
+                    }
+                ]
+            }))
+            .expect("serialize catalog"),
+        )
+        .expect("write catalog");
+
+        let (server, _db) = build_test_server();
+        let response = server
+            .build_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/v1/models")
+                    .header(header::USER_AGENT, "codex-cli/0.140.0")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["object"], "list");
+        assert!(
+            body["models"].as_array().is_some(),
+            "Codex CLI raw catalog shape should remain available"
+        );
+        let ids: Vec<_> = body["data"]
+            .as_array()
+            .expect("OpenAI data array")
+            .iter()
+            .filter_map(|model| model.get("id").and_then(|id| id.as_str()))
+            .collect();
+        assert!(ids.contains(&"qwen3.6"));
+        assert!(ids.contains(&"deepseek-v4-flash"));
     }
 
     #[tokio::test]

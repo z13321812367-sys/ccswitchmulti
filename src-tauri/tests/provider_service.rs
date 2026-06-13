@@ -610,12 +610,17 @@ wire_api = "responses"
     let config_after_switch =
         std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config");
     assert!(
-        config_after_switch.contains("https://api.deepseek.com/v1"),
-        "normal switch should write the DeepSeek endpoint before takeover"
+        config_after_switch.contains("http://127.0.0.1:15721/v1"),
+        "switching to a Codex custom provider should enter the local proxy facade immediately"
     );
     assert!(
-        config_after_switch.contains("deepseek-key"),
-        "normal switch should inject the DeepSeek key into config.toml"
+        config_after_switch.contains("PROXY_MANAGED"),
+        "switching to a Codex custom provider should keep the upstream key behind the proxy"
+    );
+    assert!(
+        !config_after_switch.contains("https://api.deepseek.com/v1")
+            && !config_after_switch.contains("deepseek-key"),
+        "proxy-owned live config must not expose the upstream DeepSeek endpoint or key"
     );
 
     state
@@ -1303,9 +1308,10 @@ wire_api = "responses"
         "live config should keep the proxy bearer placeholder"
     );
     assert!(
-        live_config.contains(r#"model_provider = "deepseek-new""#)
+        live_config.contains(r#"model_provider = "custom""#)
+            && live_config.contains("[model_providers.custom]")
             && live_config.contains(r#"name = "DeepSeek New""#),
-        "live config should update the Codex-visible provider label during takeover"
+        "live config should update the Codex-visible local facade label during takeover"
     );
     assert!(
         !live_config.contains("https://new.deepseek.example/v1"),

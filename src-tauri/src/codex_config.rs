@@ -9,7 +9,7 @@ use crate::error::AppError;
 use serde_json::{json, Value};
 use std::fs;
 use std::process::Command;
-use toml_edit::{DocumentMut, Item, TableLike};
+use toml_edit::{Array, DocumentMut, InlineTable, Item, TableLike};
 
 pub const CC_SWITCH_CODEX_MODEL_PROVIDER_ID: &str = "custom";
 /// Codex MultiRouter 专用的本地 provider id。
@@ -24,6 +24,16 @@ const CODEX_MODELS_CACHE_BACKUP_FILENAME: &str = "models_cache.cc-switch-backup.
 const CC_SWITCH_CODEX_MODELS_CACHE_ETAG: &str = "cc-switch-model-catalog";
 const CODEX_MODEL_CATALOG_TEMPLATE_SLUG: &str = "gpt-5.5";
 const CODEX_OPENAI_MODEL_PROVIDER_ID: &str = "openai";
+const CODEX_REASONING_EFFORTS: &[(&str, &str)] = &[
+    ("low", "Fast responses with lighter reasoning"),
+    (
+        "medium",
+        "Balances speed and reasoning depth for everyday tasks",
+    ),
+    ("high", "Greater reasoning depth for complex problems"),
+    ("xhigh", "Extra high reasoning depth for complex problems"),
+];
+const CODEX_DEFAULT_REASONING_EFFORT: &str = "medium";
 
 /// Reserved built-in provider IDs from OpenAI Codex's config/model-provider
 /// catalog. Keep in sync with Codex `RESERVED_MODEL_PROVIDER_IDS` and legacy
@@ -332,6 +342,16 @@ fn extract_codex_top_level_u64(config_text: &str, field: &str) -> Option<u64> {
         .filter(|value| *value > 0)
 }
 
+/// 读取 Codex config 顶层字符串字段，用于把当前默认模型投影到生成的 catalog。
+fn extract_codex_top_level_string(config_text: &str, field: &str) -> Option<String> {
+    let doc = config_text.parse::<toml::Value>().ok()?;
+    doc.get(field)
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
 /// 判断模型是否只能按文本模型写入 Codex catalog。
 ///
 /// Spark 和 DeepSeek V4 兼容 Responses 文本工具调用，但 Codex 会根据
@@ -452,6 +472,107 @@ fn codex_catalog_capabilities_are_text_only(capabilities: &Value) -> Option<bool
         })
 }
 
+/// 为 Codex Desktop renderer 生成 camelCase reasoning effort 数组。
+///
+/// 官方 catalog 模板使用 `supported_reasoning_levels[].effort`，但 Desktop
+/// `list-models-for-host` 返回到前端后会访问
+/// `supportedReasoningEfforts[].reasoningEffort`。这里保留 snake_case 源字段，
+/// 额外投影 camelCase 别名，避免 app-server 或 renderer 只认其中一种形态。
+fn codex_desktop_reasoning_efforts_from_levels(levels: Option<&Value>) -> Value {
+    let mut efforts = levels
+        .and_then(|value| value.as_array())
+        .map(|levels| {
+            levels
+                .iter()
+                .filter_map(|level| {
+                    let effort = level
+                        .get("effort")
+                        .or_else(|| level.get("reasoningEffort"))
+                        .and_then(|value| value.as_str())
+                        .map(str::trim)
+                        .filter(|effort| !effort.is_empty())?;
+                    let description = level
+                        .get("description")
+                        .and_then(|value| value.as_str())
+                        .map(str::trim)
+                        .filter(|description| !description.is_empty())
+                        .unwrap_or(effort);
+                    Some(json!({
+                        "reasoningEffort": effort,
+                        "description": description,
+                    }))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if efforts.is_empty() {
+        efforts = CODEX_REASONING_EFFORTS
+            .iter()
+            .map(|(effort, description)| {
+                json!({
+                    "reasoningEffort": effort,
+                    "description": description,
+                })
+            })
+            .collect();
+    }
+
+    Value::Array(efforts)
+}
+
+/// 给 catalog 模型条目补齐 Codex Desktop app-server/renderer 使用的字段别名。
+///
+/// 这些字段不参与路由决策，只用于候选菜单、reasoning effort 和速度档展示。
+/// 原始 `slug` / `display_name` / `supported_reasoning_levels` / `service_tiers`
+/// 会保留，确保旧 Codex CLI 和官方 cc-switch 兼容路径不被破坏。
+fn project_codex_desktop_model_fields(
+    entry_obj: &mut serde_json::Map<String, Value>,
+    spec: &CodexCatalogModelSpec,
+) {
+    let default_reasoning_effort = entry_obj
+        .get("default_reasoning_level")
+        .or_else(|| entry_obj.get("defaultReasoningEffort"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|effort| !effort.is_empty())
+        .unwrap_or(CODEX_DEFAULT_REASONING_EFFORT)
+        .to_string();
+    let supported_reasoning_efforts =
+        codex_desktop_reasoning_efforts_from_levels(entry_obj.get("supported_reasoning_levels"));
+
+    entry_obj.insert("id".to_string(), json!(spec.model));
+    entry_obj.insert("displayName".to_string(), json!(spec.display_name));
+    entry_obj.insert("contextWindow".to_string(), json!(spec.context_window));
+    entry_obj.insert("maxContextWindow".to_string(), json!(spec.context_window));
+    entry_obj.insert(
+        "defaultReasoningEffort".to_string(),
+        json!(default_reasoning_effort),
+    );
+    entry_obj.insert(
+        "supportedReasoningEfforts".to_string(),
+        supported_reasoning_efforts,
+    );
+    entry_obj.insert("hidden".to_string(), json!(false));
+    entry_obj.insert("isDefault".to_string(), json!(spec.is_default));
+
+    if let Some(value) = entry_obj.get("additional_speed_tiers").cloned() {
+        entry_obj.insert("additionalSpeedTiers".to_string(), value);
+    }
+    if let Some(value) = entry_obj.get("service_tiers").cloned() {
+        entry_obj.insert("serviceTiers".to_string(), value);
+    }
+    if let Some(value) = entry_obj.get("default_service_tier").cloned() {
+        entry_obj.insert("defaultServiceTier".to_string(), value);
+    }
+    if let Some(value) = entry_obj.get("availability_nux").cloned() {
+        entry_obj.insert("availabilityNux".to_string(), value);
+    }
+    if let Some(value) = entry_obj.get("upgrade_info").cloned() {
+        entry_obj.insert("upgradeInfo".to_string(), value);
+    }
+}
+
 fn codex_catalog_model_entry(
     template: &Value,
     spec: &CodexCatalogModelSpec,
@@ -463,6 +584,7 @@ fn codex_catalog_model_entry(
     };
 
     entry_obj.insert("slug".to_string(), json!(spec.model));
+    entry_obj.insert("model".to_string(), json!(spec.model));
     entry_obj.insert("display_name".to_string(), json!(spec.display_name));
     entry_obj.insert("description".to_string(), json!(spec.display_name));
     entry_obj.insert("context_window".to_string(), json!(spec.context_window));
@@ -476,9 +598,13 @@ fn codex_catalog_model_entry(
     entry_obj.insert("upgrade".to_string(), Value::Null);
     if spec.text_only {
         entry_obj.insert("input_modalities".to_string(), json!(["text"]));
+        entry_obj.insert("inputModalities".to_string(), json!(["text"]));
         entry_obj.insert("supports_image_detail_original".to_string(), json!(false));
+        entry_obj.insert("supportsImageDetailOriginal".to_string(), json!(false));
         entry_obj.insert("web_search_tool_type".to_string(), json!("text"));
+        entry_obj.insert("webSearchToolType".to_string(), json!("text"));
     }
+    project_codex_desktop_model_fields(entry_obj, spec);
 
     entry
 }
@@ -489,6 +615,7 @@ struct CodexCatalogModelSpec {
     display_name: String,
     context_window: u64,
     text_only: bool,
+    is_default: bool,
 }
 
 fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCatalogModelSpec> {
@@ -502,6 +629,7 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
 
     let default_context_window =
         extract_codex_top_level_u64(config_text, "model_context_window").unwrap_or(128_000);
+    let default_model = extract_codex_top_level_string(config_text, "model");
     let mut seen = std::collections::HashSet::new();
     let mut specs = Vec::new();
 
@@ -542,7 +670,16 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
             display_name: display_name.to_string(),
             context_window,
             text_only,
+            is_default: default_model
+                .as_deref()
+                .is_some_and(|default_model| default_model.eq_ignore_ascii_case(model)),
         });
+    }
+
+    if default_model.is_none() {
+        if let Some(first) = specs.first_mut() {
+            first.is_default = true;
+        }
     }
 
     specs
@@ -809,19 +946,120 @@ fn codex_model_catalog_from_specs(specs: &[CodexCatalogModelSpec], template: &Va
     json!({ "models": entries })
 }
 
-fn codex_model_catalog_from_settings(
-    settings: &Value,
-    config_text: &str,
-) -> Result<Option<Value>, AppError> {
-    let specs = codex_catalog_model_specs(settings, config_text);
-    if specs.is_empty() {
-        return Ok(None);
+/// 生成 provider inline `models` 使用的 reasoning effort 数组。
+///
+/// Codex Desktop 的不同读取路径对 TOML provider model 的字段兼容度不同；
+/// 因此 inline model 同时写 snake_case 和 camelCase 两组字段，后续 app-server
+/// 无论是按 config schema 解析还是直接转成前端对象，都能保留 reasoning 菜单。
+fn codex_provider_reasoning_efforts_toml_array(key: &str) -> toml_edit::Value {
+    let mut array = Array::default();
+    for (effort, description) in CODEX_REASONING_EFFORTS {
+        let mut level = InlineTable::new();
+        level.insert(key, (*effort).into());
+        level.insert("description", (*description).into());
+        array.push(toml_edit::Value::InlineTable(level));
     }
-
-    let template = load_codex_model_catalog_template()?;
-    Ok(Some(codex_model_catalog_from_specs(&specs, &template)))
+    toml_edit::Value::Array(array)
 }
 
+/// 为当前活动 custom provider 生成 Codex Desktop 可枚举的内联模型数组。
+fn codex_provider_models_toml_array(specs: &[CodexCatalogModelSpec]) -> Item {
+    let mut array = Array::default();
+    for spec in specs {
+        let mut model = InlineTable::new();
+        model.insert("model", spec.model.as_str().into());
+        model.insert("id", spec.model.as_str().into());
+        model.insert("display_name", spec.display_name.as_str().into());
+        model.insert("displayName", spec.display_name.as_str().into());
+        model.insert(
+            "context_window",
+            i64::try_from(spec.context_window)
+                .unwrap_or(i64::MAX)
+                .into(),
+        );
+        model.insert(
+            "contextWindow",
+            i64::try_from(spec.context_window)
+                .unwrap_or(i64::MAX)
+                .into(),
+        );
+        model.insert(
+            "default_reasoning_effort",
+            CODEX_DEFAULT_REASONING_EFFORT.into(),
+        );
+        model.insert(
+            "defaultReasoningEffort",
+            CODEX_DEFAULT_REASONING_EFFORT.into(),
+        );
+        model.insert(
+            "supported_reasoning_efforts",
+            codex_provider_reasoning_efforts_toml_array("reasoning_effort"),
+        );
+        model.insert(
+            "supportedReasoningEfforts",
+            codex_provider_reasoning_efforts_toml_array("reasoningEffort"),
+        );
+        model.insert("hidden", false.into());
+        model.insert("isDefault", spec.is_default.into());
+        array.push(toml_edit::Value::InlineTable(model));
+    }
+    Item::Value(toml_edit::Value::Array(array))
+}
+
+/// 将模型目录同步到活动 provider 的 `models` 字段。
+///
+/// Codex Desktop 的 app-server 会把 custom provider 标为“自定义”，但候选菜单仍需要
+/// provider 内部能枚举模型；只写顶层 `model_catalog_json` 对部分 Desktop 版本不够。
+fn set_active_codex_provider_models(doc: &mut DocumentMut, specs: &[CodexCatalogModelSpec]) {
+    if specs.is_empty() {
+        return;
+    }
+    let Some(provider_id) = active_codex_model_provider_id(doc) else {
+        return;
+    };
+    if !is_custom_codex_model_provider_id(&provider_id) {
+        return;
+    }
+
+    if doc.get("model_providers").is_none() {
+        doc["model_providers"] = toml_edit::table();
+    }
+    let Some(model_providers) = doc
+        .get_mut("model_providers")
+        .and_then(|item| item.as_table_mut())
+    else {
+        return;
+    };
+    if !model_providers.contains_key(&provider_id) {
+        model_providers[&provider_id] = toml_edit::table();
+    }
+    if let Some(provider_table) = model_providers
+        .get_mut(provider_id.as_str())
+        .and_then(|item| item.as_table_mut())
+    {
+        provider_table["models"] = codex_provider_models_toml_array(specs);
+    }
+}
+
+/// 移除当前活动 custom provider 下由 CCSwitch catalog 投影出的模型数组。
+fn remove_active_codex_provider_models(doc: &mut DocumentMut) {
+    let Some(provider_id) = active_codex_model_provider_id(doc) else {
+        return;
+    };
+    if !is_custom_codex_model_provider_id(&provider_id) {
+        return;
+    }
+    if let Some(provider_table) = doc
+        .get_mut("model_providers")
+        .and_then(|item| item.as_table_mut())
+        .and_then(|table| table.get_mut(provider_id.as_str()))
+        .and_then(|item| item.as_table_mut())
+    {
+        provider_table.remove("models");
+    }
+}
+
+#[cfg(test)]
 fn set_codex_model_catalog_json_field(
     config_text: &str,
     catalog_path: Option<&Path>,
@@ -842,6 +1080,37 @@ fn set_codex_model_catalog_json_field(
                 .unwrap_or(false);
             if should_remove {
                 doc.as_table_mut().remove("model_catalog_json");
+            }
+        }
+    }
+
+    Ok(doc.to_string())
+}
+
+/// 同步 Codex Desktop 需要的 catalog 指针和 provider 内联模型。
+fn set_codex_model_catalog_projection_fields(
+    config_text: &str,
+    catalog_path: Option<&Path>,
+    specs: Option<&[CodexCatalogModelSpec]>,
+) -> Result<String, AppError> {
+    let mut doc = config_text
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+
+    match (catalog_path, specs) {
+        (Some(_), Some(specs)) => {
+            doc["model_catalog_json"] = toml_edit::value(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME);
+            set_active_codex_provider_models(&mut doc, specs);
+        }
+        _ => {
+            let should_remove = doc
+                .get("model_catalog_json")
+                .and_then(|item| item.as_str())
+                .map(codex_model_catalog_path_is_cc_switch_owned)
+                .unwrap_or(false);
+            if should_remove {
+                doc.as_table_mut().remove("model_catalog_json");
+                remove_active_codex_provider_models(&mut doc);
             }
         }
     }
@@ -961,15 +1230,22 @@ pub fn prepare_codex_config_text_with_model_catalog(
     config_text: &str,
 ) -> Result<String, AppError> {
     let catalog_path = get_codex_model_catalog_path();
+    let specs = codex_catalog_model_specs(settings, config_text);
 
-    if let Some(catalog) = codex_model_catalog_from_settings(settings, config_text)? {
-        let config_text = set_codex_model_catalog_json_field(config_text, Some(&catalog_path))?;
+    if !specs.is_empty() {
+        let template = load_codex_model_catalog_template()?;
+        let catalog = codex_model_catalog_from_specs(&specs, &template);
+        let config_text = set_codex_model_catalog_projection_fields(
+            config_text,
+            Some(&catalog_path),
+            Some(&specs),
+        )?;
         write_json_file(&catalog_path, &catalog)?;
         sync_codex_models_cache_with_cc_switch_catalog(&catalog)?;
         Ok(config_text)
     } else {
         restore_codex_models_cache_if_cc_switch_owned()?;
-        set_codex_model_catalog_json_field(config_text, None)
+        set_codex_model_catalog_projection_fields(config_text, None, None)
     }
 }
 
@@ -985,9 +1261,8 @@ pub fn prepare_codex_config_text_with_model_catalog(
 /// be a downgrade we can't safely round-trip.
 ///
 /// `displayName` and `contextWindow` are omitted from the returned entry when
-/// the on-disk value matches the fallback that
-/// `codex_model_catalog_from_settings` injects for unset inputs (slug for
-/// display_name, `model_context_window` or 128_000 for context_window). This
+/// the on-disk value matches the fallback that catalog projection injects for
+/// unset inputs (slug for display_name, `model_context_window` or 128_000). This
 /// preserves the "user left it blank" intent across round-trip; an unavoidable
 /// edge case is that a user-typed value that happens to equal the fallback
 /// will also collapse to blank, but the next save writes the same fallback so
@@ -1060,6 +1335,7 @@ fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) ->
     for entry in models {
         let Some(model) = entry
             .get("slug")
+            .or_else(|| entry.get("model"))
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty())
@@ -2666,6 +2942,11 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             Some("deepseek-v4-flash")
         );
         assert_eq!(
+            models[0].get("model").and_then(|value| value.as_str()),
+            Some("deepseek-v4-flash"),
+            "Codex Desktop app-server model/list path reads `model`, not only CLI `slug`"
+        );
+        assert_eq!(
             models[0]
                 .get("context_window")
                 .and_then(|value| value.as_u64()),
@@ -2743,6 +3024,7 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             display_name: "Codex Spark".to_string(),
             context_window: 128_000,
             text_only: true,
+            is_default: false,
         };
         let entry = codex_catalog_model_entry(&template, &spec, 0);
 
@@ -2792,6 +3074,7 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             display_name: "GPT-5.4".to_string(),
             context_window: 272_000,
             text_only: false,
+            is_default: false,
         };
         let entry = codex_catalog_model_entry(&template, &spec, 0);
 
@@ -2834,6 +3117,7 @@ openai_base_url = "http://127.0.0.1:15721/v1"
             display_name: "GPT-5.4 Mini".to_string(),
             context_window: 128_000,
             text_only: false,
+            is_default: false,
         };
         let entry = codex_catalog_model_entry(&template, &spec, 0);
 
@@ -3312,6 +3596,25 @@ base_url = "http://127.0.0.1:15721/v1"
         let prepared = prepare_codex_config_text_with_model_catalog(&settings, config)
             .expect("prepare config");
         assert!(prepared.contains("model_catalog_json"));
+        let prepared_toml: toml::Value = toml::from_str(&prepared).expect("parse prepared config");
+        let provider_models = prepared_toml
+            .get("model_providers")
+            .and_then(|providers| providers.get("custom"))
+            .and_then(|provider| provider.get("models"))
+            .and_then(|models| models.as_array())
+            .expect("custom provider should expose inline models for Codex Desktop");
+        let provider_model_ids: Vec<_> = provider_models
+            .iter()
+            .filter_map(|model| model.get("model").and_then(|value| value.as_str()))
+            .collect();
+        assert!(
+            provider_model_ids.contains(&"qwen3.6"),
+            "inline provider models must include Qwen so the Desktop menu is not just 自定义"
+        );
+        assert!(
+            provider_model_ids.contains(&"deepseek-v4-flash"),
+            "inline provider models must include DeepSeek so the Desktop menu can enumerate it"
+        );
 
         let cache: Value = read_json_file(&get_codex_models_cache_path()).expect("read cache");
         let slugs = cache
@@ -3320,6 +3623,13 @@ base_url = "http://127.0.0.1:15721/v1"
             .expect("models array")
             .iter()
             .filter_map(|model| model.get("slug").and_then(|slug| slug.as_str()))
+            .collect::<Vec<_>>();
+        let model_fields = cache
+            .get("models")
+            .and_then(|models| models.as_array())
+            .expect("models array")
+            .iter()
+            .filter_map(|model| model.get("model").and_then(|model| model.as_str()))
             .collect::<Vec<_>>();
         assert_eq!(
             cache.get("etag").and_then(|etag| etag.as_str()),
@@ -3333,6 +3643,8 @@ base_url = "http://127.0.0.1:15721/v1"
         );
         assert!(slugs.contains(&"qwen3.6"));
         assert!(slugs.contains(&"deepseek-v4-flash"));
+        assert!(model_fields.contains(&"qwen3.6"));
+        assert!(model_fields.contains(&"deepseek-v4-flash"));
     }
 
     #[test]

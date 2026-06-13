@@ -809,6 +809,18 @@ experimental_bearer_token = "PROXY_MANAGED"
                 !live_config.contains("openai_base_url"),
                 "{label}: live config must not use built-in OpenAI base URL, got:\n{live_config}"
             );
+            let live_toml: toml::Value =
+                toml::from_str(&live_config).expect("parse refreshed Codex live config");
+            let provider_models = live_toml
+                .get("model_providers")
+                .and_then(|providers| providers.get("codex_model_router_v2"))
+                .and_then(|provider| provider.get("models"))
+                .and_then(|models| models.as_array())
+                .expect("router provider should expose inline models for Desktop custom picker");
+            let provider_model_ids: Vec<&str> = provider_models
+                .iter()
+                .filter_map(|model| model.get("model").and_then(|value| value.as_str()))
+                .collect();
 
             let catalog_text =
                 std::fs::read_to_string(crate::codex_config::get_codex_model_catalog_path())
@@ -822,6 +834,13 @@ experimental_bearer_token = "PROXY_MANAGED"
                 .iter()
                 .filter_map(|model| model.get("slug").and_then(|value| value.as_str()))
                 .collect();
+            let catalog_model_fields: Vec<&str> = catalog
+                .get("models")
+                .and_then(|value| value.as_array())
+                .expect("refreshed catalog should contain models")
+                .iter()
+                .filter_map(|model| model.get("model").and_then(|value| value.as_str()))
+                .collect();
 
             let cache_text =
                 std::fs::read_to_string(&cache_path).expect("read refreshed models cache");
@@ -833,6 +852,13 @@ experimental_bearer_token = "PROXY_MANAGED"
                 .expect("refreshed cache should contain models")
                 .iter()
                 .filter_map(|model| model.get("slug").and_then(|value| value.as_str()))
+                .collect();
+            let cache_model_fields: Vec<&str> = cache
+                .get("models")
+                .and_then(|value| value.as_array())
+                .expect("refreshed cache should contain models")
+                .iter()
+                .filter_map(|model| model.get("model").and_then(|value| value.as_str()))
                 .collect();
 
             for expected in [
@@ -849,8 +875,20 @@ experimental_bearer_token = "PROXY_MANAGED"
                     "{label}: catalog should include {expected}, got: {catalog_slugs:?}"
                 );
                 assert!(
+                    catalog_model_fields.contains(&expected),
+                    "{label}: catalog should include model field {expected}, got: {catalog_model_fields:?}"
+                );
+                assert!(
                     cache_slugs.contains(&expected),
                     "{label}: cache should include {expected}, got: {cache_slugs:?}"
+                );
+                assert!(
+                    cache_model_fields.contains(&expected),
+                    "{label}: cache should include model field {expected}, got: {cache_model_fields:?}"
+                );
+                assert!(
+                    provider_model_ids.contains(&expected),
+                    "{label}: provider inline models should include {expected}, got: {provider_model_ids:?}"
                 );
             }
         };

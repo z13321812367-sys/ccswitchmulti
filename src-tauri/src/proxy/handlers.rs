@@ -108,7 +108,7 @@ pub async fn handle_models(
             }
             json!({"models": []})
         };
-        return Ok(Json(catalog).into_response());
+        return Ok(Json(codex_catalog_models_response(catalog)).into_response());
     }
 
     let external_api_profile = match external_openai_api::validate_request(&state.db, &headers) {
@@ -118,6 +118,57 @@ pub async fn handle_models(
     let models = external_openai_api_models_response(&state, &external_api_profile)?;
 
     Ok(Json(models).into_response())
+}
+
+/// 从 cc-switch catalog 条目中提取模型 id，兼容 CLI 用的 `slug` 和 Desktop 用的 `model`。
+fn codex_catalog_model_id(entry: &Value) -> Option<String> {
+    entry
+        .get("model")
+        .or_else(|| entry.get("slug"))
+        .or_else(|| entry.get("id"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+/// 将 cc-switch catalog 扩展为同时兼容 raw catalog 和 OpenAI list 的响应。
+fn codex_catalog_models_response(mut catalog: Value) -> Value {
+    let mut ids = catalog
+        .get("models")
+        .and_then(|models| models.as_array())
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(codex_catalog_model_id)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    ids.sort();
+    ids.dedup();
+    let data = ids
+        .into_iter()
+        .map(|id| openai_model_entry(&id, "cc-switch"))
+        .collect::<Vec<_>>();
+
+    if let Some(object) = catalog.as_object_mut() {
+        object.insert("object".to_string(), json!("list"));
+        object.insert("data".to_string(), Value::Array(data));
+        if object
+            .get("models")
+            .and_then(|models| models.as_array())
+            .is_none()
+        {
+            object.insert("models".to_string(), json!([]));
+        }
+        catalog
+    } else {
+        json!({
+            "object": "list",
+            "data": data,
+            "models": []
+        })
+    }
 }
 
 /// 判断 `/v1/models` 调用方是否是 Codex 自身。
@@ -2245,7 +2296,7 @@ async fn log_usage(
 #[cfg(test)]
 mod tests {
     use super::{
-        codex_proxy_error_json, external_openai_api_models_response,
+        codex_catalog_models_response, codex_proxy_error_json, external_openai_api_models_response,
         external_openai_api_unsupported_response, resolve_external_codex_router_target,
         responses_sse_to_response_value, should_handle_as_codex_client,
         should_use_claude_transform_streaming,
@@ -2274,6 +2325,30 @@ mod tests {
     use serde_json::{json, Value};
     use std::{collections::HashMap, sync::Arc};
     use tokio::sync::RwLock;
+
+    #[test]
+    fn codex_catalog_models_response_keeps_catalog_and_openai_data() {
+        let response = codex_catalog_models_response(json!({
+            "models": [
+                { "slug": "qwen3.6", "display_name": "Qwen 3.6" },
+                { "model": "deepseek-v4-flash", "display_name": "DeepSeek V4 Flash" },
+                { "slug": "qwen3.6", "display_name": "duplicate" }
+            ]
+        }));
+
+        assert_eq!(response["object"], "list");
+        assert!(
+            response["models"].as_array().is_some(),
+            "raw Codex CLI catalog shape must remain present"
+        );
+        let ids: Vec<_> = response["data"]
+            .as_array()
+            .expect("OpenAI data array")
+            .iter()
+            .filter_map(|model| model.get("id").and_then(|id| id.as_str()))
+            .collect();
+        assert_eq!(ids, vec!["deepseek-v4-flash", "qwen3.6"]);
+    }
 
     #[test]
     fn codex_oauth_responses_force_streaming_even_if_client_sent_false() {
