@@ -628,12 +628,12 @@ openai_base_url = "http://127.0.0.1:15721/v1"
         let live_config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
             .expect("read Codex live config");
         assert!(
-            live_config.contains("model_provider = \"codex_model_router_v2\""),
-            "router takeover must use the dedicated Codex router provider bucket, got:\n{live_config}"
+            live_config.contains("model_provider = \"cc_switch_codex_router\""),
+            "router takeover must use the 2026-06-08 Codex router provider bucket, got:\n{live_config}"
         );
         assert!(
-            live_config.contains("[model_providers.codex_model_router_v2]"),
-            "router takeover must define the dedicated local provider table, got:\n{live_config}"
+            live_config.contains("[model_providers.cc_switch_codex_router]"),
+            "router takeover must define the 2026-06-08 local provider table, got:\n{live_config}"
         );
         assert!(
             live_config.contains("supports_websockets = false"),

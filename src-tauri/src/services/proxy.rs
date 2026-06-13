@@ -2634,7 +2634,7 @@ impl ProxyService {
     /// 判断当前 Codex provider 是否是启用中的 MultiRouter。
     ///
     /// takeover 写入 live config 时，普通第三方 provider 继续压到 `custom`，而
-    /// MultiRouter 需要恢复旧版稳定的 `codex_model_router_v2` 桶。这里只读取
+    /// MultiRouter 需要恢复 6 月 8 日验证过的 `cc_switch_codex_router` 桶。这里只读取
     /// cc-switch 私有的 `codexRouting` 配置，不访问数据库，也不改变 route 状态。
     fn codex_provider_has_enabled_routing(provider: Option<&Provider>) -> bool {
         let Some(routing) =

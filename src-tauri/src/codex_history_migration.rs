@@ -81,12 +81,14 @@ const CC_SWITCH_LEGACY_CODEX_MODEL_PROVIDER_IDS: &[&str] = &[
     "xiaomi_mimo_token_plan",
     "zhipu_glm",
     "zhipu_glm_en",
+    "cc_switch_codex_router",
     "codex_model_router",
     "codex_model_router_v2",
 ];
 const CC_SWITCH_OPENAI_HISTORY_SOURCE_PROVIDER_IDS: &[&str] = &[
     CC_SWITCH_CODEX_MODEL_PROVIDER_ID,
     LEGACY_CC_SWITCH_CODEX_MODEL_PROVIDER_ID,
+    "cc_switch_codex_router",
     "codex_model_router",
     "codex_model_router_v2",
 ];
