@@ -2933,7 +2933,7 @@ mod tests {
     }
 
     #[test]
-    fn responses_request_to_chat_preserves_plain_text_tool_output() {
+    fn responses_request_to_chat_sanitizes_malformed_tool_arguments() {
         let input = json!({
             "model": "gpt-5.4",
             "input": [
@@ -2956,9 +2956,38 @@ mod tests {
 
         assert_eq!(
             messages[0]["tool_calls"][0]["function"]["arguments"],
-            "not json"
+            r#"{"raw_arguments":"not json"}"#
         );
         assert_eq!(messages[1]["content"], "plain text result");
+    }
+
+    #[test]
+    fn responses_request_to_chat_sanitizes_partial_json_tool_arguments() {
+        let input = json!({
+            "model": "qwen3.6",
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_bad",
+                    "name": "update_plan",
+                    "arguments": "{"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_bad",
+                    "output": "tool parse error"
+                }
+            ]
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        assert_eq!(
+            messages[0]["tool_calls"][0]["function"]["arguments"],
+            r#"{"raw_arguments":"{"}"#
+        );
+        assert_eq!(messages[1]["content"], "tool parse error");
     }
 
     #[test]

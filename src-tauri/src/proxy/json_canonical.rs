@@ -61,17 +61,31 @@ pub(crate) fn canonicalize_json_string_if_parseable(value: &str) -> String {
 
 /// Normalize a tool-call `arguments` string into a valid JSON payload.
 ///
-/// Identical to [`canonicalize_json_string_if_parseable`] except that an empty
-/// (or whitespace-only) value is coerced to `"{}"` instead of being passed
-/// through verbatim. A no-argument tool call must serialize as `"{}"`; strict
-/// upstreams such as Minimax reject `arguments: ""` with a 400
-/// `invalid function arguments json string` error, whereas lenient ones
-/// (OpenAI, Kimi) silently treat it as an empty object.
+/// A no-argument tool call must serialize as `"{}"`; strict upstreams such as
+/// Minimax reject `arguments: ""` with a 400 `invalid function arguments json
+/// string` error, whereas lenient ones (OpenAI, Kimi) silently treat it as an
+/// empty object. Non-empty malformed fragments can also appear in replayed
+/// Codex history when a model emitted a partial tool call. Qwen/vLLM reparses
+/// historical assistant tool calls and rejects those fragments before it can
+/// answer, so preserve the raw fragment inside a valid object instead of
+/// forwarding invalid JSON verbatim.
 pub(crate) fn canonicalize_tool_arguments_str(value: &str) -> String {
     if value.trim().is_empty() {
         return "{}".to_string();
     }
-    canonicalize_json_string_if_parseable(value)
+    let trimmed = value.trim();
+    match serde_json::from_str::<Value>(trimmed) {
+        Ok(parsed) => canonical_json_string(&parsed),
+        Err(_) => {
+            // 非空但非法的工具参数不能原样进入 Chat 历史；严格上游会在工具解析阶段直接 400。
+            let mut fallback = serde_json::Map::new();
+            fallback.insert(
+                "raw_arguments".to_string(),
+                Value::String(value.to_string()),
+            );
+            canonical_json_string(&Value::Object(fallback))
+        }
+    }
 }
 
 /// Normalize a tool-call `arguments` field from a Responses/Chat item.
@@ -171,6 +185,18 @@ mod tests {
     }
 
     #[test]
+    fn canonicalize_tool_arguments_str_wraps_malformed_json() {
+        assert_eq!(
+            canonicalize_tool_arguments_str("{"),
+            r#"{"raw_arguments":"{"}"#
+        );
+        assert_eq!(
+            canonicalize_tool_arguments_str("not json"),
+            r#"{"raw_arguments":"not json"}"#
+        );
+    }
+
+    #[test]
     fn canonicalize_tool_arguments_handles_field_variants() {
         // Missing field -> empty object.
         assert_eq!(canonicalize_tool_arguments(None), "{}");
@@ -180,6 +206,11 @@ mod tests {
         assert_eq!(
             canonicalize_tool_arguments(Some(&json!(r#"{"b":2,"a":1}"#))),
             r#"{"a":1,"b":2}"#
+        );
+        // Malformed string field -> valid object that retains the raw fragment.
+        assert_eq!(
+            canonicalize_tool_arguments(Some(&json!("{"))),
+            r#"{"raw_arguments":"{"}"#
         );
         // Structured (non-string) field -> canonical serialization.
         assert_eq!(
