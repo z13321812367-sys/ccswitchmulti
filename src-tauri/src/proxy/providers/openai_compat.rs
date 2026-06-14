@@ -88,6 +88,142 @@ pub fn chat_completions_request_to_codex_responses(body: Value) -> Result<Value,
     Ok(result)
 }
 
+/// 将最小 OpenAI Responses 请求归一化为 ChatGPT Codex backend 接受的请求体。
+///
+/// 参数:
+/// - `request_body`: 本地代理收到或上游转换得到的 Responses JSON。
+/// 返回:
+/// - 补齐 `instructions/input/store/stream/tools/parallel_tool_calls/include` 后的 JSON。
+/// 副作用:
+/// - 无。函数只转换传入的 JSON 值，不访问配置、网络或数据库。
+/// 边界:
+/// - 调用方必须先确认这是 official managed Codex OAuth 透传路径；普通 OpenAI Responses、
+///   Qwen/DeepSeek Chat 转换路径不应该调用该函数。
+pub(crate) fn normalize_codex_oauth_responses_request(request_body: Value) -> Value {
+    let mut body = match request_body {
+        Value::Object(body) => body,
+        other => return other,
+    };
+
+    normalize_codex_oauth_responses_input(&mut body);
+    ensure_codex_oauth_responses_instructions(&mut body);
+    ensure_codex_oauth_reasoning_include(&mut body);
+
+    body.insert("store".to_string(), Value::Bool(false));
+    body.insert("stream".to_string(), Value::Bool(true));
+    if !body.get("tools").is_some_and(Value::is_array) {
+        body.insert("tools".to_string(), Value::Array(Vec::new()));
+    }
+    if body
+        .get("parallel_tool_calls")
+        .and_then(Value::as_bool)
+        .is_none()
+    {
+        body.insert("parallel_tool_calls".to_string(), Value::Bool(false));
+    }
+
+    body.remove("max_output_tokens");
+    body.remove("temperature");
+    body.remove("top_p");
+
+    Value::Object(body)
+}
+
+/// 归一化 Responses `input` 字段，避免 ChatGPT Codex backend 拒绝字符串输入。
+///
+/// 参数:
+/// - `body`: 正在构建的请求体对象。
+/// 返回:
+/// - 无，直接修改 `body.input`。
+/// 副作用:
+/// - 无外部副作用；只修改内存中的 JSON 对象。
+fn normalize_codex_oauth_responses_input(body: &mut Map<String, Value>) {
+    let input = match body.remove("input") {
+        Some(Value::Array(items)) => Value::Array(items),
+        Some(Value::String(text)) => codex_oauth_input_text_message(text),
+        Some(Value::Object(item)) => Value::Array(vec![Value::Object(item)]),
+        Some(Value::Null) | None => Value::Array(Vec::new()),
+        Some(other) => codex_oauth_input_text_message(other.to_string()),
+    };
+
+    body.insert("input".to_string(), input);
+}
+
+/// 构造 Codex Responses 兼容的单条 user text message。
+///
+/// 参数:
+/// - `text`: 用户输入文本。
+/// 返回:
+/// - `input` 数组值，内部包含一条 `type=message` 的 user 消息。
+/// 副作用:
+/// - 无。
+fn codex_oauth_input_text_message(text: String) -> Value {
+    let mut content_part = Map::new();
+    content_part.insert("type".to_string(), Value::String("input_text".to_string()));
+    content_part.insert("text".to_string(), Value::String(text));
+
+    let mut message = Map::new();
+    message.insert("type".to_string(), Value::String("message".to_string()));
+    message.insert("role".to_string(), Value::String("user".to_string()));
+    message.insert(
+        "content".to_string(),
+        Value::Array(vec![Value::Object(content_part)]),
+    );
+
+    Value::Array(vec![Value::Object(message)])
+}
+
+/// 补齐 ChatGPT Codex backend 要求的 `instructions` 字段。
+///
+/// 参数:
+/// - `body`: 正在构建的请求体对象。
+/// 返回:
+/// - 无，缺失或空白时写入最小默认 system instructions。
+/// 副作用:
+/// - 无外部副作用；只修改内存中的 JSON 对象。
+fn ensure_codex_oauth_responses_instructions(body: &mut Map<String, Value>) {
+    let has_non_empty_instructions = body
+        .get("instructions")
+        .and_then(Value::as_str)
+        .is_some_and(|instructions| !instructions.trim().is_empty());
+
+    if !has_non_empty_instructions {
+        body.insert(
+            "instructions".to_string(),
+            Value::String("You are a helpful assistant.".to_string()),
+        );
+    }
+}
+
+/// 确保 reasoning 加密内容被请求回来，避免多轮 Codex reasoning 状态丢失。
+///
+/// 参数:
+/// - `body`: 正在构建的请求体对象。
+/// 返回:
+/// - 无，直接修改或创建 `include` 数组。
+/// 副作用:
+/// - 无外部副作用；只修改内存中的 JSON 对象。
+fn ensure_codex_oauth_reasoning_include(body: &mut Map<String, Value>) {
+    const REASONING_MARKER: &str = "reasoning.encrypted_content";
+
+    match body.get_mut("include") {
+        Some(Value::Array(includes)) => {
+            if !includes
+                .iter()
+                .any(|value| value.as_str() == Some(REASONING_MARKER))
+            {
+                includes.push(Value::String(REASONING_MARKER.to_string()));
+            }
+        }
+        _ => {
+            body.insert(
+                "include".to_string(),
+                Value::Array(vec![Value::String(REASONING_MARKER.to_string())]),
+            );
+        }
+    }
+}
+
 /// 将非流式 Responses 响应转换为标准 OpenAI Chat Completions 响应。
 ///
 /// 参数:
@@ -948,6 +1084,81 @@ mod tests {
 
         assert_eq!(result["instructions"], "You are a helpful assistant.");
         assert_eq!(result["input"][0]["content"][0]["text"], "ping");
+    }
+
+    #[test]
+    fn codex_responses_request_normalizer_accepts_minimal_body() {
+        // official Codex backend 比公开 OpenAI Responses 更严格：最小 payload
+        // 必须补齐 Codex Desktop 请求体里的必填字段后才能透传。
+        let body = json!({
+            "model": "gpt-5.4-mini",
+            "input": "ping",
+            "store": true,
+            "stream": false,
+            "temperature": 0.1,
+            "top_p": 0.9,
+            "max_output_tokens": 32
+        });
+
+        let normalized = normalize_codex_oauth_responses_request(body);
+
+        assert_eq!(normalized["instructions"], "You are a helpful assistant.");
+        assert_eq!(normalized["store"], false);
+        assert_eq!(normalized["stream"], true);
+        assert_eq!(normalized["tools"], json!([]));
+        assert_eq!(normalized["parallel_tool_calls"], false);
+        assert_eq!(
+            normalized["include"],
+            json!(["reasoning.encrypted_content"])
+        );
+        assert_eq!(normalized["input"][0]["type"], "message");
+        assert_eq!(normalized["input"][0]["role"], "user");
+        assert_eq!(normalized["input"][0]["content"][0]["type"], "input_text");
+        assert_eq!(normalized["input"][0]["content"][0]["text"], "ping");
+        assert!(normalized.get("temperature").is_none());
+        assert!(normalized.get("top_p").is_none());
+        assert!(normalized.get("max_output_tokens").is_none());
+    }
+
+    #[test]
+    fn codex_responses_request_normalizer_preserves_desktop_shape() {
+        // Desktop 已经发送 Codex Responses 数组结构时，normalizer 只做幂等护栏，
+        // 不改模型、reasoning、service_tier、tools 或已有 instructions。
+        let body = json!({
+            "model": "gpt-5.5",
+            "instructions": "existing instructions",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "hello" }]
+            }],
+            "tools": [{ "type": "function", "name": "lookup" }],
+            "parallel_tool_calls": true,
+            "include": ["reasoning.encrypted_content"],
+            "reasoning": { "effort": "high" },
+            "service_tier": "priority",
+            "store": false,
+            "stream": true
+        });
+
+        let normalized = normalize_codex_oauth_responses_request(body);
+
+        assert_eq!(normalized["model"], "gpt-5.5");
+        assert_eq!(normalized["instructions"], "existing instructions");
+        assert_eq!(normalized["input"][0]["content"][0]["text"], "hello");
+        assert_eq!(normalized["tools"][0]["name"], "lookup");
+        assert_eq!(normalized["parallel_tool_calls"], true);
+        assert_eq!(normalized["reasoning"]["effort"], "high");
+        assert_eq!(normalized["service_tier"], "priority");
+        assert_eq!(
+            normalized["include"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|value| value.as_str() == Some("reasoning.encrypted_content"))
+                .count(),
+            1
+        );
     }
 
     #[test]

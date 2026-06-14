@@ -1546,6 +1546,18 @@ impl RequestForwarder {
 
         // 过滤私有参数（以 `_` 开头的字段），防止内部信息泄露到上游
         // 默认使用空白名单，过滤所有 _ 前缀字段
+        let request_body = if should_normalize_codex_oauth_responses_passthrough_body(
+            app_type,
+            provider,
+            &url,
+            needs_transform,
+            codex_responses_to_chat,
+            codex_responses_to_messages,
+        ) {
+            super::providers::openai_compat::normalize_codex_oauth_responses_request(request_body)
+        } else {
+            request_body
+        };
         let filtered_body = prepare_upstream_request_body(request_body);
         log_prompt_cache_trace(
             app_type,
@@ -2901,6 +2913,61 @@ fn should_preserve_exact_header_case(
     matches!(resolved_claude_api_format, None | Some("anthropic"))
 }
 
+/// 判断本次请求是否是 ChatGPT Codex 官方后端的 Responses 透传路径。
+///
+/// 参数:
+/// - `app_type`: 当前客户端应用类型，只有 Codex Desktop/CLI 请求需要该兼容层。
+/// - `provider`: 已经由 MultiRouter 解析后的 effective provider。
+/// - `url`: forwarder 最终要访问的上游 URL。
+/// - `needs_transform`: 是否已经走了 Claude/Anthropic 转换管线。
+/// - `codex_responses_to_chat`: 是否已经被改写到 Chat Completions 上游。
+/// - `codex_responses_to_messages`: 是否已经被改写到 Messages 上游。
+/// 返回:
+/// - `true` 表示需要在透传前补齐 ChatGPT Codex backend 的必填字段。
+/// 副作用:
+/// - 无。该函数只读入参，用来把修复范围限制在 official managed Codex OAuth。
+fn should_normalize_codex_oauth_responses_passthrough_body(
+    app_type: &AppType,
+    provider: &Provider,
+    url: &str,
+    needs_transform: bool,
+    codex_responses_to_chat: bool,
+    codex_responses_to_messages: bool,
+) -> bool {
+    matches!(app_type, AppType::Codex)
+        && provider.is_codex_oauth()
+        && !needs_transform
+        && !codex_responses_to_chat
+        && !codex_responses_to_messages
+        && is_chatgpt_codex_responses_upstream_url(url)
+}
+
+/// 判断 URL 是否指向 ChatGPT 的 Codex Responses backend。
+///
+/// 参数:
+/// - `url`: 已拼接完成的上游 URL。
+/// 返回:
+/// - `true` 表示 host/path 是 `chatgpt.com/backend-api/codex/responses` 系列。
+/// 副作用:
+/// - 无。解析失败时保守返回 `false`，避免影响普通 OpenAI/兼容厂商。
+fn is_chatgpt_codex_responses_upstream_url(url: &str) -> bool {
+    let Ok(uri) = url.parse::<http::Uri>() else {
+        return false;
+    };
+
+    let Some(host) = uri.host().map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    if host != "chatgpt.com" {
+        return false;
+    }
+
+    matches!(
+        uri.path().trim_end_matches('/'),
+        "/backend-api/codex/responses" | "/backend-api/codex/responses/compact"
+    )
+}
+
 fn is_streaming_request(endpoint: &str, body: &Value, headers: &axum::http::HeaderMap) -> bool {
     if body
         .get("stream")
@@ -3309,6 +3376,62 @@ mod tests {
             serde_json::to_string(&prepared).unwrap(),
             r#"{"a":2,"tools":[{"name":"lookup","parameters":{"properties":{"_id":{"type":"string"},"a":{"type":"string"},"b":{"type":"number"}},"type":"object"}}],"z":1}"#
         );
+    }
+
+    #[test]
+    fn codex_oauth_responses_passthrough_normalizer_is_scoped() {
+        let codex_oauth = test_provider_with_type(Some("codex_oauth"));
+        let regular = test_provider_with_type(None);
+        let official_url = "https://chatgpt.com/backend-api/codex/responses";
+
+        assert!(should_normalize_codex_oauth_responses_passthrough_body(
+            &AppType::Codex,
+            &codex_oauth,
+            official_url,
+            false,
+            false,
+            false
+        ));
+        assert!(!should_normalize_codex_oauth_responses_passthrough_body(
+            &AppType::Codex,
+            &regular,
+            official_url,
+            false,
+            false,
+            false
+        ));
+        assert!(!should_normalize_codex_oauth_responses_passthrough_body(
+            &AppType::Codex,
+            &codex_oauth,
+            "https://api.openai.com/v1/responses",
+            false,
+            false,
+            false
+        ));
+        assert!(!should_normalize_codex_oauth_responses_passthrough_body(
+            &AppType::Claude,
+            &codex_oauth,
+            official_url,
+            false,
+            false,
+            false
+        ));
+        assert!(!should_normalize_codex_oauth_responses_passthrough_body(
+            &AppType::Codex,
+            &codex_oauth,
+            official_url,
+            true,
+            false,
+            false
+        ));
+        assert!(!should_normalize_codex_oauth_responses_passthrough_body(
+            &AppType::Codex,
+            &codex_oauth,
+            official_url,
+            false,
+            true,
+            false
+        ));
     }
 
     #[tokio::test]

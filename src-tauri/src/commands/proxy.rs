@@ -119,6 +119,8 @@ pub struct CodexRouterLogDiagnostics {
     pub recent_events: Vec<CodexRouterLogEvent>,
 }
 
+pub use crate::codex_desktop::CodexModelPickerUnlockResult;
+
 /// 单条 MultiRouter route 的可读摘要。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -487,6 +489,16 @@ pub async fn diagnose_codex_multirouter(
         router_log,
         route_plan,
     })
+}
+
+/// 用 Codex++ 同类的 CDP 注入方式，把 CCSwitchMulti catalog 写进 Desktop renderer 白名单。
+///
+/// 该命令不会修改 auth.json，也不会改变 MultiRouter 路由；它只在 Codex Desktop
+/// renderer 内修正模型候选列表过滤。若 Codex 已经以普通方式启动，需要先完全退出
+/// Codex，再由该命令启动带 remote debugging 参数的新实例。
+#[tauri::command]
+pub async fn unlock_codex_model_picker() -> Result<CodexModelPickerUnlockResult, String> {
+    crate::codex_desktop::unlock_codex_model_picker().await
 }
 
 /// 显式把 Codex 历史 provider 桶同步到 MultiRouter 的 `custom` 运行桶。

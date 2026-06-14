@@ -37,6 +37,7 @@ import type {
   CodexDiagnosticCheck,
   CodexDiagnosticStatus,
   CodexHistoryProviderBucketSyncOutcome,
+  CodexModelPickerUnlockResult,
   CodexMultiRouterDiagnostics,
   CodexRouterLogEvent,
   ProxyStatus,
@@ -1284,6 +1285,12 @@ function StatusTab({
     useState<CodexHistoryProviderBucketSyncOutcome | null>(null);
   const [historySyncError, setHistorySyncError] = useState<string | null>(null);
   const [isSyncingHistory, setIsSyncingHistory] = useState(false);
+  const [modelPickerUnlockResult, setModelPickerUnlockResult] =
+    useState<CodexModelPickerUnlockResult | null>(null);
+  const [modelPickerUnlockError, setModelPickerUnlockError] = useState<
+    string | null
+  >(null);
+  const [isUnlockingModelPicker, setIsUnlockingModelPicker] = useState(false);
   const [statusView, setStatusView] = useState<StatusView>("link");
   const logs = requestLogs?.data ?? [];
   const proxyLogs = logs.filter(
@@ -1401,6 +1408,22 @@ function StatusTab({
     }
   }
 
+  /// Codex Desktop 模型菜单还会被 renderer 白名单二次过滤；这里显式触发 CDP 注入/启动修复。
+  async function unlockModelPicker() {
+    setIsUnlockingModelPicker(true);
+    setModelPickerUnlockError(null);
+    try {
+      const result = await proxyApi.unlockCodexModelPicker();
+      setModelPickerUnlockResult(result);
+    } catch (error) {
+      setModelPickerUnlockError(
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      setIsUnlockingModelPicker(false);
+    }
+  }
+
   return (
     <div className="space-y-4">
       <StatusViewSwitcher
@@ -1446,6 +1469,20 @@ function StatusTab({
                     <FileClock className="h-4 w-4" />
                   )}
                   同步历史桶
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={unlockModelPicker}
+                  disabled={isUnlockingModelPicker}
+                  className="gap-2 border-indigo-500/50 bg-indigo-500/10 text-indigo-100 hover:bg-indigo-500/20"
+                >
+                  {isUnlockingModelPicker ? (
+                    <RefreshCw className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Wand2 className="h-4 w-4" />
+                  )}
+                  解锁模型菜单
                 </Button>
                 {selectedPlan ? (
                   <Button
@@ -1526,6 +1563,33 @@ function StatusTab({
               {historySyncResult.skippedReason
                 ? `，跳过原因：${historySyncResult.skippedReason}`
                 : ""}
+            </div>
+          ) : null}
+          {modelPickerUnlockError ? (
+            <div className="mt-3 rounded-lg border border-rose-700/50 bg-rose-950/30 p-3 text-xs text-rose-100">
+              模型菜单解锁失败：{modelPickerUnlockError}
+            </div>
+          ) : null}
+          {modelPickerUnlockResult ? (
+            <div
+              className={cn(
+                "mt-3 rounded-lg border p-3 text-xs leading-5",
+                modelPickerUnlockResult.injected
+                  ? "border-emerald-700/50 bg-emerald-950/25 text-emerald-100"
+                  : "border-amber-700/50 bg-amber-950/25 text-amber-100",
+              )}
+            >
+              <div className="font-semibold">
+                {modelPickerUnlockResult.injected
+                  ? "模型菜单白名单已注入"
+                  : "模型菜单白名单尚未注入"}
+              </div>
+              <div className="mt-1">{modelPickerUnlockResult.message}</div>
+              <div className="mt-1 font-mono text-[11px] opacity-80">
+                models={modelPickerUnlockResult.modelCount} port=
+                {modelPickerUnlockResult.debugPort ?? "-"} launched=
+                {String(modelPickerUnlockResult.launched)}
+              </div>
             </div>
           ) : null}
           <div className="mt-4 grid gap-3 text-sm md:grid-cols-3">

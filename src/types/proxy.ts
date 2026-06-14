@@ -125,6 +125,20 @@ export interface CodexRouterLogDiagnostics {
   recentEvents: CodexRouterLogEvent[];
 }
 
+export interface CodexModelPickerUnlockResult {
+  attemptedPorts: number[];
+  debugPort: number | null;
+  targetId: string | null;
+  targetTitle: string | null;
+  targetUrl: string | null;
+  modelCount: number;
+  modelNames: string[];
+  injected: boolean;
+  launched: boolean;
+  codexExecutable: string | null;
+  message: string;
+}
+
 export interface CodexRouteSummary {
   id: string | null;
   label: string | null;

@@ -738,7 +738,7 @@ dependencies = [
 
 [[package]]
 name = "cc-switch"
-version = "3.16.2-9"
+version = "3.16.2-11"
 dependencies = [
  "anyhow",
  "arboard",
@@ -794,6 +794,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
+ "tokio-tungstenite",
  "toml 0.8.23",
  "toml_edit 0.22.27",
  "tower 0.4.13",

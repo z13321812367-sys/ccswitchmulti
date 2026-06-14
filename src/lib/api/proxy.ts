@@ -11,6 +11,7 @@ import type {
   ExternalOpenAIAPIRuntimeStatus,
   GeneratedExternalOpenAIAPIKey,
   CodexMultiRouterDiagnostics,
+  CodexModelPickerUnlockResult,
   CodexHistoryProviderBucketSyncOutcome,
 } from "@/types/proxy";
 
@@ -36,6 +37,10 @@ export const proxyApi = {
     providerId?: string | null,
   ): Promise<CodexMultiRouterDiagnostics> {
     return invoke("diagnose_codex_multirouter", { providerId });
+  },
+
+  async unlockCodexModelPicker(): Promise<CodexModelPickerUnlockResult> {
+    return invoke("unlock_codex_model_picker");
   },
 
   async syncCodexHistoryToMultiRouter(): Promise<CodexHistoryProviderBucketSyncOutcome> {

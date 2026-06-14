@@ -5,6 +5,7 @@ mod claude_desktop_config;
 mod claude_mcp;
 mod claude_plugin;
 mod codex_config;
+mod codex_desktop;
 mod codex_history_migration;
 mod commands;
 mod config;
@@ -1306,6 +1307,7 @@ pub fn run() {
             commands::set_proxy_takeover_for_app,
             commands::get_proxy_status,
             commands::diagnose_codex_multirouter,
+            commands::unlock_codex_model_picker,
             commands::sync_codex_history_to_multirouter,
             commands::start_external_openai_api_server,
             commands::get_external_openai_api_server_status,

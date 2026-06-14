@@ -694,6 +694,9 @@ impl ProxyService {
                 // 只看占位符会把半接管/旧端口残留误判为可复用，导致开启接管后
                 // live 文件仍停留在普通供应商配置。
                 if has_backup && live_matches_current_proxy {
+                    if app == AppType::Codex {
+                        self.try_repair_codex_model_picker_after_takeover();
+                    }
                     return Ok(());
                 }
                 restore_existing_backup_before_takeover = has_backup;
@@ -765,6 +768,10 @@ impl ProxyService {
                         }
                     }
                 }
+            }
+
+            if app == AppType::Codex {
+                self.try_repair_codex_model_picker_after_takeover();
             }
 
             return Ok(());
@@ -2801,6 +2808,23 @@ impl ProxyService {
         }
 
         self.write_codex_live_for_provider(config, provider)
+    }
+
+    /// Codex Desktop renderer 可能会用远端 Statsig 白名单过滤本地 catalog。
+    ///
+    /// 接管写入完成后做一次 best-effort 注入：若 Codex 是通过带 CDP 的入口启动，
+    /// 这里会立即修复模型菜单；若普通启动没有 CDP，只记录日志，不影响路由链路。
+    fn try_repair_codex_model_picker_after_takeover(&self) {
+        tauri::async_runtime::spawn(async {
+            match crate::codex_desktop::try_unlock_running_codex_model_picker().await {
+                Ok(result) if result.injected => log::info!(
+                    "Codex Desktop 模型菜单白名单已注入，models={}",
+                    result.model_count
+                ),
+                Ok(result) => log::warn!("Codex Desktop 模型菜单白名单未注入: {}", result.message),
+                Err(error) => log::warn!("Codex Desktop 模型菜单白名单注入失败: {error}"),
+            }
+        });
     }
 
     fn write_codex_live_verbatim(&self, config: &Value) -> Result<(), String> {
