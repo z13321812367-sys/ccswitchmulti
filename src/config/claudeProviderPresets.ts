@@ -209,6 +209,21 @@ export const providerPresets: ProviderPreset[] = [
     icon: "ccsub",
   },
   {
+    name: "Unity2.ai",
+    websiteUrl: "https://unity2.ai",
+    apiKeyUrl: "https://unity2.ai/register?source=ccs",
+    settingsConfig: {
+      env: {
+        ANTHROPIC_BASE_URL: "https://api.unity2.ai",
+        ANTHROPIC_AUTH_TOKEN: "",
+      },
+    },
+    category: "aggregator",
+    isPartner: true,
+    partnerPromotionKey: "unity2",
+    icon: "unity2",
+  },
+  {
     name: "Gemini Native",
     websiteUrl: "https://ai.google.dev/gemini-api",
     apiKeyUrl: "https://aistudio.google.com/app/apikey",
@@ -357,10 +372,10 @@ export const providerPresets: ProviderPreset[] = [
       env: {
         ANTHROPIC_BASE_URL: "https://api.moonshot.cn/anthropic",
         ANTHROPIC_AUTH_TOKEN: "",
-        ANTHROPIC_MODEL: "kimi-k2.6",
-        ANTHROPIC_DEFAULT_HAIKU_MODEL: "kimi-k2.6",
-        ANTHROPIC_DEFAULT_SONNET_MODEL: "kimi-k2.6",
-        ANTHROPIC_DEFAULT_OPUS_MODEL: "kimi-k2.6",
+        ANTHROPIC_MODEL: "kimi-k2.7-code",
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: "kimi-k2.7-code",
+        ANTHROPIC_DEFAULT_SONNET_MODEL: "kimi-k2.7-code",
+        ANTHROPIC_DEFAULT_OPUS_MODEL: "kimi-k2.7-code",
       },
     },
     category: "cn_official",
@@ -728,8 +743,6 @@ export const providerPresets: ProviderPreset[] = [
     },
     endpointCandidates: ["https://sudocode.us", "https://sudocode.run"],
     category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "sudocode",
     icon: "sudocode",
   },
   {
@@ -1091,22 +1104,6 @@ export const providerPresets: ProviderPreset[] = [
     requiresOAuth: true,
     icon: "openai",
     iconColor: "#000000",
-  },
-  {
-    name: "LemonData",
-    websiteUrl: "https://lemondata.cc",
-    apiKeyUrl: "https://lemondata.cc/r/FFX1ZDUP",
-    apiKeyField: "ANTHROPIC_API_KEY",
-    settingsConfig: {
-      env: {
-        ANTHROPIC_BASE_URL: "https://api.lemondata.cc",
-        ANTHROPIC_API_KEY: "",
-      },
-    },
-    category: "third_party",
-    isPartner: true,
-    partnerPromotionKey: "lemondata",
-    icon: "lemondata",
   },
   {
     name: "Nvidia",

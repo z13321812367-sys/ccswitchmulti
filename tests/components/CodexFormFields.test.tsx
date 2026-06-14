@@ -59,6 +59,8 @@ function renderRoutingHarness(
         codexRouting={routing}
         onCodexRoutingChange={handleRoutingChange}
         speedTestEndpoints={[]}
+        customUserAgent=""
+        onCustomUserAgentChange={vi.fn()}
       />
     );
   }
