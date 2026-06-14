@@ -752,7 +752,7 @@ model_catalog_json = "cc-switch-model-catalog.json"
 name = "CCSwitch MultiRouter"
 base_url = "http://127.0.0.1:15721/v1"
 wire_api = "responses"
-requires_openai_auth = false
+requires_openai_auth = true
 supports_websockets = false
 experimental_bearer_token = "PROXY_MANAGED"
 "#;
@@ -808,6 +808,10 @@ experimental_bearer_token = "PROXY_MANAGED"
             assert!(
                 !live_config.contains("openai_base_url"),
                 "{label}: live config must not use built-in OpenAI base URL, got:\n{live_config}"
+            );
+            assert!(
+                live_config.contains("requires_openai_auth = true"),
+                "{label}: live config must keep Codex OAuth account state visible, got:\n{live_config}"
             );
             let live_toml: toml::Value =
                 toml::from_str(&live_config).expect("parse refreshed Codex live config");

@@ -21,6 +21,19 @@ The current failing runtime still has:
 
 Therefore the remaining "only 3 OpenAI models" symptom is not caused by `auth.json`, provider id naming, `/v1/models`, or an incomplete catalog. It is caused by Codex Desktop renderer filtering the already-loaded model list.
 
+## OAuth/account UI root cause
+
+The later "bottom-left OAuth account/quota disappeared" symptom has a separate provider-schema cause:
+
+- `~/.codex/auth.json` was verified healthy: `auth_mode = chatgpt`, no `OPENAI_API_KEY`, and ChatGPT OAuth tokens are present.
+- The official ChatGPT quota endpoint accepted those tokens and returned usage data.
+- The CCSwitch managed OAuth store also refreshed successfully and returned usage data.
+- Codex app-server's `get_auth_status` does not read `auth.json` when the active provider has `requires_openai_auth = false`; it returns `auth_method = None` and `requires_openai_auth = false` immediately.
+
+So the auth file was not the broken layer. The takeover provider schema was wrong for Desktop UI integration: it described the local router provider as not requiring OpenAI OAuth, which made Codex hide the official ChatGPT account/quota UI even though requests were still routed locally.
+
+Codex++ keeps relay providers on `requires_openai_auth = true` while still using the relay provider's `experimental_bearer_token` for API traffic, and also repairs the renderer auth context with `auth.setAuthMethod("chatgpt")`. CCSwitchMulti now follows that boundary: OAuth state remains visible to Codex Desktop, but request traffic still uses the local MultiRouter base URL and `PROXY_MANAGED` token.
+
 ## Codex Desktop filtering chain
 
 The installed Codex Desktop app bundle contains:
@@ -54,12 +67,14 @@ This matches the failure observed in CCSwitchMulti: the data layer has 7 models,
 The CCSwitchMulti fix keeps routing and auth unchanged, and only repairs the Desktop renderer picker:
 
 - `src-tauri/src/codex_desktop.rs`
-  - bumps the renderer patch key to v2;
+  - bumps the renderer patch key to v3;
   - injects into every matching Codex CDP page target instead of only the first page;
   - enables `Runtime` and `Page` before installing the script;
   - patches model containers to set `use_hidden_models = false` and `useHiddenModels = false`;
+  - patches React auth context back to `chatgpt` when an old renderer state cached a non-ChatGPT auth method;
   - still expands `available_models`, app-server model arrays, response JSON, and React state.
 - `src-tauri/src/services/proxy.rs`
+  - writes `requires_openai_auth = true` for the local custom/router Responses provider so Codex app-server keeps exposing OAuth account and quota state;
   - after Codex takeover, calls the full unlock path so Codex is launched with CDP when it is not already running;
   - if Codex is already running without CDP, it logs a precise warning instead of pretending the catalog is the blocker.
 - `src-tauri/src/commands/proxy.rs`

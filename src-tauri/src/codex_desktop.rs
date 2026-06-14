@@ -13,7 +13,7 @@ const DEFAULT_CODEX_DEBUG_PORT: u16 = 9229;
 const CDP_HTTP_TIMEOUT: Duration = Duration::from_secs(2);
 const CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
-const MODEL_PICKER_PATCH_KEY: &str = "__ccSwitchCodexModelPickerUnlockV2";
+const MODEL_PICKER_PATCH_KEY: &str = "__ccSwitchCodexModelPickerUnlockV3";
 
 /// Codex Desktop 模型菜单解锁命令的执行结果。
 #[derive(Debug, Clone, Serialize)]
@@ -730,10 +730,34 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     }};
   }};
   const reactFiberKeys = (element) => Object.keys(element || {{}}).filter((key) => key.startsWith("__reactFiber") || key.startsWith("__reactInternalInstance") || key.startsWith("__reactProps"));
+  // Codex app-server 会根据 requires_openai_auth 暴露 OAuth 状态；旧配置或缓存状态
+  // 可能把 renderer 留在非 chatgpt 模式，这里只修复前端 context，不改请求路由。
+  const authContextValueFrom = (element) => {{
+    for (const key of reactFiberKeys(element)) {{
+      for (let fiber = element?.[key]; fiber; fiber = fiber.return) {{
+        for (const value of [fiber.memoizedProps?.value, fiber.pendingProps?.value]) {{
+          if (value && typeof value === "object" && typeof value.setAuthMethod === "function" && "authMethod" in value) return value;
+        }}
+      }}
+    }}
+    return null;
+  }};
+  const spoofChatGPTAuthMethod = (element) => {{
+    const auth = authContextValueFrom(element);
+    if (!auth || auth.authMethod === "chatgpt") return false;
+    try {{
+      auth.setAuthMethod("chatgpt");
+      return true;
+    }} catch (error) {{
+      state.failures.push(String(error?.message || error));
+      return false;
+    }}
+  }};
   const patchReactState = () => {{
     const visited = new WeakSet();
     const nodes = [document.body, ...document.querySelectorAll("button, [role='menu'], [role='dialog'], [data-radix-popper-content-wrapper]")].filter(Boolean);
     for (const node of nodes.slice(0, 220)) {{
+      spoofChatGPTAuthMethod(node);
       for (const key of reactFiberKeys(node)) patchObjectGraph(node[key], visited);
     }}
   }};
@@ -897,6 +921,8 @@ mod tests {
         assert!(script.contains("107580212"));
         assert!(script.contains("list-models-for-host"));
         assert!(script.contains("model/list"));
+        assert!(script.contains("__ccSwitchCodexModelPickerUnlockV3"));
+        assert!(script.contains("auth.setAuthMethod(\"chatgpt\")"));
     }
 
     #[test]

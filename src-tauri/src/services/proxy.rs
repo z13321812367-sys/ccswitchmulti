@@ -2626,7 +2626,9 @@ impl ProxyService {
         doc["model_providers"][proxy_provider_id]["name"] = toml_edit::value(proxy_provider_name);
         doc["model_providers"][proxy_provider_id]["base_url"] = toml_edit::value(proxy_url.trim());
         doc["model_providers"][proxy_provider_id]["wire_api"] = toml_edit::value("responses");
-        doc["model_providers"][proxy_provider_id]["requires_openai_auth"] = toml_edit::value(false);
+        // 保留 OpenAI OAuth 语义只影响 Codex Desktop 的登录、额度和账户状态；
+        // 实际请求仍用 PROXY_MANAGED bearer token 命中本地 MultiRouter。
+        doc["model_providers"][proxy_provider_id]["requires_openai_auth"] = toml_edit::value(true);
         doc["model_providers"][proxy_provider_id]["supports_websockets"] = toml_edit::value(false);
 
         if let Some(upstream_model) =
@@ -4531,7 +4533,7 @@ wire_api = "chat"
                 .and_then(|v| v.get(crate::codex_config::CC_SWITCH_CODEX_MODEL_PROVIDER_ID))
                 .and_then(|v| v.get("requires_openai_auth"))
                 .and_then(|v| v.as_bool()),
-            Some(false)
+            Some(true)
         );
         assert_eq!(
             parsed
@@ -6115,12 +6117,16 @@ supports_websockets = false
         assert!(
             live_config.contains("model_provider = \"custom\"")
                 && live_config.contains("supports_websockets = false")
-                && live_config.contains("requires_openai_auth = false"),
-            "Codex should use the local custom Responses provider facade, got:\n{live_config}"
+                && live_config.contains("requires_openai_auth = true"),
+            "Codex should use the local custom Responses provider facade while keeping OAuth account state visible, got:\n{live_config}"
         );
         assert!(
             live_config.contains("model_catalog_json"),
             "DeepSeek takeover must keep a model_catalog_json pointer, got:\n{live_config}"
+        );
+        assert!(
+            live_config.contains("experimental_bearer_token = \"PROXY_MANAGED\""),
+            "Codex OAuth visibility must not replace the local proxy bearer token, got:\n{live_config}"
         );
         assert!(
             !live_config.contains("https://api.deepseek.com"),
