@@ -78,6 +78,8 @@ type WslShellPreference = {
 const WSL_SHELL_OPTIONS = ["sh", "bash", "zsh", "fish", "dash"] as const;
 // UI-friendly order: login shell first.
 const WSL_SHELL_FLAG_OPTIONS = ["-lic", "-lc", "-c"] as const;
+const CCSWITCHMULTI_REPO_URL = "https://github.com/BigStrongSun/cc-switch";
+const CCSWITCHMULTI_RELEASES_URL = `${CCSWITCHMULTI_REPO_URL}/releases`;
 
 const ENV_BADGE_CONFIG: Record<
   string,
@@ -369,14 +371,12 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
           : "";
 
       if (!displayVersion) {
-        await settingsApi.openExternal(
-          "https://github.com/farion1231/cc-switch/releases",
-        );
+        await settingsApi.openExternal(CCSWITCHMULTI_RELEASES_URL);
         return;
       }
 
       await settingsApi.openExternal(
-        `https://github.com/farion1231/cc-switch/releases/tag/${displayVersion}`,
+        `${CCSWITCHMULTI_RELEASES_URL}/tag/${displayVersion}`,
       );
     } catch (error) {
       console.error("[AboutSection] Failed to open release notes", error);
@@ -809,9 +809,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               variant="outline"
               size="sm"
               onClick={() =>
-                settingsApi.openExternal(
-                  "https://github.com/farion1231/cc-switch",
-                )
+                settingsApi.openExternal(CCSWITCHMULTI_REPO_URL)
               }
               className="h-8 gap-1.5 text-xs"
             >

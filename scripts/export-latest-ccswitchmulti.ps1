@@ -90,6 +90,104 @@ function Copy-RawExe {
     }
 }
 
+# Copy the standalone Codex history repair GUI.
+function Copy-HistoryRepairerExe {
+    param(
+        [string]$SourceExe,
+        [string]$Destination,
+        [string]$Version
+    )
+
+    if (-not (Test-Path -LiteralPath $SourceExe)) {
+        Write-Warning "Codex history repairer exe was not found: $SourceExe"
+        return
+    }
+
+    New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+    $versionedName = "CodexHistoryRepairer_$Version`_x64.exe"
+    Copy-Item -LiteralPath $SourceExe -Destination (Join-Path $Destination $versionedName) -Force
+
+    $stablePath = Join-Path $Destination "CodexHistoryRepairer.exe"
+    try {
+        Copy-Item -LiteralPath $SourceExe -Destination $stablePath -Force -ErrorAction Stop
+        Remove-Item -LiteralPath (Join-Path $Destination "HISTORY_REPAIRER_ALIAS_LOCKED.txt") -Force -ErrorAction SilentlyContinue
+    } catch {
+        $note = @(
+            "CodexHistoryRepairer.exe could not be replaced because it is probably running.",
+            "The fresh executable was still exported as $versionedName.",
+            "Close the running repairer and rerun the export if you need the stable alias updated.",
+            "Error: $($_.Exception.Message)"
+        ) -join "`r`n"
+        Set-Content -LiteralPath (Join-Path $Destination "HISTORY_REPAIRER_ALIAS_LOCKED.txt") -Value $note -Encoding UTF8
+        Write-Warning $note
+    }
+}
+
+# Detect a local Tauri signing key when one is available outside the repository.
+function Initialize-TauriSigningKey {
+    param([string]$DefaultKeyPath)
+
+    if (-not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+        return $true
+    }
+    if (-not (Test-Path -LiteralPath $DefaultKeyPath)) {
+        return $false
+    }
+
+    Write-Host "Using local Tauri updater signing key: $DefaultKeyPath"
+    return $true
+}
+
+# Sign exported Windows setup manually. This avoids the Tauri build-time updater
+# signer path hanging while still producing the .sig required by latest.json.
+function Write-TauriSetupSignature {
+    param(
+        [string]$RepoRoot,
+        [string]$SetupPath,
+        [string]$SigningKeyPath
+    )
+
+    if (-not (Test-Path -LiteralPath $SetupPath)) {
+        Write-Warning "setup signature skipped because the setup exe was not found: $SetupPath"
+        return $false
+    }
+    if (-not (Test-Path -LiteralPath $SigningKeyPath)) {
+        Write-Warning "setup signature skipped because the Tauri signing key was not found: $SigningKeyPath"
+        return $false
+    }
+
+    Push-Location $RepoRoot
+    try {
+        $signatureOutput = pnpm tauri signer sign --private-key-path $SigningKeyPath --password= $SetupPath
+        if ($LASTEXITCODE -ne 0) {
+            throw "tauri signer failed with exit code $LASTEXITCODE"
+        }
+    } finally {
+        Pop-Location
+    }
+
+    $sigPath = "$SetupPath.sig"
+    if (Test-Path -LiteralPath $sigPath) {
+        $writtenSignature = (Get-Content -LiteralPath $sigPath -Raw).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($writtenSignature)) {
+            return $true
+        }
+    }
+
+    $signature = ""
+    for ($index = 0; $index -lt $signatureOutput.Count; $index++) {
+        if ([string]$signatureOutput[$index] -eq "Public signature:" -and ($index + 1) -lt $signatureOutput.Count) {
+            $signature = ([string]$signatureOutput[$index + 1]).Trim()
+            break
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($signature)) {
+        throw "tauri signer returned an empty signature for $SetupPath"
+    }
+    Set-Content -LiteralPath $sigPath -Value $signature -Encoding UTF8
+    return $true
+}
+
 # Write a clear note for platforms that cannot be built on the current host.
 function Write-PlatformNote {
     param(
@@ -139,12 +237,53 @@ function Write-ReleaseReadme {
         "- windows/installer: Windows installers, including NSIS setup and MSI when available.",
         "- windows/portable: Windows portable zip. Unzip and run the executable.",
         "- windows/raw-exe: Raw Tauri release executable for quick local verification.",
+        "- tools/codex-history-repairer: Standalone GUI for repairing Codex Desktop history visibility.",
         "- linux and macos: Build notes when this Windows host cannot produce native artifacts.",
+        "- latest.json: Tauri updater index when updater signatures are available.",
         "- SHA256SUMS.txt: SHA256 checksums for exported files.",
         "",
         "Note: the portable build still stores app data under the user's normal system app-data directory."
     ) -join "`r`n"
     Set-Content -LiteralPath (Join-Path $Root "README.md") -Value $content -Encoding UTF8
+}
+
+# Write the Tauri updater index for the current Windows release asset.
+function Write-LatestJson {
+    param(
+        [string]$Root,
+        [string]$Version,
+        [string]$Repo
+    )
+
+    $installerDir = Join-Path $Root "windows\installer"
+    $setup = Get-ChildItem -LiteralPath $installerDir -Filter "CCSwitchMulti_$Version`_x64-setup.exe" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $setup) {
+        Write-Warning "latest.json skipped because the Windows setup exe was not exported."
+        return
+    }
+
+    $sigPath = "$($setup.FullName).sig"
+    if (-not (Test-Path -LiteralPath $sigPath)) {
+        Write-Warning "latest.json skipped because the Windows setup signature was not exported: $sigPath"
+        return
+    }
+
+    $signature = (Get-Content -LiteralPath $sigPath -Raw).Trim()
+    $tag = "v$Version"
+    $assetUrl = "https://github.com/$Repo/releases/download/$tag/$($setup.Name)"
+    $payload = [ordered]@{
+        version = $Version
+        notes = "CCSwitchMulti $tag"
+        pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+        platforms = [ordered]@{
+            "windows-x86_64" = [ordered]@{
+                signature = $signature
+                url = $assetUrl
+            }
+        }
+    }
+    $json = $payload | ConvertTo-Json -Depth 8
+    Set-Content -LiteralPath (Join-Path $Root "latest.json") -Value $json -Encoding UTF8
 }
 
 $repoRoot = Get-RepoRoot
@@ -154,11 +293,17 @@ $releaseDir = Join-Path $tauriDir "target\release"
 $bundleDir = Join-Path $releaseDir "bundle"
 $packageJson = Get-Content -LiteralPath (Join-Path $repoRoot "package.json") -Raw | ConvertFrom-Json
 $version = [string]$packageJson.version
+$githubRepo = "BigStrongSun/cc-switch"
+$defaultSigningKeyPath = Join-Path $env:USERPROFILE ".ccswitchmulti\tauri-update.key"
+$hasUpdaterSigningKey = Initialize-TauriSigningKey -DefaultKeyPath $defaultSigningKeyPath
 
 if (-not $SkipBuild) {
     Push-Location $repoRoot
     $buildConfig = New-TemporaryFile
     try {
+        if (-not $hasUpdaterSigningKey) {
+            Write-Warning "Tauri updater signing key was not found. Building without updater signatures."
+        }
         $override = @{
             bundle = @{
                 createUpdaterArtifacts = $false
@@ -168,6 +313,10 @@ if (-not $SkipBuild) {
         pnpm tauri build --bundles nsis --config $buildConfig.FullName
         if ($LASTEXITCODE -ne 0) {
             throw "tauri build failed with exit code $LASTEXITCODE"
+        }
+        cargo build --manifest-path (Join-Path $tauriDir "Cargo.toml") --bin codex-history-repairer --features history-repairer --release
+        if ($LASTEXITCODE -ne 0) {
+            throw "codex-history-repairer build failed with exit code $LASTEXITCODE"
         }
     } finally {
         Remove-Item -LiteralPath $buildConfig.FullName -Force -ErrorAction SilentlyContinue
@@ -180,10 +329,15 @@ Clear-ExportRoot -Root $exportRoot
 $windowsInstaller = Join-Path $exportRoot "windows\installer"
 $windowsPortable = Join-Path $exportRoot "windows\portable"
 $windowsRawExe = Join-Path $exportRoot "windows\raw-exe"
+$historyRepairer = Join-Path $exportRoot "tools\codex-history-repairer"
 
 $currentSetupPattern = Join-Path $bundleDir "nsis\CCSwitchMulti_$version`_x64-setup.exe"
 Copy-Artifacts -Pattern $currentSetupPattern -Destination $windowsInstaller | Out-Null
 Copy-Artifacts -Pattern (Join-Path $bundleDir "nsis\*.sig") -Destination $windowsInstaller | Out-Null
+if ($hasUpdaterSigningKey) {
+    $exportedSetup = Join-Path $windowsInstaller "CCSwitchMulti_$version`_x64-setup.exe"
+    Write-TauriSetupSignature -RepoRoot $repoRoot -SetupPath $exportedSetup -SigningKeyPath $defaultSigningKeyPath | Out-Null
+}
 
 $sourceExe = Join-Path $releaseDir "cc-switch.exe"
 if (Test-Path -LiteralPath $sourceExe) {
@@ -195,12 +349,17 @@ if (Test-Path -LiteralPath $sourceExe) {
 }
 
 Copy-RawExe -SourceExe $sourceExe -Destination $windowsRawExe -Version $version
+$repairerExe = Join-Path $releaseDir "codex-history-repairer.exe"
+Copy-HistoryRepairerExe -SourceExe $repairerExe -Destination $historyRepairer -Version $version
 
 Write-PlatformNote -Path (Join-Path $exportRoot "linux") -Platform "Linux" -Reason "Run pnpm tauri build on a Linux host with Rust, Node/pnpm, and Tauri WebKit/GTK dependencies installed, then run this export script."
 Write-PlatformNote -Path (Join-Path $exportRoot "macos") -Platform "macOS" -Reason "Run pnpm tauri build on a macOS host with Xcode Command Line Tools, Rust, and Node/pnpm installed, then run this export script."
 Copy-Item -LiteralPath (Join-Path $exportRoot "linux\BUILD_ON_PLATFORM.md") -Destination (Join-Path $exportRoot "linux-build-note.md") -Force
 Copy-Item -LiteralPath (Join-Path $exportRoot "macos\BUILD_ON_PLATFORM.md") -Destination (Join-Path $exportRoot "macos-build-note.md") -Force
 Write-ReleaseReadme -Root $exportRoot -Version $version
+if ($hasUpdaterSigningKey) {
+    Write-LatestJson -Root $exportRoot -Version $version -Repo $githubRepo
+}
 Write-Checksums -Root $exportRoot
 
 Write-Host "Exported CCSwitchMulti release artifacts to: $exportRoot"

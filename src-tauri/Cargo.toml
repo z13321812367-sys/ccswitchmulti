@@ -1,12 +1,13 @@
 [package]
 name = "cc-switch"
-version = "3.16.2-18"
+version = "3.16.2-19"
 description = "All-in-One Assistant for Claude Code, Codex & Gemini CLI"
 authors = ["Jason Young"]
 license = "MIT"
-repository = "https://github.com/farion1231/cc-switch"
+repository = "https://github.com/BigStrongSun/cc-switch"
 edition = "2021"
 rust-version = "1.85.0"
+autobins = false
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -15,8 +16,18 @@ name = "cc_switch_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 doctest = false
 
+[[bin]]
+name = "cc-switch"
+path = "src/main.rs"
+
+[[bin]]
+name = "codex-history-repairer"
+path = "src/bin/codex-history-repairer.rs"
+required-features = ["history-repairer"]
+
 [features]
 default = []
+history-repairer = []
 test-hooks = []
 
 [build-dependencies]
@@ -91,7 +102,7 @@ webkit2gtk = { version = "2.0.1", features = ["v2_16"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg = "0.52"
-windows-sys = { version = "0.61", features = ["Win32_Globalization", "Win32_UI_Shell"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_UI_Controls", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5"

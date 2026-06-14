@@ -23,8 +23,15 @@ use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use toml_edit::DocumentMut;
+
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const MIGRATION_NAME: &str = "codex-history-provider-migration-v1";
 const OPENAI_HISTORY_MIGRATION_NAME: &str = "codex-history-openai-provider-migration-v2";
@@ -137,6 +144,48 @@ pub struct CodexHistoryVisibilityRepairOptions {
     pub include_archived: Option<bool>,
     pub include_subagents: Option<bool>,
     pub skip_provider_bucket_sync: Option<bool>,
+}
+
+/// 独立历史修复工具的调用参数。
+///
+/// 该结构不依赖 CC Switch 数据库，适合单独 exe 或脚本式入口使用。目标 provider 默认跟随
+/// `~/.codex/config.toml` 的顶层 `model_provider`，这样切到第三方 provider 后不会误修回官方
+/// `openai` 桶；读不到 live provider 时才回退到稳定 MultiRouter 桶。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexHistoryStandaloneRepairOptions {
+    pub dry_run: bool,
+    pub codex_home: Option<String>,
+    pub state_db_path: Option<String>,
+    pub project_path: Option<String>,
+    pub target_provider: Option<String>,
+    pub source_provider_ids: Option<Vec<String>>,
+    pub count: Option<usize>,
+    pub window_limit: Option<usize>,
+    pub include_archived: Option<bool>,
+    pub include_subagents: Option<bool>,
+    pub skip_provider_bucket_sync: Option<bool>,
+    pub force_while_codex_running: Option<bool>,
+}
+
+impl Default for CodexHistoryStandaloneRepairOptions {
+    /// 构造独立工具的保守默认值：先 dry-run，默认聚焦当前目录，不包含归档和 subagent。
+    fn default() -> Self {
+        Self {
+            dry_run: true,
+            codex_home: None,
+            state_db_path: None,
+            project_path: None,
+            target_provider: None,
+            source_provider_ids: None,
+            count: Some(30),
+            window_limit: Some(80),
+            include_archived: Some(false),
+            include_subagents: Some(false),
+            skip_provider_bucket_sync: Some(false),
+            force_while_codex_running: Some(false),
+        }
+    }
 }
 
 impl Default for CodexHistoryVisibilityRepairOptions {
@@ -412,6 +461,93 @@ pub fn repair_codex_history_visibility_for_multirouter(
             window_limit,
             include_archived,
             include_subagents,
+            backup_root_override: None,
+        },
+    )
+}
+
+/// 执行不依赖 CC Switch 数据库的 Codex Desktop 历史可见性修复。
+///
+/// 该入口用于独立 GUI exe：它直接解析 Codex home、active SQLite、session_index 和全局
+/// workspace hints。写入模式默认会阻止在 Codex Desktop/app-server 仍运行时执行，避免活跃进程
+/// 立刻覆盖 `.codex-global-state.json` 或 SQLite WAL 状态。
+pub fn repair_codex_history_visibility_standalone(
+    options: CodexHistoryStandaloneRepairOptions,
+) -> Result<CodexHistoryVisibilityRepairOutcome, AppError> {
+    let codex_dir = options
+        .codex_home
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(resolve_user_path)
+        .unwrap_or_else(get_codex_config_dir);
+    let config_path = codex_dir.join("config.toml");
+    let config_text = fs::read_to_string(&config_path).unwrap_or_default();
+    let live_config_model_provider = current_codex_model_provider_from_config_text(&config_text);
+    let target_provider = options
+        .target_provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| live_config_model_provider.clone())
+        .unwrap_or_else(|| CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID.to_string());
+    let dry_run = options.dry_run;
+    if !dry_run && !options.force_while_codex_running.unwrap_or(false) {
+        let running = running_codex_desktop_process_descriptions();
+        if !running.is_empty() {
+            return Err(AppError::Message(format!(
+                "Codex Desktop/app-server 仍在运行。请先完全退出 Codex 后再写入，或勾选强制写入。检测到: {}",
+                running.join("; ")
+            )));
+        }
+    }
+
+    let Some(active_db) = resolve_active_codex_state_db_with_override(
+        &codex_dir,
+        &config_text,
+        options.state_db_path.as_deref(),
+    )?
+    else {
+        return Ok(CodexHistoryVisibilityRepairOutcome {
+            dry_run,
+            codex_home: codex_dir.to_string_lossy().to_string(),
+            target_provider,
+            live_config_model_provider,
+            skipped_reason: Some("state_db_not_found".to_string()),
+            ..Default::default()
+        });
+    };
+
+    let mut source_provider_ids = if options.skip_provider_bucket_sync.unwrap_or(false) {
+        BTreeSet::new()
+    } else {
+        options
+            .source_provider_ids
+            .unwrap_or_else(default_history_visibility_source_provider_ids)
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect::<BTreeSet<_>>()
+    };
+    source_provider_ids.remove(&target_provider);
+
+    repair_codex_history_visibility_at(
+        &codex_dir,
+        active_db,
+        &target_provider,
+        live_config_model_provider,
+        source_provider_ids,
+        options
+            .project_path
+            .as_deref()
+            .and_then(normalize_history_path),
+        HistoryVisibilityRepairRuntimeOptions {
+            dry_run,
+            count: options.count.unwrap_or(30),
+            window_limit: options.window_limit.unwrap_or(80),
+            include_archived: options.include_archived.unwrap_or(false),
+            include_subagents: options.include_subagents.unwrap_or(false),
             backup_root_override: None,
         },
     )
@@ -724,12 +860,23 @@ fn collect_history_visibility_source_provider_ids(
     db: &Database,
 ) -> Result<BTreeSet<String>, AppError> {
     let mut ids = collect_source_model_provider_ids(db)?;
-    ids.insert(OFFICIAL_OPENAI_CODEX_MODEL_PROVIDER_ID.to_string());
-    ids.insert(CC_SWITCH_CODEX_MODEL_PROVIDER_ID.to_string());
-    ids.insert("custom".to_string());
-    ids.insert("cc_switch_codex_router".to_string());
-    ids.insert("codex_model_router".to_string());
+    ids.extend(default_history_visibility_source_provider_ids());
     Ok(ids)
+}
+
+/// 返回独立修复和 MultiRouter 修复共同认可的历史来源 provider 桶。
+fn default_history_visibility_source_provider_ids() -> Vec<String> {
+    [
+        OFFICIAL_OPENAI_CODEX_MODEL_PROVIDER_ID,
+        CC_SWITCH_CODEX_MODEL_PROVIDER_ID,
+        CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID,
+        "custom",
+        "cc_switch_codex_router",
+        "codex_model_router",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 /// 解析当前 Codex Desktop 真正使用的 state DB，优先新版 `sqlite/state_5.sqlite`。
@@ -761,6 +908,81 @@ fn resolve_active_codex_state_db(
         });
     }
     None
+}
+
+/// 解析 active state DB；独立工具传入显式路径时优先使用该路径。
+fn resolve_active_codex_state_db_with_override(
+    codex_dir: &Path,
+    config_text: &str,
+    explicit_path: Option<&str>,
+) -> Result<Option<ActiveCodexStateDb>, AppError> {
+    if let Some(raw_path) = explicit_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let path = resolve_user_path(&strip_long_path_prefix(raw_path));
+        if !path.exists() {
+            return Err(AppError::Message(format!(
+                "指定的 Codex state DB 不存在: {}",
+                path.display()
+            )));
+        }
+        return Ok(Some(ActiveCodexStateDb {
+            path,
+            kind: "explicit".to_string(),
+        }));
+    }
+    Ok(resolve_active_codex_state_db(codex_dir, config_text))
+}
+
+/// 检测正在运行的 Codex Desktop/app-server 进程，写入前用于提示并发覆盖风险。
+#[cfg(target_os = "windows")]
+fn running_codex_desktop_process_descriptions() -> Vec<String> {
+    let script = r#"
+$current = $PID
+Get-CimInstance Win32_Process |
+  Where-Object {
+    $_.ProcessId -ne $current -and
+    $_.CommandLine -and
+    (
+      $_.CommandLine -like '*OpenAI.Codex*' -or
+      $_.CommandLine -like '*\codex.exe*app-server*' -or
+      $_.CommandLine -like '*\Codex.exe*' -or
+      $_.CommandLine -like '*codex-app-server*'
+    ) -and
+    $_.CommandLine -notlike '*codex-history-repairer*'
+  } |
+  Select-Object -First 8 |
+  ForEach-Object { "$($_.ProcessId) $($_.Name)" }
+"#;
+    let mut command = Command::new("powershell");
+    command
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ])
+        .creation_flags(CREATE_NO_WINDOW);
+    let Ok(output) = command.output() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// 非 Windows 平台暂不主动扫描 Codex Desktop 进程。
+#[cfg(not(target_os = "windows"))]
+fn running_codex_desktop_process_descriptions() -> Vec<String> {
+    Vec::new()
 }
 
 /// 读取 live config 顶层 model_provider，用于结果展示和误修排查。
@@ -2704,6 +2926,80 @@ mod tests {
 
         assert_eq!(active.kind, "sqlite_subdir");
         assert_eq!(active.path, sqlite_dir.join(CODEX_STATE_DB_FILENAME));
+    }
+
+    #[test]
+    fn standalone_repair_defaults_target_to_live_config_provider() {
+        let dir = tempdir().expect("tempdir");
+        let codex_dir = dir.path().join(".codex");
+        let sqlite_dir = codex_dir.join("sqlite");
+        let session_dir = codex_dir.join("sessions/2026/06/15");
+        fs::create_dir_all(&sqlite_dir).expect("create sqlite dir");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+        fs::write(
+            codex_dir.join("config.toml"),
+            r#"model_provider = "deepseek""#,
+        )
+        .expect("write config");
+
+        let rollout = session_dir.join("rollout-live-target.jsonl");
+        fs::write(
+            &rollout,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"live-target\",\"model_provider\":\"codex_model_router_v2\"}}\n",
+                "{\"type\":\"user_message\",\"message\":\"hello\"}\n"
+            ),
+        )
+        .expect("write rollout");
+
+        let db_path = sqlite_dir.join(CODEX_STATE_DB_FILENAME);
+        let conn = Connection::open(&db_path).expect("open active db");
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                rollout_path TEXT,
+                model_provider TEXT,
+                cwd TEXT,
+                has_user_event INTEGER,
+                archived INTEGER,
+                source TEXT,
+                thread_source TEXT,
+                title TEXT,
+                preview TEXT,
+                first_user_message TEXT,
+                updated_at INTEGER,
+                updated_at_ms INTEGER
+            );",
+        )
+        .expect("create threads table");
+        conn.execute(
+            "INSERT INTO threads VALUES (?1, ?2, 'codex_model_router_v2', ?3, 0, 0, 'vscode', 'user', 'Live target', 'Live target', NULL, 1000, 1000000)",
+            (
+                &"live-target",
+                &rollout.to_string_lossy().to_string(),
+                &"C:\\Users\\sunda\\Documents\\LLMservice",
+            ),
+        )
+        .expect("insert thread");
+        drop(conn);
+
+        let result =
+            repair_codex_history_visibility_standalone(CodexHistoryStandaloneRepairOptions {
+                dry_run: true,
+                codex_home: Some(codex_dir.to_string_lossy().to_string()),
+                project_path: Some("C:\\Users\\sunda\\Documents\\LLMservice".to_string()),
+                ..Default::default()
+            })
+            .expect("standalone repair dry-run");
+
+        assert_eq!(result.target_provider, "deepseek");
+        assert!(result
+            .source_provider_ids
+            .iter()
+            .any(|provider| provider == CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID));
+        assert_eq!(result.provider_rows_to_update, 1);
+        assert_eq!(result.user_event_rows_to_update, 1);
+        assert_eq!(result.active_db_kind.as_deref(), Some("sqlite_subdir"));
     }
 
     #[test]
