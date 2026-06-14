@@ -2812,11 +2812,11 @@ impl ProxyService {
 
     /// Codex Desktop renderer 可能会用远端 Statsig 白名单过滤本地 catalog。
     ///
-    /// 接管写入完成后做一次 best-effort 注入：若 Codex 是通过带 CDP 的入口启动，
-    /// 这里会立即修复模型菜单；若普通启动没有 CDP，只记录日志，不影响路由链路。
+    /// 接管写入完成后做一次 best-effort 注入：若 Codex 未运行，会用 CDP 参数启动；
+    /// 若 Codex 已经普通启动且没有 CDP，只记录明确提示，不影响路由链路。
     fn try_repair_codex_model_picker_after_takeover(&self) {
         tauri::async_runtime::spawn(async {
-            match crate::codex_desktop::try_unlock_running_codex_model_picker().await {
+            match crate::codex_desktop::unlock_codex_model_picker().await {
                 Ok(result) if result.injected => log::info!(
                     "Codex Desktop 模型菜单白名单已注入，models={}",
                     result.model_count

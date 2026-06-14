@@ -92,6 +92,9 @@ export interface CodexAppServerProcessDiagnostics {
 export interface CodexDesktopRuntimeDiagnostics {
   running: boolean;
   appServerRunning: boolean;
+  remoteDebuggingEnabled: boolean;
+  remoteDebuggingPort: number | null;
+  modelPickerPatchable: boolean;
   processCount: number;
   appServerCount: number;
   processes: CodexAppServerProcessDiagnostics[];

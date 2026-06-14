@@ -13,7 +13,7 @@ const DEFAULT_CODEX_DEBUG_PORT: u16 = 9229;
 const CDP_HTTP_TIMEOUT: Duration = Duration::from_secs(2);
 const CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
-const MODEL_PICKER_PATCH_KEY: &str = "__ccSwitchCodexModelPickerUnlockV1";
+const MODEL_PICKER_PATCH_KEY: &str = "__ccSwitchCodexModelPickerUnlockV2";
 
 /// Codex Desktop 模型菜单解锁命令的执行结果。
 #[derive(Debug, Clone, Serialize)]
@@ -133,30 +133,6 @@ pub async fn unlock_codex_model_picker() -> Result<CodexModelPickerUnlockResult,
     }))
 }
 
-/// 仅在当前已开放 CDP 的 Codex Desktop 上尝试注入，供 takeover 后的后台修复使用。
-pub async fn try_unlock_running_codex_model_picker() -> Result<CodexModelPickerUnlockResult, String>
-{
-    let catalog = load_cc_switch_model_catalog_projection()?;
-    let attempted_ports = candidate_debug_ports(DEFAULT_CODEX_DEBUG_PORT);
-    if let Some(result) = try_inject_on_candidate_ports(&catalog, &attempted_ports).await {
-        return Ok(result);
-    }
-    Ok(CodexModelPickerUnlockResult {
-        attempted_ports,
-        debug_port: None,
-        target_id: None,
-        target_title: None,
-        target_url: None,
-        model_count: catalog.model_names.len(),
-        model_names: catalog.model_names,
-        injected: false,
-        launched: false,
-        codex_executable: detect_running_codex_main_process()
-            .map(|path| path.display().to_string()),
-        message: "No injectable Codex Desktop CDP target was found.".to_string(),
-    })
-}
-
 /// 从 cc-switch 生成的 catalog 中读取模型名和 renderer 需要的最小描述。
 fn load_cc_switch_model_catalog_projection() -> Result<CodexModelCatalogProjection, String> {
     let catalog_path = crate::codex_config::get_codex_model_catalog_path();
@@ -272,17 +248,23 @@ async fn try_inject_on_candidate_ports(
             Ok(targets) => targets,
             Err(_) => continue,
         };
-        let target = match pick_codex_page_target(&targets, *port) {
-            Ok(target) => target,
+        let targets = match pick_codex_page_targets(&targets, *port) {
+            Ok(targets) => targets,
             Err(_) => continue,
         };
-        let Some(websocket_url) = target.web_socket_debugger_url.as_deref() else {
+        let script = build_model_picker_unlock_script(catalog);
+        let mut injected_target = None;
+        for target in targets {
+            let Some(websocket_url) = target.web_socket_debugger_url.as_deref() else {
+                continue;
+            };
+            if install_script(websocket_url, &script).await.is_ok() {
+                injected_target.get_or_insert(target);
+            }
+        }
+        let Some(target) = injected_target else {
             continue;
         };
-        let script = build_model_picker_unlock_script(catalog);
-        if install_script(websocket_url, &script).await.is_err() {
-            continue;
-        }
         return Some(CodexModelPickerUnlockResult {
             attempted_ports: ports.to_vec(),
             debug_port: Some(*port),
@@ -341,7 +323,10 @@ async fn list_cdp_targets(debug_port: u16) -> Result<Vec<CdpTarget>, String> {
 /// 共享调试端口如 9222 可能属于 Chrome 或其它 Electron 应用，必须看到 Codex
 /// 标识才注入；CCSwitchMulti 自己启动的默认 9229 允许在标题还没初始化时退回
 /// 到第一个 page target。
-fn pick_codex_page_target(targets: &[CdpTarget], debug_port: u16) -> Result<CdpTarget, String> {
+fn pick_codex_page_targets(
+    targets: &[CdpTarget],
+    debug_port: u16,
+) -> Result<Vec<CdpTarget>, String> {
     let pages = targets.iter().filter(|target| {
         target.target_type == "page"
             && target
@@ -349,17 +334,19 @@ fn pick_codex_page_target(targets: &[CdpTarget], debug_port: u16) -> Result<CdpT
                 .as_deref()
                 .is_some_and(|url| !url.is_empty())
     });
-    let mut first_page = None;
+    let mut all_pages = Vec::new();
+    let mut codex_pages = Vec::new();
     for target in pages {
-        first_page.get_or_insert(target);
+        all_pages.push(target.clone());
         if target_matches_codex_desktop(target) {
-            return Ok(target.clone());
+            codex_pages.push(target.clone());
         }
     }
-    if debug_port == DEFAULT_CODEX_DEBUG_PORT {
-        return first_page
-            .cloned()
-            .ok_or_else(|| "No injectable page target was found".to_string());
+    if !codex_pages.is_empty() {
+        return Ok(codex_pages);
+    }
+    if debug_port == DEFAULT_CODEX_DEBUG_PORT && !all_pages.is_empty() {
+        return Ok(all_pages);
     }
     Err("No Codex Desktop page target was found on shared CDP port".to_string())
 }
@@ -377,16 +364,18 @@ async fn install_script(websocket_url: &str, script: &str) -> Result<(), String>
         .map_err(|_| "timed out connecting CDP websocket".to_string())?
         .map_err(|error| format!("failed to connect CDP websocket: {error}"))?;
     let mut session = CdpSession::new(socket);
+    session.send_command(1, "Runtime.enable", json!({})).await?;
+    session.send_command(2, "Page.enable", json!({})).await?;
     session
         .send_command(
-            1,
+            3,
             "Page.addScriptToEvaluateOnNewDocument",
             json!({ "source": script }),
         )
         .await?;
     session
         .send_command(
-            2,
+            4,
             "Runtime.evaluate",
             json!({
                 "expression": script,
@@ -558,6 +547,7 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
   const patchModelContainer = (value) => {{
     if (!value || typeof value !== "object") return false;
     let changed = false;
+    const looksLikeModelGate = "availableModels" in value || "available_models" in value || "useHiddenModels" in value || "use_hidden_models" in value || "defaultModel" in value || "default_model" in value;
     if (patchModelArray(value.models, "defaultModel" in value || "availableModels" in value || "available_models" in value)) changed = true;
     if (patchModelNameArray(value.models)) changed = true;
     if (patchModelArray(value.data)) changed = true;
@@ -573,6 +563,14 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
     if (patchModelNameArray(value.available_models)) changed = true;
     if (removeHiddenNames(value, "hiddenModels")) changed = true;
     if (removeHiddenNames(value, "hidden_models")) changed = true;
+    if (looksLikeModelGate && value.useHiddenModels !== false) {{
+      value.useHiddenModels = false;
+      changed = true;
+    }}
+    if (looksLikeModelGate && value.use_hidden_models !== false) {{
+      value.use_hidden_models = false;
+      changed = true;
+    }}
     if (typeof value.default_model === "string" && modelNames().length && !modelNames().includes(value.default_model)) {{
       value.default_model = modelNames()[0];
       changed = true;
@@ -607,8 +605,8 @@ fn build_model_picker_unlock_script(catalog: &CodexModelCatalogProjection) -> St
         changed = true;
       }}
     }}
-    const nextValue = {{ ...value, available_models: available, default_model: modelNames()[0] || value.default_model }};
-    if (changed || nextValue.default_model !== value.default_model) {{
+    const nextValue = {{ ...value, available_models: available, use_hidden_models: false, default_model: modelNames()[0] || value.default_model }};
+    if (changed || nextValue.default_model !== value.default_model || value.use_hidden_models !== false) {{
       try {{
         config.value = nextValue;
       }} catch {{
@@ -895,6 +893,7 @@ mod tests {
         assert!(script.contains("qwen3.6"));
         assert!(script.contains("deepseek-v4-flash"));
         assert!(script.contains("available_models"));
+        assert!(script.contains("use_hidden_models: false"));
         assert!(script.contains("107580212"));
         assert!(script.contains("list-models-for-host"));
         assert!(script.contains("model/list"));
@@ -910,7 +909,7 @@ mod tests {
             web_socket_debugger_url: Some("ws://127.0.0.1:9222/devtools/page/1".to_string()),
         }];
 
-        assert!(pick_codex_page_target(&targets, 9222).is_err());
+        assert!(pick_codex_page_targets(&targets, 9222).is_err());
     }
 
     #[test]
@@ -923,8 +922,38 @@ mod tests {
             web_socket_debugger_url: Some("ws://127.0.0.1:9229/devtools/page/1".to_string()),
         }];
 
-        let target = pick_codex_page_target(&targets, DEFAULT_CODEX_DEBUG_PORT)
+        let targets = pick_codex_page_targets(&targets, DEFAULT_CODEX_DEBUG_PORT)
             .expect("default Codex CDP port should allow early blank targets");
-        assert_eq!(target.id, "codex-page");
+        assert_eq!(targets[0].id, "codex-page");
+    }
+
+    #[test]
+    fn codex_cdp_port_injects_all_matching_pages() {
+        let targets = vec![
+            CdpTarget {
+                id: "codex-main".to_string(),
+                target_type: "page".to_string(),
+                title: "Codex".to_string(),
+                url: "app://codex/index.html".to_string(),
+                web_socket_debugger_url: Some("ws://127.0.0.1:9229/devtools/page/1".to_string()),
+            },
+            CdpTarget {
+                id: "codex-dialog".to_string(),
+                target_type: "page".to_string(),
+                title: "Codex".to_string(),
+                url: "app://codex/dialog.html".to_string(),
+                web_socket_debugger_url: Some("ws://127.0.0.1:9229/devtools/page/2".to_string()),
+            },
+        ];
+
+        let picked = pick_codex_page_targets(&targets, DEFAULT_CODEX_DEBUG_PORT)
+            .expect("all Codex targets should be injectable");
+        assert_eq!(
+            picked
+                .iter()
+                .map(|target| target.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["codex-main", "codex-dialog"]
+        );
     }
 }

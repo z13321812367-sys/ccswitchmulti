@@ -80,6 +80,9 @@ pub struct CodexAppServerProcessDiagnostics {
 pub struct CodexDesktopRuntimeDiagnostics {
     pub running: bool,
     pub app_server_running: bool,
+    pub remote_debugging_enabled: bool,
+    pub remote_debugging_port: Option<u16>,
+    pub model_picker_patchable: bool,
     pub process_count: usize,
     pub app_server_count: usize,
     pub processes: Vec<CodexAppServerProcessDiagnostics>,
@@ -445,6 +448,36 @@ pub async fn diagnose_codex_multirouter(
                 "catalog_modified_at={:?}",
                 live_config.model_catalog_modified_at
             ),
+        ],
+    ));
+    checks.push(codex_check(
+        "codex_model_picker_whitelist",
+        "Codex Desktop 模型菜单白名单",
+        if desktop_runtime.remote_debugging_enabled {
+            CodexDiagnosticStatus::Pass
+        } else if desktop_runtime.running {
+            CodexDiagnosticStatus::Warn
+        } else {
+            CodexDiagnosticStatus::Info
+        },
+        if desktop_runtime.remote_debugging_enabled {
+            "Codex Desktop 已带 CDP 端口启动，CCSwitchMulti 可以向 renderer 注入 Statsig 107580212 模型白名单补丁。".to_string()
+        } else if desktop_runtime.running {
+            "Codex Desktop 正在以普通方式运行；即使 config/catalog/cache 有完整模型，renderer 仍可能被 Statsig 107580212 的 available_models 白名单压回 3 个官方模型。请完全退出 Codex 后用“解锁模型菜单”启动。".to_string()
+        } else {
+            "Codex Desktop 未运行；点击“解锁模型菜单”会用 remote debugging 参数启动 Codex 并注入模型候选补丁。".to_string()
+        },
+        vec![
+            format!(
+                "remote_debugging_enabled={}",
+                desktop_runtime.remote_debugging_enabled
+            ),
+            format!("remote_debugging_port={:?}", desktop_runtime.remote_debugging_port),
+            format!(
+                "model_catalog_models={:?}",
+                live_config.model_catalog_model_count
+            ),
+            "renderer_filter=Statsig 107580212 available_models/use_hidden_models".to_string(),
         ],
     ));
     checks.push(codex_check(
@@ -841,6 +874,13 @@ fn codex_desktop_runtime_diagnostics(
         .iter()
         .filter(|process| process.is_app_server)
         .count();
+    let remote_debugging_port = processes
+        .iter()
+        .filter_map(|process| {
+            remote_debugging_port_from_command_line(process.command_line.as_deref()?)
+        })
+        .next();
+    let remote_debugging_enabled = remote_debugging_port.is_some();
     let newest_app_server_started_at = processes
         .iter()
         .filter(|process| process.is_app_server)
@@ -874,6 +914,9 @@ fn codex_desktop_runtime_diagnostics(
     CodexDesktopRuntimeDiagnostics {
         running: !processes.is_empty(),
         app_server_running: app_server_count > 0,
+        remote_debugging_enabled,
+        remote_debugging_port,
+        model_picker_patchable: processes.is_empty() || remote_debugging_enabled,
         process_count: processes.len(),
         app_server_count,
         processes,
@@ -882,6 +925,14 @@ fn codex_desktop_runtime_diagnostics(
         stale_reason,
         detection_error,
     }
+}
+
+/// 从 Codex/Electron 命令行中提取 CDP 端口，用于判断 renderer 白名单能否被注入。
+fn remote_debugging_port_from_command_line(command_line: &str) -> Option<u16> {
+    command_line
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("--remote-debugging-port="))
+        .and_then(|value| value.parse::<u16>().ok())
 }
 
 /// 解析诊断时间戳，用于判断 app-server 是否早于配置或 catalog 写入。
