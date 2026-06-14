@@ -77,45 +77,45 @@ describe("CodexFormFields local model routing", () => {
       { shouldShowSpeedTest: false },
     );
 
-    expect(screen.getByText("Local model routing")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /add route/i })).toBeInTheDocument();
+    expect(screen.getByText("Codex 多模型路由")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "添加路由" })).toBeInTheDocument();
   });
 
   it("adds and edits a route through the dialog without persisting rowId", async () => {
     const { latestRouting } = renderRoutingHarness();
 
-    fireEvent.click(screen.getByRole("button", { name: /add route/i }));
+    fireEvent.click(screen.getByRole("button", { name: "添加路由" }));
 
     await waitFor(() => {
       expect(screen.getByRole("dialog")).toBeInTheDocument();
       expect(latestRouting().routes).toHaveLength(1);
     });
 
-    fireEvent.change(screen.getByPlaceholderText("route-id"), {
+    fireEvent.change(screen.getByPlaceholderText("路由 ID"), {
       target: { value: "deepseek" },
     });
-    fireEvent.change(screen.getByPlaceholderText("Route label"), {
+    fireEvent.change(screen.getByPlaceholderText("路由名称"), {
       target: { value: "DeepSeek" },
     });
     fireEvent.change(
-      screen.getByPlaceholderText("Matched models, comma separated"),
+      screen.getByPlaceholderText("匹配模型，多个用英文逗号分隔"),
       {
         target: { value: "deepseek-v4-flash, deepseek-v4-pro" },
       },
     );
     fireEvent.change(
-      screen.getByPlaceholderText("Matched prefixes, comma separated"),
+      screen.getByPlaceholderText("匹配前缀，多个用英文逗号分隔"),
       {
         target: { value: "deepseek-" },
       },
     );
-    fireEvent.change(screen.getByPlaceholderText("Upstream base URL"), {
+    fireEvent.change(screen.getByPlaceholderText("上游 Base URL"), {
       target: { value: "https://api.deepseek.example" },
     });
-    fireEvent.change(screen.getByPlaceholderText("Route API key"), {
+    fireEvent.change(screen.getByPlaceholderText("路由 API Key"), {
       target: { value: "sk-route" },
     });
-    fireEvent.change(screen.getByPlaceholderText("codex-model=upstream-model"), {
+    fireEvent.change(screen.getByPlaceholderText("codex模型=上游模型"), {
       target: { value: "deepseek-v4-flash=deepseek-chat" },
     });
 
@@ -157,7 +157,7 @@ describe("CodexFormFields local model routing", () => {
       ],
     });
 
-    const deleteButton = container.querySelector('button[title="Delete"]');
+    const deleteButton = container.querySelector('button[title="删除"]');
     expect(deleteButton).not.toBeNull();
     fireEvent.click(deleteButton!);
 

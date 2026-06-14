@@ -194,7 +194,7 @@ describe("useProviderActions", () => {
     expect(settingsApiApplyMock).not.toHaveBeenCalled();
     expect(toastSuccessMock).toHaveBeenCalledWith(
       "切换成功，请重启客户端以生效",
-      { closeButton: true },
+      { closeButton: true, duration: 8000 },
     );
   });
 
