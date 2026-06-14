@@ -1,10 +1,10 @@
-# CCSwitchMulti 3.16.2-16 官方合并发布说明
+# CCSwitchMulti 3.16.3-1 官方合并发布说明
 
 日期：2026-06-14
 
-版本：3.16.2-16
+版本：3.16.3-1
 
-上游基线：`farion1231/cc-switch` `main`，提交 `11572b13`
+上游基线：`farion1231/cc-switch` `main`，提交 `0c46efe1`
 
 本次目标是在 CCSwitchMulti 的 `feat/codex-local-model-routing` 分支上合并最新官方 cc-switch，同时保留 Codex MultiRouter 的模型候选、路由、OAuth、历史 session 和统计归因行为。
 
@@ -124,5 +124,5 @@ C:\Users\sunda\Documents\LLMservice\最新版ccswitchmulti\windows\raw-exe
 Git tag：
 
 ```text
-v3.16.2-16
+v3.16.3-1
 ```
