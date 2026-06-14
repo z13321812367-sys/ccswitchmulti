@@ -40,6 +40,10 @@ mod windows_gui {
     const ID_SOURCE_PROVIDERS: i32 = 1005;
     const ID_COUNT: i32 = 1006;
     const ID_WINDOW_LIMIT: i32 = 1007;
+    const ID_BALANCE_RECENT_WINDOW: i32 = 1014;
+    const ID_MAX_PER_PROJECT: i32 = 1015;
+    const ID_MAX_TOTAL: i32 = 1016;
+    const ID_SOURCE_FILTER: i32 = 1017;
     const ID_INCLUDE_ARCHIVED: i32 = 1008;
     const ID_INCLUDE_SUBAGENTS: i32 = 1009;
     const ID_FORCE: i32 = 1010;
@@ -103,6 +107,23 @@ mod windows_gui {
             create_edit(hwnd, ID_COUNT, "30", 150, 186, 80, 24, font);
             create_label(hwnd, "窗口范围", 250, 188, 80, 22, font);
             create_edit(hwnd, ID_WINDOW_LIMIT, "80", 330, 186, 80, 24, font);
+            create_label(hwnd, "Source", 16, 222, 80, 22, font);
+            create_edit(hwnd, ID_SOURCE_FILTER, "vscode", 150, 220, 90, 24, font);
+            let balance_checkbox = create_checkbox(
+                hwnd,
+                ID_BALANCE_RECENT_WINDOW,
+                "Balance recent",
+                260,
+                220,
+                130,
+                24,
+                font,
+            );
+            set_checked(balance_checkbox, true);
+            create_label(hwnd, "Max/project", 408, 222, 86, 22, font);
+            create_edit(hwnd, ID_MAX_PER_PROJECT, "10", 500, 220, 48, 24, font);
+            create_label(hwnd, "Max total", 562, 222, 74, 22, font);
+            create_edit(hwnd, ID_MAX_TOTAL, "300", 640, 220, 64, 24, font);
             create_checkbox(
                 hwnd,
                 ID_INCLUDE_ARCHIVED,
@@ -128,16 +149,16 @@ mod windows_gui {
                 ID_FORCE,
                 "Codex 运行时强制写入",
                 16,
-                222,
+                256,
                 180,
                 24,
                 font,
             );
 
             self.preview_button =
-                create_button(hwnd, ID_PREVIEW, "预览修复", 210, 220, 120, 30, font);
-            self.apply_button = create_button(hwnd, ID_APPLY, "确认写入", 344, 220, 120, 30, font);
-            self.output = create_output(hwnd, ID_OUTPUT, 16, 266, 724, 300, font);
+                create_button(hwnd, ID_PREVIEW, "预览修复", 210, 254, 120, 30, font);
+            self.apply_button = create_button(hwnd, ID_APPLY, "确认写入", 344, 254, 120, 30, font);
+            self.output = create_output(hwnd, ID_OUTPUT, 16, 300, 724, 300, font);
             set_text(
                 self.output,
                 "先执行“预览修复”，确认 active DB、provider、session_index、workspace hints 和 focus 计数后再写入。\r\n写入前会创建本地备份。",
@@ -180,7 +201,7 @@ mod windows_gui {
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
                 780,
-                620,
+                660,
                 ptr::null_mut(),
                 ptr::null_mut(),
                 instance,
@@ -284,6 +305,10 @@ mod windows_gui {
             ))),
             count: parse_usize(&get_text(GetDlgItem(hwnd, ID_COUNT)), 30),
             window_limit: parse_usize(&get_text(GetDlgItem(hwnd, ID_WINDOW_LIMIT)), 80),
+            balance_recent_window: Some(is_checked(GetDlgItem(hwnd, ID_BALANCE_RECENT_WINDOW))),
+            max_per_project: parse_usize(&get_text(GetDlgItem(hwnd, ID_MAX_PER_PROJECT)), 10),
+            max_total: parse_usize(&get_text(GetDlgItem(hwnd, ID_MAX_TOTAL)), 300),
+            source_filter: empty_to_none(get_text(GetDlgItem(hwnd, ID_SOURCE_FILTER))),
             include_archived: Some(is_checked(GetDlgItem(hwnd, ID_INCLUDE_ARCHIVED))),
             include_subagents: Some(is_checked(GetDlgItem(hwnd, ID_INCLUDE_SUBAGENTS))),
             skip_provider_bucket_sync: Some(false),
@@ -353,8 +378,19 @@ mod windows_gui {
                 result.sqlite_focus_rows_updated, result.sqlite_focus_rows_to_update
             ),
             format!(
+                "balanced recent: {} rows / {} projects / max {} per project / max total {}",
+                result.balanced_recent_window_rows,
+                result.balanced_recent_window_projects,
+                result.max_per_project,
+                result.max_total
+            ),
+            format!(
                 "session_index move: {} / {}",
                 result.session_index_rows_moved, result.session_index_rows_to_move
+            ),
+            format!(
+                "session_index titles: {} / {}",
+                result.session_index_titles_updated, result.session_index_titles_to_update
             ),
             format!(
                 "workspace hints: {} / {}",
@@ -375,6 +411,13 @@ mod windows_gui {
             format!(
                 "Visible candidates / project window: {} / {}",
                 result.visible_candidate_rows, result.visible_project_rows_in_window_before
+            ),
+            format!(
+                "Source filter: {}",
+                result
+                    .source_filter
+                    .as_deref()
+                    .unwrap_or("(default cli/vscode)")
             ),
             format!(
                 "Backup: {}",
@@ -463,6 +506,16 @@ mod windows_gui {
         );
         SendMessageW(control, WM_SETFONT, font, 1);
         control
+    }
+
+    /// 设置复选框初始状态，用于默认启用最新的 recent-window 平衡修复。
+    unsafe fn set_checked(hwnd: HWND, checked: bool) {
+        SendMessageW(
+            hwnd,
+            windows_sys::Win32::UI::WindowsAndMessaging::BM_SETCHECK,
+            if checked { BST_CHECKED as usize } else { 0 },
+            0,
+        );
     }
 
     /// 创建命令按钮。

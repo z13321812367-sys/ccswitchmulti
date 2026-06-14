@@ -197,6 +197,10 @@ export interface CodexHistoryVisibilityRepairOptions {
   targetProvider?: string | null;
   count?: number | null;
   windowLimit?: number | null;
+  balanceRecentWindow?: boolean | null;
+  maxPerProject?: number | null;
+  maxTotal?: number | null;
+  sourceFilter?: string | null;
   includeArchived?: boolean | null;
   includeSubagents?: boolean | null;
   skipProviderBucketSync?: boolean | null;
@@ -222,8 +226,16 @@ export interface CodexHistoryVisibilityRepairOutcome {
   sessionIndexAppended: number;
   projectRows: number;
   focusSelectedCount: number;
+  balancedRecentWindowEnabled: boolean;
+  balancedRecentWindowRows: number;
+  balancedRecentWindowProjects: number;
+  maxPerProject: number;
+  maxTotal: number;
+  sourceFilter: string | null;
   sqliteFocusRowsToUpdate: number;
   sqliteFocusRowsUpdated: number;
+  sessionIndexTitlesToUpdate: number;
+  sessionIndexTitlesUpdated: number;
   sessionIndexRowsToMove: number;
   sessionIndexRowsMoved: number;
   workspaceHintsToFix: number;

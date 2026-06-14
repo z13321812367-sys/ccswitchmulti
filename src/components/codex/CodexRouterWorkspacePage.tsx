@@ -2295,6 +2295,10 @@ function HistoryRepairTab({
         projectPath: normalizedProjectPath || null,
         count: 30,
         windowLimit: 80,
+        balanceRecentWindow: true,
+        maxPerProject: 10,
+        maxTotal: 300,
+        sourceFilter: "vscode",
       });
       setRepairResult(result);
       if (dryRun) {
@@ -2329,6 +2333,8 @@ function HistoryRepairTab({
         `workspace hints: ${repairResult.workspaceHintsToFix}`,
         `projectless remove: ${repairResult.projectlessIdsToRemove}`,
         `focus rows: ${repairResult.focusSelectedCount}`,
+        `balanced rows: ${repairResult.balancedRecentWindowRows}`,
+        `session_index titles: ${repairResult.sessionIndexTitlesToUpdate}`,
         `rollout mtimes: ${repairResult.rolloutMtimesToTouch}`,
         "",
         "继续写入吗？",
@@ -2502,6 +2508,11 @@ function HistoryRepairResultPanel({
           total={result.sessionIndexMissingToAppend}
         />
         <RepairMetric
+          label="index title"
+          done={result.sessionIndexTitlesUpdated}
+          total={result.sessionIndexTitlesToUpdate}
+        />
+        <RepairMetric
           label="workspace hints"
           done={result.workspaceHintsFixed}
           total={result.workspaceHintsToFix}
@@ -2515,6 +2526,11 @@ function HistoryRepairResultPanel({
           label="focus"
           done={result.sqliteFocusRowsUpdated}
           total={result.sqliteFocusRowsToUpdate}
+        />
+        <RepairMetric
+          label="balanced"
+          done={result.balancedRecentWindowRows}
+          total={result.maxTotal}
         />
         <RepairMetric
           label="rollout mtime"
@@ -2544,6 +2560,18 @@ function HistoryRepairResultPanel({
         <DetailRow
           label="visible window"
           value={`${result.visibleCandidateRows} candidates / ${result.visibleProjectRowsInWindowBefore} project rows`}
+        />
+        <DetailRow
+          label="recent balance"
+          value={
+            result.balancedRecentWindowEnabled
+              ? `${result.balancedRecentWindowRows} rows / ${result.balancedRecentWindowProjects} projects / max ${result.maxPerProject} per project`
+              : "disabled"
+          }
+        />
+        <DetailRow
+          label="source filter"
+          value={result.sourceFilter || "default cli/vscode"}
         />
       </div>
 

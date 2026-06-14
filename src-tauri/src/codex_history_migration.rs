@@ -19,7 +19,7 @@ use rusqlite::{backup::Backup, params_from_iter, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -141,6 +141,10 @@ pub struct CodexHistoryVisibilityRepairOptions {
     pub target_provider: Option<String>,
     pub count: Option<usize>,
     pub window_limit: Option<usize>,
+    pub balance_recent_window: Option<bool>,
+    pub max_per_project: Option<usize>,
+    pub max_total: Option<usize>,
+    pub source_filter: Option<String>,
     pub include_archived: Option<bool>,
     pub include_subagents: Option<bool>,
     pub skip_provider_bucket_sync: Option<bool>,
@@ -162,6 +166,10 @@ pub struct CodexHistoryStandaloneRepairOptions {
     pub source_provider_ids: Option<Vec<String>>,
     pub count: Option<usize>,
     pub window_limit: Option<usize>,
+    pub balance_recent_window: Option<bool>,
+    pub max_per_project: Option<usize>,
+    pub max_total: Option<usize>,
+    pub source_filter: Option<String>,
     pub include_archived: Option<bool>,
     pub include_subagents: Option<bool>,
     pub skip_provider_bucket_sync: Option<bool>,
@@ -180,6 +188,10 @@ impl Default for CodexHistoryStandaloneRepairOptions {
             source_provider_ids: None,
             count: Some(30),
             window_limit: Some(80),
+            balance_recent_window: Some(true),
+            max_per_project: Some(10),
+            max_total: Some(300),
+            source_filter: None,
             include_archived: Some(false),
             include_subagents: Some(false),
             skip_provider_bucket_sync: Some(false),
@@ -197,6 +209,10 @@ impl Default for CodexHistoryVisibilityRepairOptions {
             target_provider: Some(CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID.to_string()),
             count: Some(30),
             window_limit: Some(80),
+            balance_recent_window: Some(true),
+            max_per_project: Some(10),
+            max_total: Some(300),
+            source_filter: None,
             include_archived: Some(false),
             include_subagents: Some(false),
             skip_provider_bucket_sync: Some(false),
@@ -229,8 +245,16 @@ pub struct CodexHistoryVisibilityRepairOutcome {
     pub session_index_appended: usize,
     pub project_rows: usize,
     pub focus_selected_count: usize,
+    pub balanced_recent_window_enabled: bool,
+    pub balanced_recent_window_rows: usize,
+    pub balanced_recent_window_projects: usize,
+    pub max_per_project: usize,
+    pub max_total: usize,
+    pub source_filter: Option<String>,
     pub sqlite_focus_rows_to_update: usize,
     pub sqlite_focus_rows_updated: usize,
+    pub session_index_titles_to_update: usize,
+    pub session_index_titles_updated: usize,
     pub session_index_rows_to_move: usize,
     pub session_index_rows_moved: usize,
     pub workspace_hints_to_fix: usize,
@@ -423,6 +447,15 @@ pub fn repair_codex_history_visibility_for_multirouter(
     let dry_run = options.dry_run;
     let count = options.count.unwrap_or(30);
     let window_limit = options.window_limit.unwrap_or(80);
+    let balance_recent_window = options.balance_recent_window.unwrap_or(true);
+    let max_per_project = options.max_per_project.unwrap_or(10).max(1);
+    let max_total = options.max_total.unwrap_or(300).max(1);
+    let source_filter = options
+        .source_filter
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
     let include_archived = options.include_archived.unwrap_or(false);
     let include_subagents = options.include_subagents.unwrap_or(false);
     let skip_provider_bucket_sync = options.skip_provider_bucket_sync.unwrap_or(false);
@@ -459,6 +492,10 @@ pub fn repair_codex_history_visibility_for_multirouter(
             dry_run,
             count,
             window_limit,
+            balance_recent_window,
+            max_per_project,
+            max_total,
+            source_filter,
             include_archived,
             include_subagents,
             backup_root_override: None,
@@ -546,6 +583,15 @@ pub fn repair_codex_history_visibility_standalone(
             dry_run,
             count: options.count.unwrap_or(30),
             window_limit: options.window_limit.unwrap_or(80),
+            balance_recent_window: options.balance_recent_window.unwrap_or(true),
+            max_per_project: options.max_per_project.unwrap_or(10).max(1),
+            max_total: options.max_total.unwrap_or(300).max(1),
+            source_filter: options
+                .source_filter
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
             include_archived: options.include_archived.unwrap_or(false),
             include_subagents: options.include_subagents.unwrap_or(false),
             backup_root_override: None,
@@ -566,6 +612,10 @@ struct HistoryVisibilityRepairRuntimeOptions {
     dry_run: bool,
     count: usize,
     window_limit: usize,
+    balance_recent_window: bool,
+    max_per_project: usize,
+    max_total: usize,
+    source_filter: Option<String>,
     include_archived: bool,
     include_subagents: bool,
     backup_root_override: Option<PathBuf>,
@@ -594,6 +644,7 @@ struct ThreadHistoryRow {
 struct FocusThreadRow {
     id: String,
     title: String,
+    project_path: Option<String>,
     rollout_path: Option<String>,
     new_updated_at: i64,
     new_updated_at_ms: i64,
@@ -601,11 +652,18 @@ struct FocusThreadRow {
 }
 
 #[derive(Debug, Clone)]
-/// rollout 第一行 session_meta 的延迟写入计划。
-struct RolloutFirstLineUpdate {
+/// rollout JSONL 中 provider 元数据的延迟写入计划。
+struct RolloutProviderUpdate {
     path: PathBuf,
-    rewritten: String,
-    rest: String,
+    rewritten: Vec<String>,
+    old_mtime_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+/// session_index.jsonl 聚焦移动后的写入统计。
+struct SessionIndexMoveCounts {
+    rows_moved: usize,
+    titles_updated: usize,
 }
 
 /// 实际执行历史修复；测试可以直接传入临时 Codex 目录和 state DB。
@@ -653,13 +711,13 @@ fn repair_codex_history_visibility_at(
         .collect();
     let provider_update_id_set: HashSet<String> = provider_update_ids.iter().cloned().collect();
 
-    let mut rollout_first_line_updates = Vec::new();
+    let mut rollout_provider_updates = Vec::new();
     for row in rows
         .iter()
         .filter(|row| provider_update_id_set.contains(&row.id))
     {
-        if let Some(update) = prepare_rollout_provider_first_line_update(row, target_provider)? {
-            rollout_first_line_updates.push(update);
+        if let Some(update) = prepare_rollout_provider_update(row, target_provider)? {
+            rollout_provider_updates.push(update);
         }
     }
 
@@ -677,7 +735,7 @@ fn repair_codex_history_visibility_at(
         if !runtime.include_archived && row.archived.unwrap_or(0) != 0 {
             continue;
         }
-        if !is_interactive_history_source(row.source.as_deref()) {
+        if !source_matches_history_filter(row.source.as_deref(), runtime.source_filter.as_deref()) {
             continue;
         }
         if !runtime.include_subagents && !is_user_thread_source(row.thread_source.as_deref()) {
@@ -722,12 +780,31 @@ fn repair_codex_history_visibility_at(
                 .then_with(|| right.id.cmp(&left.id))
         });
     }
-    let mut selected_focus_rows: Vec<FocusThreadRow> = project_rows
-        .iter()
-        .take(runtime.count)
-        .map(focus_row_from_thread)
-        .collect();
+    let mut selected_focus_rows: Vec<FocusThreadRow> = if runtime.balance_recent_window {
+        select_balanced_recent_window_rows(
+            &visible_rows,
+            normalized_project_path.as_deref(),
+            runtime.count,
+            runtime.max_per_project,
+            runtime.max_total,
+        )
+    } else {
+        project_rows
+            .iter()
+            .take(runtime.count)
+            .map(focus_row_from_thread)
+            .collect()
+    };
     assign_focus_times(&mut selected_focus_rows);
+    let balanced_recent_window_projects = if runtime.balance_recent_window {
+        selected_focus_rows
+            .iter()
+            .filter_map(|row| row.project_path.as_deref())
+            .collect::<BTreeSet<_>>()
+            .len()
+    } else {
+        0
+    };
 
     let visible_project_rows_in_window_before =
         if let Some(project_path) = normalized_project_path.as_deref() {
@@ -765,6 +842,8 @@ fn repair_codex_history_visibility_at(
         .count();
     let sqlite_focus_rows_to_update = selected_focus_rows.len();
     let session_index_rows_to_move = selected_focus_rows.len();
+    let session_index_titles_to_update =
+        count_session_index_title_updates(&session_index_lines, &selected_focus_rows);
 
     let mut outcome = CodexHistoryVisibilityRepairOutcome {
         dry_run: runtime.dry_run,
@@ -776,13 +855,24 @@ fn repair_codex_history_visibility_at(
         source_provider_ids: source_provider_ids.iter().cloned().collect(),
         sqlite_threads: rows.len(),
         provider_rows_to_update: provider_update_ids.len(),
-        rollout_first_lines_to_update: rollout_first_line_updates.len(),
+        rollout_first_lines_to_update: rollout_provider_updates.len(),
         user_event_rows_to_update: user_event_update_ids.len(),
         visible_candidate_rows: visible_rows.len(),
         session_index_missing_to_append: missing_index_rows.len(),
         project_rows: project_rows.len(),
         focus_selected_count: selected_focus_rows.len(),
+        balanced_recent_window_enabled: runtime.balance_recent_window,
+        balanced_recent_window_rows: if runtime.balance_recent_window {
+            selected_focus_rows.len()
+        } else {
+            0
+        },
+        balanced_recent_window_projects,
+        max_per_project: runtime.max_per_project,
+        max_total: runtime.max_total,
+        source_filter: runtime.source_filter.clone(),
         sqlite_focus_rows_to_update,
+        session_index_titles_to_update,
         session_index_rows_to_move,
         workspace_hints_to_fix: global_plan.workspace_hints_to_fix,
         projectless_ids_to_remove: global_plan.projectless_ids_to_remove,
@@ -801,6 +891,7 @@ fn repair_codex_history_visibility_at(
         || outcome.user_event_rows_to_update > 0
         || outcome.session_index_missing_to_append > 0
         || outcome.sqlite_focus_rows_to_update > 0
+        || outcome.session_index_titles_to_update > 0
         || outcome.session_index_rows_to_move > 0
         || outcome.workspace_hints_to_fix > 0
         || outcome.projectless_ids_to_remove > 0
@@ -819,7 +910,7 @@ fn repair_codex_history_visibility_at(
     backup_codex_state_db(&active_db.path, codex_dir, &backup_root, &conn)?;
     backup_visibility_file_if_exists(&index_path, codex_dir, &backup_root)?;
     backup_visibility_file_if_exists(&global_state_path, codex_dir, &backup_root)?;
-    for update in &rollout_first_line_updates {
+    for update in &rollout_provider_updates {
         backup_codex_jsonl_file(&update.path, codex_dir, &backup_root)?;
     }
 
@@ -833,12 +924,12 @@ fn repair_codex_history_visibility_at(
     tx.commit()
         .map_err(|e| AppError::Database(format!("提交 Codex 历史修复事务失败: {e}")))?;
 
-    outcome.rollout_first_lines_updated =
-        apply_rollout_first_line_updates(rollout_first_line_updates)?;
+    outcome.rollout_first_lines_updated = apply_rollout_provider_updates(rollout_provider_updates)?;
     outcome.session_index_appended =
         append_missing_session_index_rows(&index_path, &missing_index_rows)?;
-    outcome.session_index_rows_moved =
-        move_focus_session_index_rows(&index_path, &selected_focus_rows)?;
+    let session_index_counts = move_focus_session_index_rows(&index_path, &selected_focus_rows)?;
+    outcome.session_index_rows_moved = session_index_counts.rows_moved;
+    outcome.session_index_titles_updated = session_index_counts.titles_updated;
     let global_counts = apply_global_state_repairs(
         &global_state_path,
         global_state_value,
@@ -1085,6 +1176,14 @@ fn is_interactive_history_source(source: Option<&str>) -> bool {
     matches!(source, Some("cli") | Some("vscode"))
 }
 
+/// 按用户指定的来源过滤历史；未指定时保持 Codex Desktop 常规可见来源。
+fn source_matches_history_filter(source: Option<&str>, filter: Option<&str>) -> bool {
+    match filter.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(expected) => source == Some(expected),
+        None => is_interactive_history_source(source),
+    }
+}
+
 /// 判断 thread_source 是否为用户主线程，避免默认把 subagent 历史顶上来。
 fn is_user_thread_source(thread_source: Option<&str>) -> bool {
     matches!(thread_source, None | Some("") | Some("user"))
@@ -1121,11 +1220,101 @@ fn focus_row_from_thread(row: &ThreadHistoryRow) -> FocusThreadRow {
     FocusThreadRow {
         id: row.id.clone(),
         title: row_title(row),
+        project_path: row.cwd.as_deref().and_then(normalize_history_path),
         rollout_path: row.rollout_path.clone(),
         new_updated_at: row.updated_at.unwrap_or_default(),
         new_updated_at_ms: row_updated_ms(row),
         updated_iso: iso_from_epoch_millis(row_updated_ms(row)),
     }
+}
+
+/// 选择需要推入 Desktop recent 窗口的行：当前项目先保底，再按项目轮询补足全局窗口。
+fn select_balanced_recent_window_rows(
+    visible_rows: &[ThreadHistoryRow],
+    project_path: Option<&str>,
+    focus_count: usize,
+    max_per_project: usize,
+    max_total: usize,
+) -> Vec<FocusThreadRow> {
+    let mut sorted_rows: Vec<&ThreadHistoryRow> = visible_rows.iter().collect();
+    sorted_rows.sort_by(|left, right| {
+        row_updated_ms(right)
+            .cmp(&row_updated_ms(left))
+            .then_with(|| right.id.cmp(&left.id))
+    });
+
+    let mut selected_ids = HashSet::new();
+    let mut selected = Vec::new();
+    if let Some(project_path) = project_path {
+        for row in sorted_rows.iter().copied().filter(|row| {
+            row.cwd
+                .as_deref()
+                .and_then(normalize_history_path)
+                .as_deref()
+                == Some(project_path)
+        }) {
+            if selected.len() >= max_total || selected.len() >= focus_count {
+                break;
+            }
+            selected_ids.insert(row.id.clone());
+            selected.push(focus_row_from_thread(row));
+        }
+    }
+
+    let mut buckets: BTreeMap<String, VecDeque<&ThreadHistoryRow>> = BTreeMap::new();
+    for row in sorted_rows {
+        if selected_ids.contains(&row.id) {
+            continue;
+        }
+        let project_key = row
+            .cwd
+            .as_deref()
+            .and_then(normalize_history_path)
+            .unwrap_or_else(|| "(no cwd)".to_string());
+        let bucket = buckets.entry(project_key).or_default();
+        if bucket.len() < max_per_project {
+            bucket.push_back(row);
+        }
+    }
+
+    let mut ordered_projects: Vec<String> = buckets.keys().cloned().collect();
+    ordered_projects.sort_by(|left, right| {
+        let left_ms = buckets
+            .get(left)
+            .and_then(|rows| rows.front())
+            .map(|row| row_updated_ms(row))
+            .unwrap_or_default();
+        let right_ms = buckets
+            .get(right)
+            .and_then(|rows| rows.front())
+            .map(|row| row_updated_ms(row))
+            .unwrap_or_default();
+        right_ms.cmp(&left_ms).then_with(|| right.cmp(left))
+    });
+
+    while selected.len() < max_total && buckets.values().any(|bucket| !bucket.is_empty()) {
+        let mut progressed = false;
+        for project in &ordered_projects {
+            if selected.len() >= max_total {
+                break;
+            }
+            let Some(bucket) = buckets.get_mut(project) else {
+                continue;
+            };
+            let Some(row) = bucket.pop_front() else {
+                continue;
+            };
+            if selected_ids.insert(row.id.clone()) {
+                selected.push(focus_row_from_thread(row));
+            }
+            progressed = true;
+        }
+        if !progressed {
+            break;
+        }
+    }
+
+    selected
 }
 
 /// 给聚焦行分配新的递减时间戳，使当前项目会话进入侧边栏可见窗口。
@@ -1204,46 +1393,57 @@ fn rollout_contains_user_event(path: Option<PathBuf>) -> bool {
 }
 
 /// 准备改写 rollout 第一行的 provider 元数据，并保留剩余内容。
-fn prepare_rollout_provider_first_line_update(
+fn prepare_rollout_provider_update(
     row: &ThreadHistoryRow,
     target_provider: &str,
-) -> Result<Option<RolloutFirstLineUpdate>, AppError> {
+) -> Result<Option<RolloutProviderUpdate>, AppError> {
     let Some(path) = resolve_history_path(row.rollout_path.as_deref()) else {
         return Ok(None);
     };
     let content = fs::read_to_string(&path).map_err(|e| AppError::io(&path, e))?;
-    let (first, rest) = split_first_jsonl_line(&content);
-    let Ok(mut value) = serde_json::from_str::<Value>(first) else {
-        return Ok(None);
-    };
-    let Some(payload) = value.get_mut("payload").and_then(Value::as_object_mut) else {
-        return Ok(None);
-    };
-    if payload.get("model_provider").and_then(Value::as_str) == Some(target_provider) {
+    let old_mtime_ms = fs::metadata(&path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as i64);
+    let mut changed = false;
+    let mut rewritten = Vec::new();
+    for line in content.lines() {
+        let Ok(mut value) = serde_json::from_str::<Value>(line) else {
+            rewritten.push(line.to_string());
+            continue;
+        };
+        let is_session_meta = value.get("type").and_then(Value::as_str) == Some("session_meta");
+        let Some(payload) = value.get_mut("payload").and_then(Value::as_object_mut) else {
+            rewritten.push(line.to_string());
+            continue;
+        };
+        if !is_session_meta && !payload.contains_key("model_provider") {
+            rewritten.push(line.to_string());
+            continue;
+        }
+        if payload.get("model_provider").and_then(Value::as_str) != Some(target_provider) {
+            payload.insert(
+                "model_provider".to_string(),
+                Value::String(target_provider.to_string()),
+            );
+            changed = true;
+        }
+        rewritten.push(
+            serde_json::to_string(&value).map_err(|e| AppError::JsonSerialize { source: e })?,
+        );
+    }
+    if !changed {
         return Ok(None);
     }
-    payload.insert(
-        "model_provider".to_string(),
-        Value::String(target_provider.to_string()),
-    );
-    let rewritten =
-        serde_json::to_string(&value).map_err(|e| AppError::JsonSerialize { source: e })?;
-    Ok(Some(RolloutFirstLineUpdate {
+    Ok(Some(RolloutProviderUpdate {
         path,
         rewritten,
-        rest,
+        old_mtime_ms,
     }))
 }
 
 /// 拆出 JSONL 第一行和保留换行符的剩余文本。
-fn split_first_jsonl_line(content: &str) -> (&str, String) {
-    if let Some(index) = content.find('\n') {
-        (&content[..index], content[index..].to_string())
-    } else {
-        (content, String::new())
-    }
-}
-
 /// 读取 JSONL 原始行，解析失败的行在写回时保持原样。
 fn read_jsonl_lines(path: &Path) -> Result<Vec<String>, AppError> {
     if !path.exists() {
@@ -1266,6 +1466,38 @@ fn session_index_thread_ids(lines: &[String]) -> HashSet<String> {
 }
 
 /// 把缺失的可见历史追加到 session_index.jsonl。
+/// 预估 session_index 中已有行的陈旧标题数量，缺失行由 append 统计单独覆盖。
+fn count_session_index_title_updates(lines: &[String], selected: &[FocusThreadRow]) -> usize {
+    if selected.is_empty() {
+        return 0;
+    }
+    let selected_by_id: HashMap<&str, &FocusThreadRow> =
+        selected.iter().map(|row| (row.id.as_str(), row)).collect();
+    lines
+        .iter()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|value| {
+            let Some(thread_id) = value.get("id").and_then(Value::as_str) else {
+                return false;
+            };
+            let Some(selected_row) = selected_by_id.get(thread_id) else {
+                return false;
+            };
+            let selected_title = selected_row.title.trim();
+            if selected_title.is_empty() {
+                return false;
+            }
+            value
+                .get("thread_name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                != selected_title
+        })
+        .count()
+}
+
+/// 把缺失的可见历史追加到 session_index.jsonl，避免前端只看索引时漏掉会话。
 fn append_missing_session_index_rows(
     index_path: &Path,
     rows: &[ThreadHistoryRow],
@@ -1298,16 +1530,17 @@ fn append_missing_session_index_rows(
 fn move_focus_session_index_rows(
     index_path: &Path,
     selected: &[FocusThreadRow],
-) -> Result<usize, AppError> {
+) -> Result<SessionIndexMoveCounts, AppError> {
     if selected.is_empty() {
-        return Ok(0);
+        return Ok(SessionIndexMoveCounts::default());
     }
     let lines = read_jsonl_lines(index_path)?;
-    let selected_by_id: std::collections::HashMap<&str, &FocusThreadRow> =
+    let selected_by_id: HashMap<&str, &FocusThreadRow> =
         selected.iter().map(|row| (row.id.as_str(), row)).collect();
     let mut seen = HashSet::new();
     let mut kept = Vec::new();
     let mut moved = Vec::new();
+    let mut titles_updated = 0;
     for line in lines {
         let mut maybe_value = serde_json::from_str::<Value>(&line).ok();
         let thread_id = maybe_value
@@ -1327,9 +1560,20 @@ fn move_focus_session_index_rows(
                     "updated_at".to_string(),
                     Value::String(selected_row.updated_iso.clone()),
                 );
-                object
-                    .entry("thread_name".to_string())
-                    .or_insert_with(|| Value::String(selected_row.title.clone()));
+                let existing_title = object
+                    .get("thread_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .trim();
+                if !selected_row.title.trim().is_empty()
+                    && existing_title != selected_row.title.trim()
+                {
+                    object.insert(
+                        "thread_name".to_string(),
+                        Value::String(selected_row.title.clone()),
+                    );
+                    titles_updated += 1;
+                }
                 moved.push(
                     serde_json::to_string(&Value::Object(object.clone()))
                         .map_err(|e| AppError::JsonSerialize { source: e })?,
@@ -1355,7 +1599,10 @@ fn move_focus_session_index_rows(
     let moved_count = moved.len();
     kept.extend(moved);
     write_jsonl_lines(index_path, &kept)?;
-    Ok(moved_count)
+    Ok(SessionIndexMoveCounts {
+        rows_moved: moved_count,
+        titles_updated,
+    })
 }
 
 /// 原子写回 JSONL 行。
@@ -1617,15 +1864,13 @@ fn update_thread_rows_by_ids(
 }
 
 /// 应用 rollout 第一行 provider 元数据更新。
-fn apply_rollout_first_line_updates(
-    updates: Vec<RolloutFirstLineUpdate>,
-) -> Result<usize, AppError> {
+fn apply_rollout_provider_updates(updates: Vec<RolloutProviderUpdate>) -> Result<usize, AppError> {
     let mut changed = 0;
     for update in updates {
-        atomic_write(
-            &update.path,
-            format!("{}{}", update.rewritten, update.rest).as_bytes(),
-        )?;
+        write_jsonl_lines(&update.path, &update.rewritten)?;
+        if let Some(old_mtime_ms) = update.old_mtime_ms {
+            set_file_modified_time(&update.path, old_mtime_ms)?;
+        }
         changed += 1;
     }
     Ok(changed)
@@ -3017,6 +3262,7 @@ mod tests {
             &rollout_one,
             concat!(
                 "{\"type\":\"session_meta\",\"payload\":{\"id\":\"t1\",\"model_provider\":\"openai\"}}\n",
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"t1-extra\",\"model_provider\":\"openai\"}}\n",
                 "{\"type\":\"user_message\",\"message\":\"hello\"}\n"
             ),
         )
@@ -3096,6 +3342,10 @@ mod tests {
                 dry_run: true,
                 count: 20,
                 window_limit: 50,
+                balance_recent_window: true,
+                max_per_project: 10,
+                max_total: 300,
+                source_filter: None,
                 include_archived: false,
                 include_subagents: false,
                 backup_root_override: Some(dir.path().join("dry-run-backup")),
@@ -3105,6 +3355,7 @@ mod tests {
 
         assert_eq!(dry_run.provider_rows_to_update, 2);
         assert_eq!(dry_run.user_event_rows_to_update, 2);
+        assert_eq!(dry_run.visible_candidate_rows, 2);
         assert_eq!(dry_run.session_index_missing_to_append, 2);
         assert_eq!(dry_run.workspace_hints_to_fix, 2);
         assert_eq!(dry_run.projectless_ids_to_remove, 2);
@@ -3125,6 +3376,10 @@ mod tests {
                 dry_run: false,
                 count: 20,
                 window_limit: 50,
+                balance_recent_window: true,
+                max_per_project: 10,
+                max_total: 300,
+                source_filter: None,
                 include_archived: false,
                 include_subagents: false,
                 backup_root_override: Some(backup_root.clone()),
@@ -3197,10 +3452,177 @@ mod tests {
 
         let rollout_text = fs::read_to_string(&rollout_one).expect("rollout one after");
         assert!(rollout_text.contains("\"model_provider\":\"codex_model_router_v2\""));
+        assert!(!rollout_text.contains("\"model_provider\":\"openai\""));
         assert!(backup_root
             .join("state/sqlite")
             .join(CODEX_STATE_DB_FILENAME)
             .exists());
+    }
+
+    #[test]
+    fn balances_recent_window_and_overwrites_stale_session_index_titles() {
+        let dir = tempdir().expect("tempdir");
+        let codex_dir = dir.path().join(".codex");
+        let sqlite_dir = codex_dir.join("sqlite");
+        let session_dir = codex_dir.join("sessions/2026/06/15");
+        fs::create_dir_all(&sqlite_dir).expect("create sqlite dir");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+
+        let db_path = sqlite_dir.join(CODEX_STATE_DB_FILENAME);
+        let conn = Connection::open(&db_path).expect("open active db");
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                rollout_path TEXT,
+                model_provider TEXT,
+                cwd TEXT,
+                has_user_event INTEGER,
+                archived INTEGER,
+                source TEXT,
+                thread_source TEXT,
+                title TEXT,
+                preview TEXT,
+                first_user_message TEXT,
+                updated_at INTEGER,
+                updated_at_ms INTEGER
+            );",
+        )
+        .expect("create threads table");
+
+        let projects = [
+            ("llm", r"C:\Users\sunda\Documents\LLMservice"),
+            ("trace", r"C:\Users\sunda\Documents\trace"),
+            ("openclaw", r"C:\Users\sunda\Documents\Codex repo\openclaw"),
+        ];
+        let mut timestamp_ms = 10_000_000_i64;
+        for (project_key, cwd) in projects {
+            for index in 0..12 {
+                let id = format!("{project_key}-{index:02}");
+                let title = format!("{project_key} title {index:02}");
+                let rollout = session_dir.join(format!("rollout-{id}.jsonl"));
+                fs::write(
+                    &rollout,
+                    format!(
+                        "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"model_provider\":\"openai\"}}}}\n{{\"type\":\"user_message\",\"message\":\"hello\"}}\n"
+                    ),
+                )
+                .expect("write rollout");
+                conn.execute(
+                    "INSERT INTO threads VALUES (?1, ?2, 'openai', ?3, 1, 0, 'vscode', 'user', ?4, ?4, NULL, ?5, ?6)",
+                    (
+                        &id,
+                        &rollout.to_string_lossy().to_string(),
+                        &cwd,
+                        &title,
+                        &(timestamp_ms / 1000),
+                        &timestamp_ms,
+                    ),
+                )
+                .expect("insert thread");
+                timestamp_ms -= 1000;
+            }
+        }
+
+        let cli_rollout = session_dir.join("rollout-llm-cli.jsonl");
+        fs::write(
+            &cli_rollout,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"llm-cli\",\"model_provider\":\"openai\"}}\n{\"type\":\"user_message\",\"message\":\"cli\"}\n",
+        )
+        .expect("write cli rollout");
+        conn.execute(
+            "INSERT INTO threads VALUES ('llm-cli', ?1, 'openai', ?2, 1, 0, 'cli', 'user', 'CLI title', 'CLI title', NULL, 1, 1000)",
+            (
+                &cli_rollout.to_string_lossy().to_string(),
+                &r"C:\Users\sunda\Documents\LLMservice",
+            ),
+        )
+        .expect("insert cli thread");
+        drop(conn);
+
+        fs::write(
+            codex_dir.join("session_index.jsonl"),
+            "{\"id\":\"llm-00\",\"thread_name\":\"stale title\",\"updated_at\":\"2026-01-01T00:00:00.000Z\"}\n",
+        )
+        .expect("write session index");
+        fs::write(
+            codex_dir.join(".codex-global-state.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "thread-workspace-root-hints": {},
+                "projectless-thread-ids": [],
+                "electron-saved-workspace-roots": []
+            }))
+            .expect("global json"),
+        )
+        .expect("write global state");
+
+        let active = ActiveCodexStateDb {
+            path: db_path.clone(),
+            kind: "sqlite_subdir".to_string(),
+        };
+        let project_path = r"C:\Users\sunda\Documents\LLMservice".to_string();
+        let source_providers = source_ids(&["openai"]);
+        let dry_run = repair_codex_history_visibility_at(
+            &codex_dir,
+            active.clone(),
+            CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID,
+            Some(CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID.to_string()),
+            source_providers.clone(),
+            Some(project_path.clone()),
+            HistoryVisibilityRepairRuntimeOptions {
+                dry_run: true,
+                count: 5,
+                window_limit: 8,
+                balance_recent_window: true,
+                max_per_project: 3,
+                max_total: 8,
+                source_filter: Some("vscode".to_string()),
+                include_archived: false,
+                include_subagents: false,
+                backup_root_override: Some(dir.path().join("dry-run-backup")),
+            },
+        )
+        .expect("dry run repair");
+
+        assert_eq!(dry_run.provider_rows_to_update, 37);
+        assert_eq!(dry_run.visible_candidate_rows, 36);
+        assert_eq!(dry_run.project_rows, 12);
+        assert_eq!(dry_run.focus_selected_count, 8);
+        assert_eq!(dry_run.balanced_recent_window_rows, 8);
+        assert_eq!(dry_run.balanced_recent_window_projects, 3);
+        assert_eq!(dry_run.session_index_titles_to_update, 1);
+        assert_eq!(dry_run.source_filter.as_deref(), Some("vscode"));
+
+        let backup_root = dir.path().join("history-repair-backup");
+        let applied = repair_codex_history_visibility_at(
+            &codex_dir,
+            active,
+            CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID,
+            Some(CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID.to_string()),
+            source_providers,
+            Some(project_path),
+            HistoryVisibilityRepairRuntimeOptions {
+                dry_run: false,
+                count: 5,
+                window_limit: 8,
+                balance_recent_window: true,
+                max_per_project: 3,
+                max_total: 8,
+                source_filter: Some("vscode".to_string()),
+                include_archived: false,
+                include_subagents: false,
+                backup_root_override: Some(backup_root),
+            },
+        )
+        .expect("apply repair");
+
+        assert_eq!(applied.session_index_titles_updated, 1);
+        assert_eq!(applied.session_index_rows_moved, 8);
+        assert_eq!(applied.rollout_mtimes_touched, 8);
+
+        let index_text = fs::read_to_string(codex_dir.join("session_index.jsonl")).expect("index");
+        assert!(index_text.contains("\"id\":\"llm-00\""));
+        assert!(index_text.contains("\"thread_name\":\"llm title 00\""));
+        assert!(!index_text.contains("stale title"));
     }
 
     #[test]
