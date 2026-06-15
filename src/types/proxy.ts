@@ -1,3 +1,5 @@
+import type { SessionMessage } from "@/types";
+
 export interface ProxyConfig {
   listen_address: string;
   listen_port: number;
@@ -266,6 +268,11 @@ export interface CodexHistorySessionListOptions {
   includeSubagents?: boolean | null;
 }
 
+export interface CodexHistoryValueCount {
+  value: string | null;
+  count: number;
+}
+
 export interface CodexHistorySessionSummary {
   id: string;
   title: string;
@@ -285,8 +292,27 @@ export interface CodexHistorySessionListOutcome {
   stateDbPath: string | null;
   activeDbKind: string | null;
   liveConfigModelProvider: string | null;
+  targetProviderCandidates: string[];
+  sourceCounts: CodexHistoryValueCount[];
+  providerCounts: CodexHistoryValueCount[];
   totalMatched: number;
   items: CodexHistorySessionSummary[];
+  skippedReason: string | null;
+}
+
+export interface CodexHistorySessionDetailOptions {
+  codexHome?: string | null;
+  stateDbPath?: string | null;
+  sessionId: string;
+}
+
+export interface CodexHistorySessionDetailOutcome {
+  codexHome: string;
+  stateDbPath: string | null;
+  activeDbKind: string | null;
+  session: CodexHistorySessionSummary | null;
+  messages: SessionMessage[];
+  rolloutPath: string | null;
   skippedReason: string | null;
 }
 

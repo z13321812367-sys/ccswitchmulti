@@ -606,6 +606,15 @@ pub async fn list_codex_history_sessions(
         .map_err(|error| error.to_string())
 }
 
+/// 读取单条 Codex active SQLite 历史的 JSONL 正文，用于会话管理页查看修复候选内容。
+#[tauri::command]
+pub async fn read_codex_history_session(
+    options: crate::codex_history_migration::CodexHistorySessionDetailOptions,
+) -> Result<crate::codex_history_migration::CodexHistorySessionDetailOutcome, String> {
+    crate::codex_history_migration::read_codex_history_session(options)
+        .map_err(|error| error.to_string())
+}
+
 /// 构造诊断检查项，统一字符串转换和证据字段。
 fn codex_check(
     id: &str,

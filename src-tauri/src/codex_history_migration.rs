@@ -10,6 +10,7 @@ use crate::codex_config::{
 use crate::config::{atomic_write, copy_file, get_app_config_dir};
 use crate::database::{is_official_seed_id, Database};
 use crate::error::AppError;
+use crate::session_manager::SessionMessage;
 use crate::settings::{
     CodexOfficialHistoryUnifyMigration, CodexProviderTemplateMigration,
     CodexThirdPartyHistoryProviderBucketMigration,
@@ -327,6 +328,14 @@ pub struct CodexHistorySessionSummary {
     pub rollout_path: Option<String>,
 }
 
+/// Codex active SQLite 中某个字段的取值分布，用于前端展示 provider/source 下拉候选。
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexHistoryValueCount {
+    pub value: Option<String>,
+    pub count: usize,
+}
+
 /// Codex 历史列表查询结果。
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -335,8 +344,33 @@ pub struct CodexHistorySessionListOutcome {
     pub state_db_path: Option<String>,
     pub active_db_kind: Option<String>,
     pub live_config_model_provider: Option<String>,
+    pub target_provider_candidates: Vec<String>,
+    pub source_counts: Vec<CodexHistoryValueCount>,
+    pub provider_counts: Vec<CodexHistoryValueCount>,
     pub total_matched: usize,
     pub items: Vec<CodexHistorySessionSummary>,
+    pub skipped_reason: Option<String>,
+}
+
+/// 读取单条 Codex 历史详情的参数。
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexHistorySessionDetailOptions {
+    pub codex_home: Option<String>,
+    pub state_db_path: Option<String>,
+    pub session_id: String,
+}
+
+/// 单条 Codex 历史详情，正文来自 threads.rollout_path 指向的 JSONL。
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexHistorySessionDetailOutcome {
+    pub codex_home: String,
+    pub state_db_path: Option<String>,
+    pub active_db_kind: Option<String>,
+    pub session: Option<CodexHistorySessionSummary>,
+    pub messages: Vec<SessionMessage>,
+    pub rollout_path: Option<String>,
     pub skipped_reason: Option<String>,
 }
 
@@ -521,8 +555,9 @@ pub fn repair_codex_history_visibility_for_multirouter(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID)
-        .to_string();
+        .map(str::to_string)
+        .or_else(|| live_config_model_provider.clone())
+        .unwrap_or_else(|| CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID.to_string());
     let dry_run = options.dry_run;
     let count = options.count.unwrap_or(30);
     let window_limit = options.window_limit.unwrap_or(80);
@@ -621,6 +656,10 @@ pub fn list_codex_history_sessions(
     else {
         return Ok(CodexHistorySessionListOutcome {
             codex_home: codex_dir.to_string_lossy().to_string(),
+            target_provider_candidates: codex_target_provider_candidates(
+                live_config_model_provider.as_deref(),
+                &[],
+            ),
             live_config_model_provider,
             skipped_reason: Some("state_db_not_found".to_string()),
             ..Default::default()
@@ -629,6 +668,10 @@ pub fn list_codex_history_sessions(
     let conn = Connection::open(&active_db.path)
         .map_err(|e| AppError::Database(format!("open Codex active state DB failed: {e}")))?;
     let rows = load_codex_thread_history_rows(&conn)?;
+    let target_provider_candidates =
+        codex_target_provider_candidates(live_config_model_provider.as_deref(), &rows);
+    let source_counts = history_value_counts(&rows, |row| row.source.clone());
+    let provider_counts = history_value_counts(&rows, |row| row.model_provider.clone());
     let project_path = options
         .project_path
         .as_deref()
@@ -704,35 +747,93 @@ pub fn list_codex_history_sessions(
     });
     let total_matched = matched.len();
     let items = matched
-        .into_iter()
+        .iter()
         .take(limit)
-        .map(|row| {
-            let updated_at_ms = row_updated_ms(&row);
-            let title = row_title(&row);
-            let cwd = row.cwd.as_deref().and_then(normalize_history_path);
-            let rollout_path = row.rollout_path.as_deref().map(strip_long_path_prefix);
-            CodexHistorySessionSummary {
-                id: row.id,
-                title,
-                cwd,
-                model_provider: row.model_provider,
-                source: row.source,
-                thread_source: row.thread_source,
-                archived: row.archived.unwrap_or(0) != 0,
-                has_user_event: row.has_user_event.unwrap_or(0) == 1,
-                updated_at_ms,
-                updated_at: Some(iso_from_epoch_millis(updated_at_ms)),
-                rollout_path,
-            }
-        })
+        .map(codex_history_summary_from_row)
         .collect();
     Ok(CodexHistorySessionListOutcome {
         codex_home: codex_dir.to_string_lossy().to_string(),
         state_db_path: Some(active_db.path.to_string_lossy().to_string()),
         active_db_kind: Some(active_db.kind),
         live_config_model_provider,
+        target_provider_candidates,
+        source_counts,
+        provider_counts,
         total_matched,
         items,
+        skipped_reason: None,
+    })
+}
+
+/// 读取单条 Codex 历史正文；SQLite 只负责定位 rollout_path，正文仍来自本地 JSONL。
+pub fn read_codex_history_session(
+    options: CodexHistorySessionDetailOptions,
+) -> Result<CodexHistorySessionDetailOutcome, AppError> {
+    let session_id = options.session_id.trim();
+    if session_id.is_empty() {
+        return Err(AppError::Message("session_id is required".to_string()));
+    }
+
+    let codex_dir = options
+        .codex_home
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(resolve_user_path)
+        .unwrap_or_else(get_codex_config_dir);
+    let config_path = codex_dir.join("config.toml");
+    let config_text = fs::read_to_string(&config_path)
+        .or_else(|_| read_codex_config_text())
+        .unwrap_or_default();
+    let Some(active_db) = resolve_active_codex_state_db_with_override(
+        &codex_dir,
+        &config_text,
+        options.state_db_path.as_deref(),
+    )?
+    else {
+        return Ok(CodexHistorySessionDetailOutcome {
+            codex_home: codex_dir.to_string_lossy().to_string(),
+            skipped_reason: Some("state_db_not_found".to_string()),
+            ..Default::default()
+        });
+    };
+
+    let conn = Connection::open(&active_db.path)
+        .map_err(|e| AppError::Database(format!("open Codex active state DB failed: {e}")))?;
+    let rows = load_codex_thread_history_rows(&conn)?;
+    let Some(row) = rows.iter().find(|row| row.id == session_id) else {
+        return Ok(CodexHistorySessionDetailOutcome {
+            codex_home: codex_dir.to_string_lossy().to_string(),
+            state_db_path: Some(active_db.path.to_string_lossy().to_string()),
+            active_db_kind: Some(active_db.kind),
+            skipped_reason: Some("session_not_found".to_string()),
+            ..Default::default()
+        });
+    };
+
+    let summary = codex_history_summary_from_row(row);
+    let rollout_path = summary.rollout_path.clone();
+    let Some(path) = resolve_history_path(row.rollout_path.as_deref()) else {
+        return Ok(CodexHistorySessionDetailOutcome {
+            codex_home: codex_dir.to_string_lossy().to_string(),
+            state_db_path: Some(active_db.path.to_string_lossy().to_string()),
+            active_db_kind: Some(active_db.kind),
+            session: Some(summary),
+            rollout_path,
+            skipped_reason: Some("rollout_path_not_found".to_string()),
+            ..Default::default()
+        });
+    };
+    let messages = crate::session_manager::providers::codex::load_messages(&path)
+        .map_err(AppError::Message)?;
+
+    Ok(CodexHistorySessionDetailOutcome {
+        codex_home: codex_dir.to_string_lossy().to_string(),
+        state_db_path: Some(active_db.path.to_string_lossy().to_string()),
+        active_db_kind: Some(active_db.kind),
+        session: Some(summary),
+        messages,
+        rollout_path,
         skipped_reason: None,
     })
 }
@@ -1353,6 +1454,75 @@ fn load_codex_thread_history_rows(conn: &Connection) -> Result<Vec<ThreadHistory
     Ok(output)
 }
 
+/// 将 SQLite 历史行转换成前端可展示的会话摘要。
+fn codex_history_summary_from_row(row: &ThreadHistoryRow) -> CodexHistorySessionSummary {
+    let updated_at_ms = row_updated_ms(row);
+    let title = row_title(row);
+    let cwd = row.cwd.as_deref().and_then(normalize_history_path);
+    let rollout_path = row.rollout_path.as_deref().map(strip_long_path_prefix);
+    CodexHistorySessionSummary {
+        id: row.id.clone(),
+        title,
+        cwd,
+        model_provider: row.model_provider.clone(),
+        source: row.source.clone(),
+        thread_source: row.thread_source.clone(),
+        archived: row.archived.unwrap_or(0) != 0,
+        has_user_event: row.has_user_event.unwrap_or(0) == 1,
+        updated_at_ms,
+        updated_at: Some(iso_from_epoch_millis(updated_at_ms)),
+        rollout_path,
+    }
+}
+
+/// 统计 threads 表字段的实际取值分布，供 UI 构造下拉候选和说明文案。
+fn history_value_counts<F>(rows: &[ThreadHistoryRow], mut read: F) -> Vec<CodexHistoryValueCount>
+where
+    F: FnMut(&ThreadHistoryRow) -> Option<String>,
+{
+    let mut counts: HashMap<Option<String>, usize> = HashMap::new();
+    for row in rows {
+        let value = read(row)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        *counts.entry(value).or_insert(0) += 1;
+    }
+    let mut output = counts
+        .into_iter()
+        .map(|(value, count)| CodexHistoryValueCount { value, count })
+        .collect::<Vec<_>>();
+    output.sort_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.value.cmp(&right.value))
+    });
+    output
+}
+
+/// 生成修复目标 provider 候选；live config 优先，其次稳定 MultiRouter 桶，再补 DB 现有桶。
+fn codex_target_provider_candidates(
+    live_config_model_provider: Option<&str>,
+    rows: &[ThreadHistoryRow],
+) -> Vec<String> {
+    fn push_unique(output: &mut Vec<String>, value: Option<&str>) {
+        let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+            return;
+        };
+        if !output.iter().any(|item| item == value) {
+            output.push(value.to_string());
+        }
+    }
+
+    let mut output = Vec::new();
+    push_unique(&mut output, live_config_model_provider);
+    push_unique(&mut output, Some(CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID));
+    for row in rows {
+        push_unique(&mut output, row.model_provider.as_deref());
+    }
+    output
+}
+
 /// 把动态 SQLite row 转成当前修复逻辑需要的 owned 结构。
 fn thread_history_row_from_sql(
     row: &rusqlite::Row<'_>,
@@ -1425,6 +1595,8 @@ fn is_interactive_history_source(source: Option<&str>) -> bool {
 /// 按用户指定的来源过滤历史；未指定时保持 Codex Desktop 常规可见来源。
 fn source_matches_history_filter(source: Option<&str>, filter: Option<&str>) -> bool {
     match filter.map(str::trim).filter(|value| !value.is_empty()) {
+        Some("all") | Some("*") => true,
+        Some("interactive") => is_interactive_history_source(source),
         Some(expected) => source == Some(expected),
         None => is_interactive_history_source(source),
     }
@@ -3404,6 +3576,28 @@ mod tests {
         values.iter().map(|value| value.to_string()).collect()
     }
 
+    /// 为历史修复测试创建最小 `threads` 表，覆盖当前 UI 需要读取和修复的字段。
+    fn create_history_test_threads_table(conn: &Connection) {
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                rollout_path TEXT,
+                model_provider TEXT,
+                cwd TEXT,
+                has_user_event INTEGER,
+                archived INTEGER,
+                source TEXT,
+                thread_source TEXT,
+                title TEXT,
+                preview TEXT,
+                first_user_message TEXT,
+                updated_at INTEGER,
+                updated_at_ms INTEGER
+            );",
+        )
+        .expect("create threads table");
+    }
+
     #[test]
     fn active_state_db_prefers_current_sqlite_subdir() {
         let dir = tempdir().expect("tempdir");
@@ -3417,6 +3611,84 @@ mod tests {
 
         assert_eq!(active.kind, "sqlite_subdir");
         assert_eq!(active.path, sqlite_dir.join(CODEX_STATE_DB_FILENAME));
+    }
+
+    #[test]
+    fn multirouter_repair_defaults_target_to_live_config_provider() {
+        let dir = tempdir().expect("tempdir");
+        let codex_dir = dir.path().join(".codex");
+        let sqlite_dir = codex_dir.join("sqlite");
+        let session_dir = codex_dir.join("sessions/2026/06/15");
+        fs::create_dir_all(&sqlite_dir).expect("create sqlite dir");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+        fs::write(
+            codex_dir.join("config.toml"),
+            r#"model_provider = "third_party_live""#,
+        )
+        .expect("write config");
+
+        let rollout = session_dir.join("rollout-multirouter-live-target.jsonl");
+        fs::write(
+            &rollout,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"multi-live-target\",\"model_provider\":\"openai\"}}\n",
+                "{\"timestamp\":\"2026-03-06T21:50:13Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":\"hello\"}}\n"
+            ),
+        )
+        .expect("write rollout");
+
+        let db_path = sqlite_dir.join(CODEX_STATE_DB_FILENAME);
+        let conn = Connection::open(&db_path).expect("open active db");
+        create_history_test_threads_table(&conn);
+        conn.execute(
+            "INSERT INTO threads VALUES (?1, ?2, 'openai', ?3, 0, 0, 'vscode', 'user', 'Live target', 'Live target', NULL, 1000, 1000000)",
+            (
+                &"multi-live-target",
+                &rollout.to_string_lossy().to_string(),
+                &"C:\\Users\\sunda\\Documents\\LLMservice",
+            ),
+        )
+        .expect("insert thread");
+        drop(conn);
+
+        fs::write(codex_dir.join("session_index.jsonl"), "").expect("write index");
+        fs::write(
+            codex_dir.join(".codex-global-state.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "thread-workspace-root-hints": {},
+                "projectless-thread-ids": [],
+                "electron-saved-workspace-roots": []
+            }))
+            .expect("global json"),
+        )
+        .expect("write global state");
+
+        let db = Database::memory().expect("memory db");
+        let result = repair_codex_history_visibility_for_multirouter(
+            &db,
+            CodexHistoryVisibilityRepairOptions {
+                dry_run: true,
+                codex_home: Some(codex_dir.to_string_lossy().to_string()),
+                project_path: Some("C:\\Users\\sunda\\Documents\\LLMservice".to_string()),
+                target_provider: None,
+                source_filter: Some("vscode".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("multirouter repair dry-run");
+
+        assert_eq!(result.target_provider, "third_party_live");
+        assert_eq!(
+            result.live_config_model_provider.as_deref(),
+            Some("third_party_live")
+        );
+        assert!(result
+            .source_provider_ids
+            .iter()
+            .any(|provider| provider == OFFICIAL_OPENAI_CODEX_MODEL_PROVIDER_ID));
+        assert_eq!(result.provider_rows_to_update, 1);
+        assert_eq!(result.user_event_rows_to_update, 1);
+        assert_eq!(result.active_db_kind.as_deref(), Some("sqlite_subdir"));
     }
 
     #[test]
@@ -3491,6 +3763,143 @@ mod tests {
         assert_eq!(result.provider_rows_to_update, 1);
         assert_eq!(result.user_event_rows_to_update, 1);
         assert_eq!(result.active_db_kind.as_deref(), Some("sqlite_subdir"));
+    }
+
+    #[test]
+    fn list_history_sessions_returns_provider_source_candidates_and_all_sources() {
+        let dir = tempdir().expect("tempdir");
+        let codex_dir = dir.path().join(".codex");
+        let sqlite_dir = codex_dir.join("sqlite");
+        fs::create_dir_all(&sqlite_dir).expect("create sqlite dir");
+        fs::write(
+            codex_dir.join("config.toml"),
+            r#"model_provider = "third_party_live""#,
+        )
+        .expect("write config");
+
+        let db_path = sqlite_dir.join(CODEX_STATE_DB_FILENAME);
+        let conn = Connection::open(&db_path).expect("open active db");
+        create_history_test_threads_table(&conn);
+        conn.execute(
+            "INSERT INTO threads VALUES ('vscode-session', NULL, 'openai', ?1, 1, 0, 'vscode', 'user', 'VS Code', 'VS Code', NULL, 3000, 3000000)",
+            (&"C:\\Users\\sunda\\Documents\\LLMservice",),
+        )
+        .expect("insert vscode row");
+        conn.execute(
+            "INSERT INTO threads VALUES ('exec-session', NULL, 'custom', ?1, 1, 0, 'exec', 'user', 'Exec', 'Exec', NULL, 2000, 2000000)",
+            (&"C:\\Users\\sunda\\Documents\\trace",),
+        )
+        .expect("insert exec row");
+        conn.execute(
+            "INSERT INTO threads VALUES ('subagent-session', NULL, 'codex_model_router_v2', ?1, 1, 0, 'cli', 'subagent', 'Subagent', 'Subagent', NULL, 1000, 1000000)",
+            (&"C:\\Users\\sunda\\Documents\\LLMservice",),
+        )
+        .expect("insert subagent row");
+        drop(conn);
+
+        let result = list_codex_history_sessions(CodexHistorySessionListOptions {
+            codex_home: Some(codex_dir.to_string_lossy().to_string()),
+            source_filter: Some("all".to_string()),
+            limit: Some(10),
+            include_subagents: Some(true),
+            ..Default::default()
+        })
+        .expect("list history sessions");
+
+        assert_eq!(result.total_matched, 3);
+        assert_eq!(
+            result
+                .items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["vscode-session", "exec-session", "subagent-session"]
+        );
+        assert_eq!(
+            result.live_config_model_provider.as_deref(),
+            Some("third_party_live")
+        );
+        assert_eq!(
+            result
+                .target_provider_candidates
+                .first()
+                .map(String::as_str),
+            Some("third_party_live")
+        );
+        assert!(result
+            .target_provider_candidates
+            .iter()
+            .any(|provider| provider == CC_SWITCH_CODEX_ROUTER_MODEL_PROVIDER_ID));
+        assert!(result
+            .source_counts
+            .iter()
+            .any(|row| row.value.as_deref() == Some("exec") && row.count == 1));
+        assert!(result
+            .provider_counts
+            .iter()
+            .any(|row| row.value.as_deref() == Some("custom") && row.count == 1));
+        assert_eq!(result.active_db_kind.as_deref(), Some("sqlite_subdir"));
+    }
+
+    #[test]
+    fn read_history_session_loads_rollout_messages_from_sqlite_path() {
+        let dir = tempdir().expect("tempdir");
+        let codex_dir = dir.path().join(".codex");
+        let sqlite_dir = codex_dir.join("sqlite");
+        let session_dir = codex_dir.join("sessions/2026/06/15");
+        fs::create_dir_all(&sqlite_dir).expect("create sqlite dir");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+        fs::write(
+            codex_dir.join("config.toml"),
+            r#"model_provider = "third_party_live""#,
+        )
+        .expect("write config");
+
+        let rollout = session_dir.join("rollout-detail-session.jsonl");
+        fs::write(
+            &rollout,
+            concat!(
+                "{\"timestamp\":\"2026-03-06T21:50:12Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"detail-session\",\"cwd\":\"C:\\\\Users\\\\sunda\\\\Documents\\\\LLMservice\"}}\n",
+                "{\"timestamp\":\"2026-03-06T21:50:13Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":\"hello detail\"}}\n",
+                "{\"timestamp\":\"2026-03-06T21:50:14Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done detail\"}]}}\n"
+            ),
+        )
+        .expect("write rollout");
+
+        let db_path = sqlite_dir.join(CODEX_STATE_DB_FILENAME);
+        let conn = Connection::open(&db_path).expect("open active db");
+        create_history_test_threads_table(&conn);
+        conn.execute(
+            "INSERT INTO threads VALUES ('detail-session', ?1, 'third_party_live', ?2, 1, 0, 'vscode', 'user', 'Detail title', 'Detail title', NULL, 1000, 1000000)",
+            (
+                &rollout.to_string_lossy().to_string(),
+                &"C:\\Users\\sunda\\Documents\\LLMservice",
+            ),
+        )
+        .expect("insert detail row");
+        drop(conn);
+
+        let result = read_codex_history_session(CodexHistorySessionDetailOptions {
+            codex_home: Some(codex_dir.to_string_lossy().to_string()),
+            session_id: "detail-session".to_string(),
+            ..Default::default()
+        })
+        .expect("read history session");
+
+        assert_eq!(
+            result.session.as_ref().map(|session| session.id.as_str()),
+            Some("detail-session")
+        );
+        let expected_rollout_path = rollout.to_string_lossy().to_string();
+        assert_eq!(
+            result.rollout_path.as_deref(),
+            Some(expected_rollout_path.as_str())
+        );
+        assert_eq!(result.messages.len(), 2);
+        assert_eq!(result.messages[0].role, "user");
+        assert_eq!(result.messages[0].content, "hello detail");
+        assert_eq!(result.messages[1].role, "assistant");
+        assert_eq!(result.messages[1].content, "done detail");
     }
 
     #[test]
