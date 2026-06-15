@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   CheckCircle2,
   Copy,
@@ -6,6 +6,7 @@ import {
   Eye,
   FileClock,
   Info,
+  ListChecks,
   RefreshCw,
   Search,
   ShieldCheck,
@@ -106,6 +107,7 @@ export function CodexHistoryRepairPanel({
   const [repairError, setRepairError] = useState<string | null>(null);
   const [isPreviewingRepair, setIsPreviewingRepair] = useState(false);
   const [isApplyingRepair, setIsApplyingRepair] = useState(false);
+  const didAutoLoadRef = useRef(false);
 
   const normalizedCodexHome = codexHome.trim();
   const normalizedStateDbPath = stateDbPath.trim();
@@ -299,204 +301,251 @@ export function CodexHistoryRepairPanel({
     }
   }
 
+  /// 首次打开修复主工作区时自动执行只读加载，避免默认画面停在空状态。
+  useEffect(() => {
+    if (didAutoLoadRef.current) return;
+    if (!canUseTauriInvoke()) return;
+    didAutoLoadRef.current = true;
+    void loadHistorySessions();
+  }, []);
+
+  const repairScopeLabel =
+    selectedSessionIds.length > 0
+      ? `定向修复 ${selectedSessionIds.length} 个 session`
+      : "均衡修复 recent window";
+  const activeDbLabel =
+    historyList?.stateDbPath ||
+    normalizedStateDbPath ||
+    "~/.codex/sqlite/state_5.sqlite";
+
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3">
-      <div className="flex flex-wrap items-start justify-between gap-3 rounded-lg border bg-card px-4 py-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2 text-base font-semibold">
-            <ProviderIcon icon="openai" name="Codex" size={20} />
-            Codex 历史修复
-            <Badge variant="secondary">Desktop history</Badge>
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border bg-card">
+      <div className="shrink-0 border-b px-4 py-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2 text-base font-semibold">
+              <ProviderIcon icon="openai" name="Codex" size={20} />
+              <span>Codex 历史修复</span>
+              <Badge variant="secondary">Desktop history</Badge>
+              <Badge variant="outline">source={sourceFilter}</Badge>
+            </div>
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+              <span className="font-mono">maxPerProject=10</span>
+              <span className="font-mono">maxTotal=300</span>
+              <span>{repairScopeLabel}</span>
+            </div>
           </div>
-          <div className="mt-1 text-xs text-muted-foreground">
-            默认使用成功基线：source=vscode，maxPerProject=10，maxTotal=300。
+          <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant={historyList ? "outline" : "default"}
+              onClick={loadHistorySessions}
+              disabled={isLoadingHistory}
+              className="gap-2"
+            >
+              {isLoadingHistory ? (
+                <RefreshCw className="size-4 animate-spin" />
+              ) : (
+                <Database className="size-4" />
+              )}
+              加载历史
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => runHistoryRepair(true)}
+              disabled={isPreviewingRepair || isApplyingRepair}
+              className="gap-2"
+            >
+              {isPreviewingRepair ? (
+                <RefreshCw className="size-4 animate-spin" />
+              ) : (
+                <FileClock className="size-4" />
+              )}
+              预览修复
+            </Button>
+            <Button
+              size="sm"
+              onClick={applyHistoryRepair}
+              disabled={!canApplyRepair}
+              className="gap-2"
+            >
+              {isApplyingRepair ? (
+                <RefreshCw className="size-4 animate-spin" />
+              ) : (
+                <ShieldCheck className="size-4" />
+              )}
+              确认写入
+            </Button>
+            {onClose ? (
+              <Button size="sm" variant="ghost" onClick={onClose}>
+                <X className="size-4" />
+                会话浏览
+              </Button>
+            ) : null}
           </div>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={loadHistorySessions}
-            disabled={isLoadingHistory}
-            className="gap-2"
-          >
-            {isLoadingHistory ? (
-              <RefreshCw className="size-4 animate-spin" />
-            ) : (
-              <Database className="size-4" />
-            )}
-            加载历史
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => runHistoryRepair(true)}
-            disabled={isPreviewingRepair || isApplyingRepair}
-            className="gap-2"
-          >
-            {isPreviewingRepair ? (
-              <RefreshCw className="size-4 animate-spin" />
-            ) : (
-              <FileClock className="size-4" />
-            )}
-            预览修复
-          </Button>
-          <Button
-            size="sm"
-            onClick={applyHistoryRepair}
-            disabled={!canApplyRepair}
-            className="gap-2"
-          >
-            {isApplyingRepair ? (
-              <RefreshCw className="size-4 animate-spin" />
-            ) : (
-              <ShieldCheck className="size-4" />
-            )}
-            确认写入
-          </Button>
-          {onClose ? (
-            <Button size="sm" variant="ghost" onClick={onClose}>
-              <X className="size-4" />
-            </Button>
-          ) : null}
+
+        <div className="mt-3 grid gap-2 md:grid-cols-3">
+          <RepairStatusTile
+            icon={<Database className="size-4" />}
+            label="Active DB"
+            value={activeDbLabel}
+          />
+          <RepairStatusTile
+            icon={<ListChecks className="size-4" />}
+            label="已加载 / 已选"
+            value={`${historyList?.totalMatched ?? 0} / ${selectedSessionIds.length}`}
+          />
+          <RepairStatusTile
+            icon={<ShieldCheck className="size-4" />}
+            label="写入状态"
+            value={
+              canApplyRepair
+                ? "预览已锁定，可确认写入"
+                : repairResult?.dryRun
+                  ? "参数已变化，请重新预览"
+                  : "等待预览"
+            }
+          />
         </div>
       </div>
 
-      <div className="grid min-h-0 flex-1 gap-3 xl:grid-cols-[390px_1fr]">
-        <div className="flex min-h-0 flex-col gap-3">
-          <RepairSettings
-            codexHome={codexHome}
-            stateDbPath={stateDbPath}
-            projectPath={projectPath}
-            targetProvider={targetProvider}
-            targetProviderOptions={targetProviderOptions}
-            sourceFilter={sourceFilter}
-            includeArchived={includeArchived}
-            includeSubagents={includeSubagents}
-            historyList={historyList}
-            onCodexHomeChange={(value) => {
-              setCodexHome(value);
-              invalidatePreview();
-            }}
-            onStateDbPathChange={(value) => {
-              setStateDbPath(value);
-              invalidatePreview();
-            }}
-            onProjectPathChange={(value) => {
-              setProjectPath(value);
-              invalidatePreview();
-            }}
-            onTargetProviderChange={(value) => {
-              setTargetProvider(value);
-              invalidatePreview();
-            }}
-            onSourceFilterChange={(value) => {
-              setSourceFilter(value);
-              invalidatePreview();
-            }}
-            onIncludeArchivedChange={(checked) => {
-              setIncludeArchived(checked);
-              invalidatePreview();
-            }}
-            onIncludeSubagentsChange={(checked) => {
-              setIncludeSubagents(checked);
-              invalidatePreview();
-            }}
-          />
+      <div className="shrink-0 border-b bg-muted/20 px-4 py-3">
+        <RepairSettings
+          codexHome={codexHome}
+          stateDbPath={stateDbPath}
+          projectPath={projectPath}
+          targetProvider={targetProvider}
+          targetProviderOptions={targetProviderOptions}
+          sourceFilter={sourceFilter}
+          includeArchived={includeArchived}
+          includeSubagents={includeSubagents}
+          historyList={historyList}
+          onCodexHomeChange={(value) => {
+            setCodexHome(value);
+            invalidatePreview();
+          }}
+          onStateDbPathChange={(value) => {
+            setStateDbPath(value);
+            invalidatePreview();
+          }}
+          onProjectPathChange={(value) => {
+            setProjectPath(value);
+            invalidatePreview();
+          }}
+          onTargetProviderChange={(value) => {
+            setTargetProvider(value);
+            invalidatePreview();
+          }}
+          onSourceFilterChange={(value) => {
+            setSourceFilter(value);
+            invalidatePreview();
+          }}
+          onIncludeArchivedChange={(checked) => {
+            setIncludeArchived(checked);
+            invalidatePreview();
+          }}
+          onIncludeSubagentsChange={(checked) => {
+            setIncludeSubagents(checked);
+            invalidatePreview();
+          }}
+        />
+      </div>
 
-          <div className="flex min-h-0 flex-1 flex-col rounded-lg border bg-card">
-            <div className="border-b px-3 py-2">
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2 text-sm font-semibold">
-                  <FileClock className="size-4" />
-                  SQLite 历史
-                  <Badge variant="secondary">
-                    {historyList?.totalMatched ?? 0}
-                  </Badge>
-                </div>
-                <div className="text-xs text-muted-foreground">
-                  已选 {selectedSessionIds.length}
-                </div>
+      <div className="grid min-h-0 flex-1 xl:grid-cols-[400px_minmax(0,1fr)]">
+        <div className="flex min-h-0 flex-col border-r">
+          <div className="border-b px-3 py-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-sm font-semibold">
+                <FileClock className="size-4" />
+                SQLite 历史
+                <Badge variant="secondary">
+                  {historyList?.totalMatched ?? 0}
+                </Badge>
               </div>
-              <div className="mt-2 flex gap-2">
-                <div className="relative min-w-0 flex-1">
-                  <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-                  <Input
-                    value={historyQuery}
-                    onChange={(event) => setHistoryQuery(event.target.value)}
-                    placeholder="搜索标题、路径、provider 或 session id"
-                    className="h-8 pl-8"
-                  />
-                </div>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={loadHistorySessions}
-                  disabled={isLoadingHistory}
-                >
-                  <RefreshCw
-                    className={cn(
-                      "size-3.5",
-                      isLoadingHistory && "animate-spin",
-                    )}
-                  />
-                </Button>
-              </div>
-              <div className="mt-2 flex flex-wrap gap-2">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={selectAllLoadedSessions}
-                  disabled={!historyList?.items.length}
-                >
-                  全选本页
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => {
-                    setSelectedSessionIds([]);
-                    invalidatePreview();
-                  }}
-                  disabled={selectedSessionIds.length === 0}
-                >
-                  清空选择
-                </Button>
-              </div>
+              <Badge variant="outline">已选 {selectedSessionIds.length}</Badge>
             </div>
-
-            {historyListError ? (
-              <div className="m-3 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
-                加载失败：{historyListError}
+            <div className="mt-2 flex gap-2">
+              <div className="relative min-w-0 flex-1">
+                <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={historyQuery}
+                  onChange={(event) => setHistoryQuery(event.target.value)}
+                  placeholder="搜索标题、路径、provider 或 session id"
+                  className="h-8 pl-8"
+                />
               </div>
-            ) : null}
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={loadHistorySessions}
+                disabled={isLoadingHistory}
+              >
+                <RefreshCw
+                  className={cn("size-3.5", isLoadingHistory && "animate-spin")}
+                />
+              </Button>
+            </div>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={selectAllLoadedSessions}
+                disabled={!historyList?.items.length}
+              >
+                全选本页
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  setSelectedSessionIds([]);
+                  invalidatePreview();
+                }}
+                disabled={selectedSessionIds.length === 0}
+              >
+                清空选择
+              </Button>
+            </div>
+          </div>
 
-            <ScrollArea className="min-h-0 flex-1">
-              {historyList?.items.length ? (
-                <div className="divide-y">
-                  {historyList.items.map((session) => (
-                    <HistoryRepairSessionRow
-                      key={session.id}
-                      session={session}
-                      selected={selectedSet.has(session.id)}
-                      active={activeHistoryId === session.id}
-                      onToggle={() => toggleHistorySession(session.id)}
-                      onOpen={() => void openHistorySession(session)}
-                    />
-                  ))}
-                </div>
-              ) : (
-                <div className="p-4 text-sm text-muted-foreground">
+          {historyListError ? (
+            <div className="m-3 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
+              加载失败：{historyListError}
+            </div>
+          ) : null}
+
+          <ScrollArea className="min-h-0 flex-1">
+            {historyList?.items.length ? (
+              <div className="divide-y">
+                {historyList.items.map((session) => (
+                  <HistoryRepairSessionRow
+                    key={session.id}
+                    session={session}
+                    selected={selectedSet.has(session.id)}
+                    active={activeHistoryId === session.id}
+                    onToggle={() => toggleHistorySession(session.id)}
+                    onOpen={() => void openHistorySession(session)}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="flex min-h-[220px] flex-col items-center justify-center gap-2 p-6 text-center text-sm text-muted-foreground">
+                <Database className="size-8 opacity-40" />
+                <span>
                   {historyList
                     ? "没有匹配的历史记录。"
-                    : "加载 active SQLite 后选择需要修复的 session。"}
-                </div>
-              )}
-            </ScrollArea>
-          </div>
+                    : isLoadingHistory
+                      ? "正在加载 active SQLite..."
+                      : "加载 active SQLite 后选择需要修复的 session。"}
+                </span>
+              </div>
+            )}
+          </ScrollArea>
         </div>
 
-        <div className="grid min-h-0 gap-3 2xl:grid-cols-[1fr_360px]">
+        <div className="grid min-h-0 bg-background 2xl:grid-cols-[minmax(0,1fr)_340px]">
           <HistorySessionDetail
             detail={sessionDetail}
             error={sessionDetailError}
@@ -534,6 +583,30 @@ interface RepairSettingsProps {
   onIncludeSubagentsChange: (checked: boolean) => void;
 }
 
+interface RepairStatusTileProps {
+  icon: ReactNode;
+  label: string;
+  value: string;
+}
+
+/// 渲染修复工作台顶部状态块，用短文本展示当前 DB、选择数量和写入锁定状态。
+function RepairStatusTile({ icon, label, value }: RepairStatusTileProps) {
+  return (
+    <div className="min-w-0 rounded-md border bg-muted/25 px-3 py-2">
+      <div className="flex items-center gap-2 text-[11px] font-medium uppercase text-muted-foreground">
+        {icon}
+        <span>{label}</span>
+      </div>
+      <div
+        className="mt-1 truncate text-xs font-medium text-foreground"
+        title={value}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
 /// 渲染修复参数区，浅色默认值说明实际会读写的位置。
 function RepairSettings({
   codexHome,
@@ -554,12 +627,12 @@ function RepairSettings({
   onIncludeSubagentsChange,
 }: RepairSettingsProps) {
   return (
-    <div className="rounded-lg border bg-card p-3">
-      <div className="mb-3 flex items-center gap-2 text-sm font-semibold">
+    <div className="grid gap-3">
+      <div className="flex items-center gap-2 text-sm font-semibold">
         <SlidersHorizontal className="size-4" />
-        修复参数
+        路径和修复范围
       </div>
-      <div className="grid gap-3">
+      <div className="grid gap-3 lg:grid-cols-3 2xl:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)_minmax(0,1fr)_260px_180px_180px]">
         <LabeledInput
           label="Codex 目录"
           value={codexHome}
@@ -623,7 +696,7 @@ function RepairSettings({
             }
           </div>
         </label>
-        <div className="grid gap-2 text-xs">
+        <div className="grid gap-2 self-end text-xs">
           <ToggleLine
             checked={includeArchived}
             label="包含 archived"
@@ -681,7 +754,7 @@ interface ToggleLineProps {
 /// 渲染修复范围开关，和删除批量选择状态保持独立。
 function ToggleLine({ checked, label, onChange }: ToggleLineProps) {
   return (
-    <label className="flex items-center gap-2 rounded-md border px-2 py-1.5">
+    <label className="flex h-8 items-center gap-2 rounded-md border bg-background/60 px-2">
       <Checkbox
         checked={checked}
         onCheckedChange={(value) => onChange(Boolean(value))}
@@ -760,7 +833,7 @@ function HistorySessionDetail({
 }: HistorySessionDetailProps) {
   const session = detail?.session;
   return (
-    <div className="flex min-h-0 flex-col rounded-lg border bg-card">
+    <div className="flex min-h-0 flex-col bg-card">
       <div className="flex flex-wrap items-start justify-between gap-2 border-b px-3 py-2">
         <div className="min-w-0">
           <div className="flex items-center gap-2 text-sm font-semibold">
@@ -811,8 +884,9 @@ function HistorySessionDetail({
           </div>
         </ScrollArea>
       ) : (
-        <div className="p-4 text-sm text-muted-foreground">
-          选择左侧 session 后查看本地 JSONL 内容。
+        <div className="flex flex-1 flex-col items-center justify-center gap-2 p-8 text-center text-sm text-muted-foreground">
+          <Eye className="size-9 opacity-35" />
+          <span>选择左侧 session 后查看本地 JSONL 内容。</span>
         </div>
       )}
     </div>
@@ -834,67 +908,71 @@ function RepairResultPanel({
   providerCounts,
 }: RepairResultPanelProps) {
   return (
-    <div className="flex min-h-0 flex-col gap-3">
-      <div className="rounded-lg border bg-card p-3">
-        <div className="mb-2 flex items-center gap-2 text-sm font-semibold">
+    <div className="flex min-h-0 flex-col border-t bg-card 2xl:border-t-0 2xl:border-l">
+      <div className="border-b px-3 py-2">
+        <div className="flex items-center gap-2 text-sm font-semibold">
           <Info className="size-4" />
           修复结果
         </div>
-        {error ? (
-          <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
-            {error}
-          </div>
-        ) : result ? (
-          <div className="space-y-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge>{result.dryRun ? "预览" : "已写入"}</Badge>
-              <Badge variant="outline">target={result.targetProvider}</Badge>
-              <Badge variant="outline">
-                source={result.sourceFilter || "interactive"}
-              </Badge>
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <RepairMetric
-                label="provider"
-                value={result.providerRowsToUpdate}
-              />
-              <RepairMetric
-                label="user-event"
-                value={result.userEventRowsToUpdate}
-              />
-              <RepairMetric
-                label="index append"
-                value={result.sessionIndexMissingToAppend}
-              />
-              <RepairMetric label="focus" value={result.focusSelectedCount} />
-              <RepairMetric
-                label="balanced"
-                value={result.balancedRecentWindowRows}
-              />
-              <RepairMetric
-                label="rollout mtime"
-                value={result.rolloutMtimesToTouch}
-              />
-            </div>
-            <div className="space-y-1 rounded-md bg-muted/60 p-2 font-mono text-[11px] text-muted-foreground">
-              <div className="truncate">db={result.stateDbPath ?? "-"}</div>
-              <div className="truncate">
-                live={result.liveConfigModelProvider ?? "-"}
-              </div>
-              <div className="truncate">
-                backup={result.backupDir ?? "写入后显示"}
-              </div>
-            </div>
-          </div>
-        ) : (
-          <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
-            先执行预览，再确认写入。
-          </div>
-        )}
       </div>
+      <ScrollArea className="min-h-0 flex-1">
+        <div className="space-y-3 p-3">
+          {error ? (
+            <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
+              {error}
+            </div>
+          ) : result ? (
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge>{result.dryRun ? "预览" : "已写入"}</Badge>
+                <Badge variant="outline">target={result.targetProvider}</Badge>
+                <Badge variant="outline">
+                  source={result.sourceFilter || "interactive"}
+                </Badge>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <RepairMetric
+                  label="provider"
+                  value={result.providerRowsToUpdate}
+                />
+                <RepairMetric
+                  label="user-event"
+                  value={result.userEventRowsToUpdate}
+                />
+                <RepairMetric
+                  label="index append"
+                  value={result.sessionIndexMissingToAppend}
+                />
+                <RepairMetric label="focus" value={result.focusSelectedCount} />
+                <RepairMetric
+                  label="balanced"
+                  value={result.balancedRecentWindowRows}
+                />
+                <RepairMetric
+                  label="rollout mtime"
+                  value={result.rolloutMtimesToTouch}
+                />
+              </div>
+              <div className="space-y-1 rounded-md bg-muted/60 p-2 font-mono text-[11px] text-muted-foreground">
+                <div className="truncate">db={result.stateDbPath ?? "-"}</div>
+                <div className="truncate">
+                  live={result.liveConfigModelProvider ?? "-"}
+                </div>
+                <div className="truncate">
+                  backup={result.backupDir ?? "写入后显示"}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
+              先执行预览，再确认写入。
+            </div>
+          )}
 
-      <ValueCountPanel title="source 分布" rows={sourceCounts} />
-      <ValueCountPanel title="provider 桶分布" rows={providerCounts} />
+          <ValueCountPanel title="source 分布" rows={sourceCounts} />
+          <ValueCountPanel title="provider 桶分布" rows={providerCounts} />
+        </div>
+      </ScrollArea>
     </div>
   );
 }
@@ -922,7 +1000,7 @@ interface ValueCountPanelProps {
 /// 渲染 active SQLite 字段分布，帮助判断 source 和 provider 桶的真实含义。
 function ValueCountPanel({ title, rows }: ValueCountPanelProps) {
   return (
-    <div className="rounded-lg border bg-card p-3">
+    <div className="rounded-md border bg-muted/20 p-3">
       <div className="mb-2 text-sm font-semibold">{title}</div>
       {rows.length ? (
         <div className="space-y-1">
@@ -958,6 +1036,15 @@ function buildTargetProviderOptions(
       value.trim() &&
       value !== AUTO_TARGET &&
       values.findIndex((item) => item === value) === index,
+  );
+}
+
+/// 检测当前是否运行在 Tauri 环境，避免浏览器预览时自动触发后端 invoke 错误。
+function canUseTauriInvoke(): boolean {
+  if (typeof window === "undefined") return false;
+  return Boolean(
+    (window as unknown as { __TAURI_INTERNALS__?: unknown })
+      .__TAURI_INTERNALS__,
   );
 }
 

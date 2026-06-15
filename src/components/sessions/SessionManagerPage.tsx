@@ -97,7 +97,9 @@ export function SessionManagerPage({ appId }: { appId: string }) {
     appId as ProviderFilter,
   );
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
-  const [showCodexHistoryRepair, setShowCodexHistoryRepair] = useState(false);
+  const [showCodexHistoryRepair, setShowCodexHistoryRepair] = useState(
+    () => appId === "codex",
+  );
   const isCodexManager = appId === "codex";
 
   // 使用 FlexSearch 全文搜索
@@ -126,9 +128,7 @@ export function SessionManagerPage({ appId }: { appId: string }) {
   }, [filteredSessions, selectedKey]);
 
   useEffect(() => {
-    if (!isCodexManager) {
-      setShowCodexHistoryRepair(false);
-    }
+    setShowCodexHistoryRepair(isCodexManager);
   }, [isCodexManager]);
 
   const selectedSession = useMemo(() => {
@@ -579,27 +579,6 @@ export function SessionManagerPage({ appId }: { appId: string }) {
                             </TooltipContent>
                           </Tooltip>
                         )}
-                        {isCodexManager && (
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <Button
-                                variant={
-                                  showCodexHistoryRepair ? "secondary" : "ghost"
-                                }
-                                size="icon"
-                                className="size-7"
-                                onClick={() =>
-                                  setShowCodexHistoryRepair(
-                                    (current) => !current,
-                                  )
-                                }
-                              >
-                                <FileClock className="size-3.5" />
-                              </Button>
-                            </TooltipTrigger>
-                            <TooltipContent>Codex 历史修复</TooltipContent>
-                          </Tooltip>
-                        )}
                         <Tooltip>
                           <TooltipTrigger asChild>
                             <Button
@@ -729,6 +708,34 @@ export function SessionManagerPage({ appId }: { appId: string }) {
                         </Tooltip>
                       </div>
                     </div>
+                    {isCodexManager && (
+                      <div className="grid grid-cols-2 gap-1 rounded-md border bg-muted/30 p-1">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant={
+                            showCodexHistoryRepair ? "secondary" : "ghost"
+                          }
+                          className="h-8 justify-start gap-2 px-2.5 text-xs"
+                          onClick={() => setShowCodexHistoryRepair(true)}
+                        >
+                          <FileClock className="size-3.5" />
+                          <span className="truncate">历史修复</span>
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant={
+                            showCodexHistoryRepair ? "ghost" : "secondary"
+                          }
+                          className="h-8 justify-start gap-2 px-2.5 text-xs"
+                          onClick={() => setShowCodexHistoryRepair(false)}
+                        >
+                          <MessageSquare className="size-3.5" />
+                          <span className="truncate">会话浏览</span>
+                        </Button>
+                      </div>
+                    )}
                     {selectionMode && (
                       <div className="grid gap-3 rounded-md border bg-muted/40 px-3 py-2.5">
                         <div className="flex items-center gap-2 text-xs text-muted-foreground">
