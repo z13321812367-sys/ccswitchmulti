@@ -13,6 +13,7 @@ use crate::proxy::{CircuitBreakerConfig, CircuitBreakerStats};
 use crate::store::AppState;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use std::process::Command;
@@ -1399,11 +1400,7 @@ fn codex_router_log_diagnostics_from_text_at(
         .iter()
         .find(|event| codex_router_log_is_request_event(event))
         .map(|event| event.timestamp.clone());
-    let latest_error = recent_events
-        .iter()
-        .filter(|event| codex_router_log_event_is_recent(event, now, recent_window))
-        .find(|event| event.event.contains("error"))
-        .and_then(|event| event.error.clone().or_else(|| Some(event.line.clone())));
+    let latest_error = latest_unresolved_router_error(&recent_events, now, recent_window);
     let has_recent_request = recent_events
         .iter()
         .filter(|event| codex_router_log_event_is_recent(event, now, recent_window))
@@ -1465,6 +1462,68 @@ fn codex_router_log_event_is_recent(
     };
     let age = now.signed_duration_since(timestamp);
     age >= chrono::Duration::zero() && age <= window
+}
+
+/// 找出最近窗口里仍未被后续成功事件覆盖的 router 错误。
+fn latest_unresolved_router_error(
+    events_newest_first: &[CodexRouterLogEvent],
+    now: chrono::NaiveDateTime,
+    window: chrono::Duration,
+) -> Option<String> {
+    let mut recovered_keys = HashSet::new();
+    for event in events_newest_first
+        .iter()
+        .filter(|event| codex_router_log_event_is_recent(event, now, window))
+    {
+        if codex_router_log_event_is_success(event) {
+            if let Some(key) = codex_router_log_recovery_key(event) {
+                recovered_keys.insert(key);
+            }
+            continue;
+        }
+
+        if !event.event.contains("error") {
+            continue;
+        }
+
+        let key = codex_router_log_recovery_key(event);
+        if key
+            .as_ref()
+            .is_some_and(|key| recovered_keys.contains(key))
+        {
+            continue;
+        }
+
+        return event.error.clone().or_else(|| Some(event.line.clone()));
+    }
+    None
+}
+
+/// 判断日志事件是否代表该 route/provider/model 已恢复成功。
+fn codex_router_log_event_is_success(event: &CodexRouterLogEvent) -> bool {
+    if event.event == "response_ready" {
+        return true;
+    }
+    if event.event != "upstream_status" {
+        return false;
+    }
+    event
+        .status
+        .as_deref()
+        .and_then(|status| status.parse::<u16>().ok())
+        .is_some_and(|status| (200..400).contains(&status))
+}
+
+/// 用 provider/route/model 生成恢复匹配键，避免旧上游错误污染当前健康 route。
+fn codex_router_log_recovery_key(event: &CodexRouterLogEvent) -> Option<String> {
+    let provider = event
+        .effective_provider
+        .as_deref()
+        .or(event.provider.as_deref())
+        .or(event.outer_provider.as_deref())?;
+    let model = event.model.as_deref().unwrap_or("*");
+    let route = event.route_id.as_deref().unwrap_or("*");
+    Some(format!("{provider}|{route}|{model}"))
 }
 
 /// 解析一行 `codex-router.log`，字段均为已清洗的 key=value 片段。
@@ -1572,6 +1631,33 @@ mod codex_router_log_diagnostics_tests {
             Some("2026-06-13 00:00:00.000")
         );
         assert_eq!(diagnostics.latest_error, None);
+    }
+
+    #[test]
+    fn recovered_router_errors_do_not_block_current_diagnostics() {
+        let text = concat!(
+            "2026-06-13 00:20:00.000 event=route_resolved trace=a model=gpt-5.5 outer_provider=codex-openai-router effective_provider=codex-openai-router::route::openai-official route_id=openai-official routing_configured=true\n",
+            "2026-06-13 00:20:01.000 event=upstream_error trace=a model=gpt-5.5 provider=codex-openai-router::route::openai-official effective_provider=codex-openai-router::route::openai-official status=502 error=error_sending_request_for_url_(https://chatgpt.com/backend-api/codex/responses)\n",
+            "2026-06-13 00:20:02.000 event=route_resolved trace=b model=gpt-5.5 outer_provider=codex-openai-router effective_provider=codex-openai-router::route::openai-official route_id=openai-official routing_configured=true\n",
+            "2026-06-13 00:20:03.000 event=response_ready trace=b model=gpt-5.5 provider=codex-openai-router::route::openai-official effective_provider=codex-openai-router::route::openai-official status=200\n",
+            "2026-06-13 00:20:04.000 event=route_resolved trace=c model=qwen3.6 outer_provider=codex-openai-router effective_provider=codex-openai-router::route::qwen-local route_id=qwen-local routing_configured=true\n",
+            "2026-06-13 00:20:05.000 event=upstream_error trace=c model=qwen3.6 provider=codex-openai-router::route::qwen-local effective_provider=codex-openai-router::route::qwen-local status=521 body_summary=qwen_gateway_error\n",
+        );
+        let now = chrono::NaiveDateTime::parse_from_str(
+            "2026-06-13 00:24:36.000",
+            "%Y-%m-%d %H:%M:%S%.f",
+        )
+        .expect("valid test time");
+
+        let diagnostics = codex_router_log_diagnostics_from_text_at(
+            "codex-router.log".to_string(),
+            true,
+            text,
+            Some("codex-openai-router"),
+            now,
+        );
+
+        assert_eq!(diagnostics.latest_error.as_deref(), Some("qwen_gateway_error"));
     }
 
     #[test]
