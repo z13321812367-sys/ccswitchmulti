@@ -144,6 +144,12 @@ export const proxyApi = {
     return invoke("regenerate_external_openai_api_key");
   },
 
+  async deleteExternalOpenAIAPIKey(
+    keyId: string,
+  ): Promise<ExternalOpenAIAPIProfile> {
+    return invoke("delete_external_openai_api_key", { keyId });
+  },
+
   // ========== v3+ 全局/应用级配置 API ==========
 
   // 获取全局代理配置

@@ -56,6 +56,8 @@ pub struct ExternalOpenAiApiProfile {
     #[serde(default)]
     pub api_key_prefix: Option<String>,
     #[serde(default)]
+    pub api_keys: Vec<ExternalOpenAiApiKeyRecord>,
+    #[serde(default)]
     pub updated_at: Option<i64>,
 }
 
@@ -72,9 +74,31 @@ impl Default for ExternalOpenAiApiProfile {
             listen_port: Some(DEFAULT_EXTERNAL_OPENAI_API_PORT),
             api_key_hash: None,
             api_key_prefix: None,
+            api_keys: Vec::new(),
             updated_at: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalOpenAiApiKeyRecord {
+    pub id: String,
+    #[serde(rename = "apiKey")]
+    pub api_key: String,
+    pub prefix: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalOpenAiApiKeyView {
+    pub id: String,
+    pub prefix: String,
+    pub created_at: i64,
+    #[serde(rename = "apiKey")]
+    pub api_key: Option<String>,
+    pub legacy: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +114,7 @@ pub struct ExternalOpenAiApiProfileView {
     pub listen_port: u16,
     pub api_key_prefix: Option<String>,
     pub has_api_key: bool,
+    pub api_keys: Vec<ExternalOpenAiApiKeyView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,6 +135,7 @@ pub struct GeneratedExternalOpenAiApiKey {
     pub profile: ExternalOpenAiApiProfileView,
     #[serde(rename = "apiKey")]
     pub api_key: String,
+    pub key: ExternalOpenAiApiKeyView,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,14 +194,61 @@ pub fn save_profile(db: &Database, profile: &ExternalOpenAiApiProfile) -> Result
 pub fn regenerate_api_key(db: &Database) -> Result<GeneratedExternalOpenAiApiKey, AppError> {
     let api_key = format!("ccsw_{}", uuid::Uuid::new_v4().simple());
     let mut profile = load_profile(db)?;
-    profile.api_key_prefix = Some(api_key.chars().take(12).collect());
+    let record = ExternalOpenAiApiKeyRecord {
+        id: uuid::Uuid::new_v4().to_string(),
+        prefix: key_prefix(&api_key),
+        api_key: api_key.clone(),
+        created_at: chrono::Utc::now().timestamp(),
+    };
+    profile.api_key_prefix = Some(record.prefix.clone());
     profile.api_key_hash = Some(hash_api_key(&api_key));
+    profile.api_keys.push(record.clone());
     profile.updated_at = Some(chrono::Utc::now().timestamp());
     save_profile(db, &profile)?;
     Ok(GeneratedExternalOpenAiApiKey {
         profile: profile_view(&profile),
         api_key,
+        key: key_view(&record),
     })
+}
+
+/// 删除指定本地访问 key；`legacy` 表示旧版单 hash key。
+pub fn delete_api_key(
+    db: &Database,
+    key_id: &str,
+) -> Result<ExternalOpenAiApiProfileView, AppError> {
+    let mut profile = load_profile(db)?;
+    let key_id = key_id.trim();
+    if key_id.is_empty() {
+        return Err(AppError::Config(
+            "External OpenAI API key id is required".to_string(),
+        ));
+    }
+
+    if key_id == "legacy" {
+        profile.api_key_hash = None;
+        profile.api_key_prefix = None;
+    } else {
+        let before = profile.api_keys.len();
+        profile.api_keys.retain(|key| key.id != key_id);
+        if profile.api_keys.len() == before {
+            return Err(AppError::Config(format!(
+                "External OpenAI API key not found: {key_id}"
+            )));
+        }
+    }
+
+    if let Some(last_key) = profile.api_keys.last() {
+        profile.api_key_hash = Some(hash_api_key(&last_key.api_key));
+        profile.api_key_prefix = Some(last_key.prefix.clone());
+    } else {
+        // 新格式 key 删除干净后必须同步清空兼容 hash，避免被删除的最后一个 key 继续通过鉴权。
+        profile.api_key_hash = None;
+        profile.api_key_prefix = None;
+    }
+    profile.updated_at = Some(chrono::Utc::now().timestamp());
+    save_profile(db, &profile)?;
+    Ok(profile_view(&profile))
 }
 
 /// 更新 profile 的后端目标和默认模型；API key 只能通过单独命令生成。
@@ -207,6 +280,11 @@ pub fn update_profile(
 
 /// 生成前端可展示的脱敏 profile。
 pub fn profile_view(profile: &ExternalOpenAiApiProfile) -> ExternalOpenAiApiProfileView {
+    let mut api_keys: Vec<ExternalOpenAiApiKeyView> =
+        profile.api_keys.iter().map(key_view).collect();
+    if profile.api_key_hash.is_some() && profile.api_keys.is_empty() {
+        api_keys.push(legacy_key_view(profile));
+    }
     ExternalOpenAiApiProfileView {
         enabled: profile.enabled,
         backend_type: profile.backend_type,
@@ -217,7 +295,8 @@ pub fn profile_view(profile: &ExternalOpenAiApiProfile) -> ExternalOpenAiApiProf
         listen_address: external_listen_address(profile),
         listen_port: external_listen_port(profile),
         api_key_prefix: profile.api_key_prefix.clone(),
-        has_api_key: profile.api_key_hash.is_some(),
+        has_api_key: profile.api_key_hash.is_some() || !profile.api_keys.is_empty(),
+        api_keys,
     }
 }
 
@@ -240,7 +319,7 @@ pub fn runtime_status(db: &Database) -> Result<ExternalOpenAiApiRuntimeStatusVie
     if !profile.enabled {
         issues.push("profile disabled".to_string());
     }
-    if profile.api_key_hash.is_none() {
+    if profile.api_key_hash.is_none() && profile.api_keys.is_empty() {
         issues.push("api key not generated".to_string());
     }
     if profile.provider_id.is_none() {
@@ -263,7 +342,7 @@ pub fn runtime_status(db: &Database) -> Result<ExternalOpenAiApiRuntimeStatusVie
     }
 
     let ready = profile.enabled
-        && profile.api_key_hash.is_some()
+        && (profile.api_key_hash.is_some() || !profile.api_keys.is_empty())
         && selected_backend
             .as_ref()
             .is_some_and(|backend| backend.available)
@@ -305,13 +384,19 @@ pub fn validate_request(
     if !profile.enabled {
         return Err(ExternalOpenAiApiAuthError::Disabled);
     }
-    let Some(expected_hash) = profile.api_key_hash.as_deref() else {
+    if profile.api_key_hash.is_none() && profile.api_keys.is_empty() {
         return Err(ExternalOpenAiApiAuthError::MissingKey);
-    };
+    }
     let Some(api_key) = extract_api_key(headers) else {
         return Err(ExternalOpenAiApiAuthError::MissingKey);
     };
-    if hash_api_key(&api_key) != expected_hash {
+    let api_key_hash = hash_api_key(&api_key);
+    let matches_legacy = profile.api_key_hash.as_deref() == Some(api_key_hash.as_str());
+    let matches_record = profile
+        .api_keys
+        .iter()
+        .any(|record| record.api_key == api_key || hash_api_key(&record.api_key) == api_key_hash);
+    if !matches_legacy && !matches_record {
         return Err(ExternalOpenAiApiAuthError::InvalidKey);
     }
     Ok(profile)
@@ -353,6 +438,9 @@ fn parse_profile(raw: &str) -> Result<ExternalOpenAiApiProfile, AppError> {
     if profile.listen_port.is_none() {
         profile.listen_port = Some(DEFAULT_EXTERNAL_OPENAI_API_PORT);
     }
+    profile
+        .api_keys
+        .retain(|key| !key.id.trim().is_empty() && !key.api_key.trim().is_empty());
 
     Ok(profile)
 }
@@ -789,6 +877,36 @@ fn hash_api_key(api_key: &str) -> String {
 }
 
 /// 清理可选字符串配置，空白字符串按未设置处理。
+/// 生成用于列表展示的短前缀，避免凭据表格被长 key 撑开。
+fn key_prefix(api_key: &str) -> String {
+    api_key.chars().take(12).collect()
+}
+
+/// 将新格式 key 转换成前端视图；明文只限 `ccsw_` 本地 sidecar key。
+fn key_view(key: &ExternalOpenAiApiKeyRecord) -> ExternalOpenAiApiKeyView {
+    ExternalOpenAiApiKeyView {
+        id: key.id.clone(),
+        prefix: key.prefix.clone(),
+        created_at: key.created_at,
+        api_key: Some(key.api_key.clone()),
+        legacy: false,
+    }
+}
+
+/// 旧版 profile 只保存 hash，因此只能展示前缀和删除入口，不能再次复制。
+fn legacy_key_view(profile: &ExternalOpenAiApiProfile) -> ExternalOpenAiApiKeyView {
+    ExternalOpenAiApiKeyView {
+        id: "legacy".to_string(),
+        prefix: profile
+            .api_key_prefix
+            .clone()
+            .unwrap_or_else(|| "ccsw_legacy".to_string()),
+        created_at: profile.updated_at.unwrap_or_default(),
+        api_key: None,
+        legacy: true,
+    }
+}
+
 fn clean_optional(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
@@ -866,6 +984,56 @@ mod tests {
         );
 
         assert!(validate_request(&db, &headers).is_ok());
+    }
+
+    #[test]
+    fn multiple_generated_keys_remain_valid_until_deleted() {
+        let db = Database::memory().expect("memory db");
+        let first = regenerate_api_key(&db).expect("generate first key");
+        let second = regenerate_api_key(&db).expect("generate second key");
+        update_profile(
+            &db,
+            ExternalOpenAiApiProfileUpdate {
+                enabled: true,
+                backend_type: ExternalOpenAiApiBackendType::Provider,
+                app_type: Some("codex".to_string()),
+                provider_id: Some("provider".to_string()),
+                route_id: None,
+                default_model: None,
+                listen_address: None,
+                listen_port: None,
+            },
+        )
+        .expect("enable profile");
+
+        let mut first_headers = HeaderMap::new();
+        first_headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", first.api_key)).unwrap(),
+        );
+        let mut second_headers = HeaderMap::new();
+        second_headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", second.api_key)).unwrap(),
+        );
+
+        assert!(validate_request(&db, &first_headers).is_ok());
+        assert!(validate_request(&db, &second_headers).is_ok());
+
+        delete_api_key(&db, &first.key.id).expect("delete first key");
+
+        assert_eq!(
+            validate_request(&db, &first_headers).unwrap_err(),
+            ExternalOpenAiApiAuthError::InvalidKey
+        );
+        assert!(validate_request(&db, &second_headers).is_ok());
+
+        delete_api_key(&db, &second.key.id).expect("delete second key");
+
+        assert_eq!(
+            validate_request(&db, &second_headers).unwrap_err(),
+            ExternalOpenAiApiAuthError::MissingKey
+        );
     }
 
     #[test]

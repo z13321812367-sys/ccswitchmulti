@@ -4002,6 +4002,7 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
             listen_port: None,
             api_key_hash: None,
             api_key_prefix: None,
+            api_keys: Vec::new(),
             updated_at: None,
         };
 
@@ -4073,6 +4074,7 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
             listen_port: None,
             api_key_hash: None,
             api_key_prefix: None,
+            api_keys: Vec::new(),
             updated_at: None,
         };
 

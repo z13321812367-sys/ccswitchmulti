@@ -415,6 +415,15 @@ export interface ExternalOpenAIAPIProfile {
   listenPort: number;
   apiKeyPrefix?: string | null;
   hasApiKey: boolean;
+  apiKeys: ExternalOpenAIAPIKey[];
+}
+
+export interface ExternalOpenAIAPIKey {
+  id: string;
+  prefix: string;
+  createdAt: number;
+  apiKey?: string | null;
+  legacy: boolean;
 }
 
 export interface ExternalOpenAIAPIProfileUpdate {
@@ -431,6 +440,7 @@ export interface ExternalOpenAIAPIProfileUpdate {
 export interface GeneratedExternalOpenAIAPIKey {
   profile: ExternalOpenAIAPIProfile;
   apiKey: string;
+  key: ExternalOpenAIAPIKey;
 }
 
 export interface ExternalOpenAIAPIBackendOption {

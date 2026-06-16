@@ -1806,6 +1806,15 @@ pub async fn regenerate_external_openai_api_key(
     external_openai_api::regenerate_api_key(&state.db).map_err(|e| e.to_string())
 }
 
+/// 删除 External OpenAI-compatible API 的指定本地访问 key。
+#[tauri::command]
+pub async fn delete_external_openai_api_key(
+    state: tauri::State<'_, AppState>,
+    key_id: String,
+) -> Result<ExternalOpenAiApiProfileView, String> {
+    external_openai_api::delete_api_key(&state.db, &key_id).map_err(|e| e.to_string())
+}
+
 // ==================== Global & Per-App Config ====================
 
 /// 获取全局代理配置

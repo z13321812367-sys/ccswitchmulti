@@ -1342,6 +1342,7 @@ pub fn run() {
             commands::get_external_openai_api_runtime_status,
             commands::update_external_openai_api_profile,
             commands::regenerate_external_openai_api_key,
+            commands::delete_external_openai_api_key,
             // Global & Per-App Config
             commands::get_global_proxy_config,
             commands::update_global_proxy_config,

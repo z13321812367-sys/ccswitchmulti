@@ -39,7 +39,6 @@ import {
   Save,
   Server,
   Settings2,
-  ShieldCheck,
   Trash2,
   Wand2,
   XCircle,
@@ -633,12 +632,6 @@ export function CodexRouterWorkspacePage({
     <div className="flex h-full flex-col overflow-hidden px-6 py-4">
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-2">
         <HeaderPanel
-          routingPlans={routingPlans}
-          modelSources={modelSources}
-          routeEntries={routeEntries}
-          enabledRoutes={enabledRoutes}
-          isProxyRunning={isProxyRunning}
-          isCodexTakeoverActive={isCodexTakeoverActive}
           onCreatePlan={handleCreatePlan}
           onJump={(tab) => setActiveTab(tab)}
         />
@@ -742,35 +735,17 @@ export function CodexRouterWorkspacePage({
   );
 }
 
-/// 顶部工作台总览，使用更强的色块和按钮态区分“可点击动作”和“只读状态”。
+/// 顶部工作台只保留定位说明和主要动作；运行态证据统一放到状态页，避免两处重复。
 function HeaderPanel({
-  routingPlans,
-  modelSources,
-  routeEntries,
-  enabledRoutes,
-  isProxyRunning,
-  isCodexTakeoverActive,
   onCreatePlan,
   onJump,
 }: {
-  routingPlans: Provider[];
-  modelSources: Provider[];
-  routeEntries: RouteEntry[];
-  enabledRoutes: RouteEntry[];
-  isProxyRunning: boolean;
-  isCodexTakeoverActive: boolean;
   onCreatePlan: () => void;
   onJump: (tab: WorkspaceTab) => void;
 }) {
-  const enabledPlanCount = routingPlans.filter(
-    (provider) => readCodexRouting(provider)?.enabled !== false,
-  ).length;
-  const linkReady =
-    isProxyRunning && isCodexTakeoverActive && enabledPlanCount > 0;
-
   return (
     <div className="overflow-hidden rounded-lg border border-slate-700/80 bg-slate-950/30">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-700/70 bg-gradient-to-r from-blue-950/45 via-slate-900 to-emerald-950/30 px-4 py-3">
+      <div className="flex flex-wrap items-center justify-between gap-3 bg-gradient-to-r from-blue-950/45 via-slate-900 to-emerald-950/30 px-4 py-3">
         <div className="min-w-0 space-y-2">
           <div className="flex items-center gap-2 text-base font-semibold">
             <GitBranch className="h-4 w-4 text-blue-300" />
@@ -810,63 +785,6 @@ function HeaderPanel({
             </Button>
           </div>
         </div>
-
-        <div className="hidden">
-          <MetricCard
-            color="blue"
-            icon={Layers3}
-            label="路由入口"
-            value={`${enabledPlanCount} / ${routingPlans.length}`}
-            detail="已启用 / 已配置的 MultiRouter provider"
-          />
-          <MetricCard
-            color={linkReady ? "emerald" : "rose"}
-            icon={Activity}
-            label="当前链路"
-            value={linkReady ? "在线" : "未就绪"}
-            detail="监听、Codex 接管、路由入口都通过才在线"
-          />
-          <MetricCard
-            color={isProxyRunning ? "emerald" : "amber"}
-            icon={RadioTower}
-            label="本地监听"
-            value={isProxyRunning ? "成功" : "未启动"}
-            detail="CC Switch 本地代理服务"
-          />
-          <MetricCard
-            color={isCodexTakeoverActive ? "emerald" : "rose"}
-            icon={ShieldCheck}
-            label="Codex 接管"
-            value={isCodexTakeoverActive ? "已接管" : "未接管"}
-            detail="未接管时 Codex 不会进入 MultiRouter"
-          />
-          <MetricCard
-            color="amber"
-            icon={Route}
-            label="启用规则"
-            value={`${enabledRoutes.length} / ${routeEntries.length}`}
-            detail={`${modelSources.length} 个模型源可接入`}
-          />
-        </div>
-      </div>
-
-      <div className="hidden">
-        <FlowStep
-          index="1"
-          title="模型源"
-          detail="准备 OpenAI、Qwen、DeepSeek 等上游"
-        />
-        <FlowStep
-          index="2"
-          title="多路路由"
-          detail="把多个上游收进一个 Codex 代理入口"
-        />
-        <FlowStep
-          index="3"
-          title="接管 Codex"
-          detail="让 Codex live 配置指向本地代理"
-        />
-        <FlowStep index="4" title="匹配规则" detail="按精确模型名或前缀分流" />
       </div>
     </div>
   );
@@ -2833,62 +2751,6 @@ function StatusCard({
       <div className="mt-1 truncate text-xs opacity-75" title={detail}>
         {detail}
       </div>
-    </div>
-  );
-}
-
-/// 指标卡使用不同主题色，帮助用户快速区分状态而不是看到一片灰。
-function MetricCard({
-  color,
-  icon: Icon,
-  label,
-  value,
-  detail,
-}: {
-  color: "blue" | "emerald" | "amber" | "rose";
-  icon: React.ComponentType<{ className?: string }>;
-  label: string;
-  value: string;
-  detail: string;
-}) {
-  const styles = {
-    blue: "border-blue-500/40 bg-blue-500/10 text-blue-200",
-    emerald: "border-emerald-500/40 bg-emerald-500/10 text-emerald-200",
-    amber: "border-amber-500/40 bg-amber-500/10 text-amber-200",
-    rose: "border-rose-500/40 bg-rose-500/10 text-rose-200",
-  }[color];
-
-  return (
-    <div className={cn("rounded-lg border p-3", styles)}>
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-xs opacity-80">{label}</span>
-        <Icon className="h-4 w-4 opacity-80" />
-      </div>
-      <div className="mt-2 text-2xl font-semibold text-white">{value}</div>
-      <div className="mt-1 text-xs opacity-75">{detail}</div>
-    </div>
-  );
-}
-
-/// 流程步骤用于解释这套逻辑如何从模型源变成 Codex 可用的多模型入口。
-function FlowStep({
-  index,
-  title,
-  detail,
-}: {
-  index: string;
-  title: string;
-  detail: string;
-}) {
-  return (
-    <div className="rounded-lg border border-slate-700 bg-slate-950/40 p-3">
-      <div className="flex items-center gap-2">
-        <span className="grid h-6 w-6 place-items-center rounded-full bg-blue-600 text-xs font-bold text-white">
-          {index}
-        </span>
-        <span className="text-sm font-semibold text-slate-100">{title}</span>
-      </div>
-      <div className="mt-2 text-xs leading-5 text-slate-400">{detail}</div>
     </div>
   );
 }
