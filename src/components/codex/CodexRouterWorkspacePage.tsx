@@ -71,13 +71,7 @@ import type {
   ProxyStatus,
 } from "@/types/proxy";
 
-type WorkspaceTab =
-  | "overview"
-  | "sources"
-  | "routes"
-  | "status"
-  | "test"
-  | "records";
+type WorkspaceTab = "overview" | "sources" | "routes" | "status" | "test";
 
 type StatusView = "link" | "debug" | "providers" | "traffic";
 
@@ -126,13 +120,6 @@ type CodexRouting = {
   enabled?: boolean;
   defaultRouteId?: string;
   routes?: CodexRoute[];
-};
-
-type RouteRecord = {
-  id: string;
-  action: string;
-  detail: string;
-  time: string;
 };
 
 type RouteEntry = {
@@ -557,7 +544,6 @@ export function CodexRouterWorkspacePage({
   const [selectedRouteKey, setSelectedRouteKey] = useState<string | null>(null);
   const [testModel, setTestModel] = useState("");
   const [testResult, setTestResult] = useState<string | null>(null);
-  const [records, setRecords] = useState<RouteRecord[]>([]);
 
   const routingPlans = providers.filter(isRoutingPlan);
   const modelSources = providers.filter((provider) => !isRoutingPlan(provider));
@@ -587,47 +573,13 @@ export function CodexRouterWorkspacePage({
         `${provider.id}:${route.id ?? index}` === selectedRouteKey,
     ) ?? routeEntries[0];
 
-  const visibleRecords = useMemo(
-    () =>
-      records.length > 0
-        ? records
-        : [
-            {
-              id: "initial-overview",
-              action: "读取配置",
-              detail: "已从现有 Provider 配置生成路由工作台视图",
-              time: "当前会话",
-            },
-          ],
-    [records],
-  );
-
-  /// 记录页面内的关键操作，帮助用户知道自己刚刚点过什么；真实持久化仍由 Provider 编辑表单负责。
-  function pushRecord(action: string, detail: string) {
-    setRecords((current) => [
-      {
-        id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-        action,
-        detail,
-        time: new Date().toLocaleTimeString("zh-CN", {
-          hour: "2-digit",
-          minute: "2-digit",
-          second: "2-digit",
-        }),
-      },
-      ...current,
-    ]);
-  }
-
   /// 新建路由方案会打开现有 Provider 创建流程，避免出现两套配置来源。
   function handleCreatePlan() {
-    pushRecord("创建", "打开创建多路路由表单");
     onCreateProvider();
   }
 
   /// 编辑路由方案会进入现有 Provider 编辑表单；该表单里可以增删改具体 route。
-  function handleEditPlan(provider: Provider, detail = "打开路由方案编辑表单") {
-    pushRecord("编辑", `${provider.name}：${detail}`);
+  function handleEditPlan(provider: Provider) {
     onEditProvider(provider);
   }
 
@@ -635,7 +587,6 @@ export function CodexRouterWorkspacePage({
   function handleSelectPlan(provider: Provider) {
     setSelectedPlanId(provider.id);
     setActiveTab("routes");
-    pushRecord("查看", `切换到路由方案：${provider.name}`);
   }
 
   /// 选择规则后跳转到规则页，让卡片产生明确的可操作反馈。
@@ -645,10 +596,6 @@ export function CodexRouterWorkspacePage({
       `${entry.provider.id}:${entry.route.id ?? entry.index}`,
     );
     setActiveTab("routes");
-    pushRecord(
-      "查看",
-      `查看规则：${entry.route.label || entry.route.id || "未命名规则"}`,
-    );
   }
 
   /// 页面内测试只做规则匹配预览，不发真实上游请求，避免误触发计费或账号请求。
@@ -658,7 +605,6 @@ export function CodexRouterWorkspacePage({
       setTestResult(
         "请输入一个 Codex 请求里的 model，例如 gpt-5.4-mini 或 qwen3.6。",
       );
-      pushRecord("测试", "未输入模型名，未执行匹配预览");
       return;
     }
 
@@ -674,7 +620,6 @@ export function CodexRouterWorkspacePage({
     if (matched) {
       const result = `${model} 会命中「${matched.route.label || matched.route.id || "未命名规则"}」，上游为 ${routeBaseUrl(matched.route, providersById)}。`;
       setTestResult(result);
-      pushRecord("测试", result);
       return;
     }
 
@@ -682,7 +627,6 @@ export function CodexRouterWorkspacePage({
       ? `没有精确命中，会走默认路由 ${selectedRouting.defaultRouteId}。`
       : "没有命中任何启用规则，且当前方案没有默认路由。";
     setTestResult(fallback);
-    pushRecord("测试", `${model}：${fallback}`);
   }
 
   return (
@@ -704,7 +648,7 @@ export function CodexRouterWorkspacePage({
           onValueChange={(value) => setActiveTab(value as WorkspaceTab)}
         >
           <div className="sticky top-0 z-10 -mx-1 bg-background/95 px-1 py-2 backdrop-blur">
-            <TabsList className="grid w-full grid-cols-6 bg-slate-950/40 p-1">
+            <TabsList className="grid w-full grid-cols-5 bg-slate-950/40 p-1">
               <WorkspaceTabTrigger
                 value="overview"
                 icon={Layers3}
@@ -726,11 +670,6 @@ export function CodexRouterWorkspacePage({
                 label="状态"
               />
               <WorkspaceTabTrigger value="test" icon={Play} label="测试发布" />
-              <WorkspaceTabTrigger
-                value="records"
-                icon={FileClock}
-                label="操作记录"
-              />
             </TabsList>
           </div>
 
@@ -795,17 +734,6 @@ export function CodexRouterWorkspacePage({
               onModelChange={setTestModel}
               onPreviewRoute={handlePreviewRoute}
               onEditPlan={handleEditPlan}
-            />
-          </TabsContent>
-
-          <TabsContent value="records" className="mt-3">
-            <RecordsTab
-              records={visibleRecords}
-              onCreatePlan={handleCreatePlan}
-              onClear={() => {
-                setRecords([]);
-                setTestResult(null);
-              }}
             />
           </TabsContent>
         </Tabs>
@@ -2320,60 +2248,6 @@ function TestTab({
         </div>
       </section>
     </div>
-  );
-}
-
-/// 操作记录页提供本次页面内的增删改查痕迹，让工作台不再像静态说明页。
-function RecordsTab({
-  records,
-  onCreatePlan,
-  onClear,
-}: {
-  records: RouteRecord[];
-  onCreatePlan: () => void;
-  onClear: () => void;
-}) {
-  return (
-    <section className="rounded-lg border border-slate-700 bg-slate-950/40 p-4">
-      <SectionHeader
-        icon={FileClock}
-        title="操作记录"
-        detail="记录当前页面的查看、创建、编辑和测试动作；真实配置仍保存在模型源数据里。"
-        action={
-          <div className="flex gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={onClear}
-              className="gap-2"
-            >
-              <Trash2 className="h-4 w-4" />
-              清空临时记录
-            </Button>
-            <Button
-              size="sm"
-              onClick={onCreatePlan}
-              className="gap-2 bg-blue-600 hover:bg-blue-500"
-            >
-              <Plus className="h-4 w-4" />
-              创建多路路由
-            </Button>
-          </div>
-        }
-      />
-      <div className="mt-4 overflow-hidden rounded-lg border border-slate-700">
-        {records.map((record) => (
-          <div
-            key={record.id}
-            className="grid gap-2 border-b border-slate-800 bg-slate-950/40 p-3 text-sm last:border-b-0 md:grid-cols-[120px_120px_1fr]"
-          >
-            <div className="text-slate-400">{record.time}</div>
-            <div className="font-semibold text-slate-100">{record.action}</div>
-            <div className="text-slate-300">{record.detail}</div>
-          </div>
-        ))}
-      </div>
-    </section>
   );
 }
 
