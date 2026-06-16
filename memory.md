@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-06-17 MultiRouter spawn_agent priority warning fix
+
+- Root cause for the route-rules page warning `deepseek-v4-pro` despite the user not selecting Pro: both the frontend candidate utility and Rust `diagnose_codex_multirouter` still treated a hardcoded priority list (`qwen3.6`, `deepseek-v4-flash`, `deepseek-v4-pro`) as mandatory for Codex `spawn_agent`'s first five visible models.
+- Current rule: `modelCatalog.spawnAgentModels` is the user's explicit first-five candidate order. Diagnostics should only warn when selected candidates fail to enter the live catalog first-five window. Recommended/priority models may still appear in the UI source tab, but unselected recommendations must not produce amber warnings or `spawn_agent_missing_priority_models`.
+- Regression coverage: frontend `validateSpawnAgentCandidates` defaults to no priority enforcement and keeps an explicit-priority test for recommendation use; Rust `missing_spawn_agent_priority_models` is retained as a compatibility field but returns empty after explicit user ordering became the source of truth.
+
 ## 2026-06-16 External OpenAI API Chinese Input Diagnostics
 
 - Current live external Agent API profile was verified read-only from `~/.cc-switch/cc-switch.db`: enabled on `0.0.0.0:15722`, `backendType=provider`, `appType=codex`, `providerId=codex-official`, `defaultModel=gpt-5.5`. This means the reported `/v1/chat/completions` issue goes through External Chat Completions -> synthetic `codex_oauth` provider -> ChatGPT Codex `/backend-api/codex/responses`, not through the normal `15721` MultiRouter route table.

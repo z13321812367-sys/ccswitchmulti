@@ -487,20 +487,11 @@ pub async fn diagnose_codex_multirouter(
     checks.push(codex_check(
         "codex_spawn_agent_model_overrides",
         "Codex spawn_agent model overrides",
-        if live_config.spawn_agent_missing_priority_models.is_empty() {
-            CodexDiagnosticStatus::Pass
-        } else {
-            CodexDiagnosticStatus::Warn
-        },
-        if live_config.spawn_agent_missing_priority_models.is_empty() {
-            "Priority routed models are inside the first five picker-visible models used by Codex spawn_agent tool descriptions.".to_string()
-        } else {
-            format!(
-                "Codex 0.137.0 only describes the first {} picker-visible models in spawn_agent. Regenerate the CCSwitchMulti catalog so these models move into that window: {}.",
-                live_config.spawn_agent_visible_model_limit,
-                live_config.spawn_agent_missing_priority_models.join(", ")
-            )
-        },
+        CodexDiagnosticStatus::Pass,
+        format!(
+            "Codex spawn_agent 只展示前 {} 个 picker-visible 模型；当前以用户保存的子 Agent 候选排序为准，不再强制要求未选择的推荐模型进入前五。",
+            live_config.spawn_agent_visible_model_limit
+        ),
         vec![
             format!(
                 "spawn_agent_visible_model_limit={}",
@@ -942,8 +933,6 @@ fn resolve_codex_catalog_path(config_path: &Path, catalog: &str) -> PathBuf {
 }
 
 const CODEX_SPAWN_AGENT_VISIBLE_MODEL_LIMIT: usize = 5;
-const CODEX_SPAWN_AGENT_PRIORITY_MODELS: &[&str] =
-    &["qwen3.6", "deepseek-v4-flash", "deepseek-v4-pro"];
 
 /// 读取生成 catalog 的模型顺序；Codex spawn_agent 工具说明会按该顺序截取前 5 个。
 fn read_codex_catalog_model_slugs(path: &Path) -> Option<Vec<String>> {
@@ -961,25 +950,10 @@ fn read_codex_catalog_model_slugs(path: &Path) -> Option<Vec<String>> {
         })
 }
 
-/// 找出已经写入 catalog、但会被 Codex spawn_agent 前 5 展示限制截掉的重点路由模型。
+/// 保留旧字段兼容前端类型；用户显式配置候选排序后，不再强制要求推荐模型进入前 5。
 fn missing_spawn_agent_priority_models(models: Option<&[String]>) -> Vec<String> {
-    let Some(models) = models else {
-        return Vec::new();
-    };
-    let visible_models = models
-        .iter()
-        .take(CODEX_SPAWN_AGENT_VISIBLE_MODEL_LIMIT)
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-
-    CODEX_SPAWN_AGENT_PRIORITY_MODELS
-        .iter()
-        .filter(|model| {
-            models.iter().any(|candidate| candidate == **model)
-                && !visible_models.iter().any(|candidate| candidate == *model)
-        })
-        .map(|model| (*model).to_string())
-        .collect()
+    let _ = models;
+    Vec::new()
 }
 
 /// 查询 Codex Desktop/app-server 运行态，并与 catalog 写入时间做保守对比。
@@ -1601,7 +1575,7 @@ mod codex_router_log_diagnostics_tests {
     }
 
     #[test]
-    fn spawn_agent_priority_diagnostics_warn_when_deepseek_is_after_first_five() {
+    fn spawn_agent_priority_diagnostics_ignores_unselected_recommended_models() {
         let models = vec![
             "gpt-5.5".to_string(),
             "gpt-5.4".to_string(),
@@ -1612,10 +1586,7 @@ mod codex_router_log_diagnostics_tests {
             "deepseek-v4-pro".to_string(),
         ];
 
-        assert_eq!(
-            missing_spawn_agent_priority_models(Some(&models)),
-            vec!["deepseek-v4-flash", "deepseek-v4-pro"]
-        );
+        assert!(missing_spawn_agent_priority_models(Some(&models)).is_empty());
     }
 
     #[test]

@@ -1242,13 +1242,13 @@ function SpawnAgentCandidatesPanel({
           .map((model) => model.model?.trim())
           .filter((model): model is string => Boolean(model))
           .slice(0, spawnAgentVisibleLimit),
-    CODEX_SPAWN_AGENT_PRIORITY_MODELS,
+    [],
     spawnAgentVisibleLimit,
   );
   const actualCandidateValidation = validateSpawnAgentCandidates(
     candidateCatalog,
     diagnostics?.liveConfig.modelCatalogFirstModels ?? [],
-    CODEX_SPAWN_AGENT_PRIORITY_MODELS,
+    [],
     spawnAgentVisibleLimit,
   );
   const candidateSourceModels = {
@@ -1372,7 +1372,7 @@ function SpawnAgentCandidatesPanel({
       const actual = validateSpawnAgentCandidates(
         candidateCatalog,
         result.liveConfig.modelCatalogFirstModels ?? [],
-        CODEX_SPAWN_AGENT_PRIORITY_MODELS,
+        [],
         result.liveConfig.spawnAgentVisibleModelLimit ?? spawnAgentVisibleLimit,
       );
       const missing = [
@@ -1607,15 +1607,15 @@ function SpawnAgentCandidatesPanel({
         <Badge
           className={cn(
             "border",
-            localCandidateValidation.missingPriorityModels.length === 0
+            localCandidateValidation.missingSelectedModels.length === 0
               ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-100"
               : "border-amber-500/40 bg-amber-500/10 text-amber-100",
           )}
         >
           本地检查:{" "}
-          {localCandidateValidation.missingPriorityModels.length === 0
-            ? "重点已覆盖"
-            : `缺 ${localCandidateValidation.missingPriorityModels.length} 个重点`}
+          {localCandidateValidation.missingSelectedModels.length === 0
+            ? "已选已覆盖"
+            : `缺 ${localCandidateValidation.missingSelectedModels.length} 个已选`}
         </Badge>
       </div>
 
