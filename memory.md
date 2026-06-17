@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-06-17 Unified and Desktop Codex history repair integration
+
+- Official `origin/main` after `v3.16.3` added `c548e7fc` trilingual `docs/guides/codex-unified-session-history-guide-*.md`, `69341db2` `CODEX_SQLITE_HOME` probing for Codex history migration, `36b557b2` cached tool-call field restoration, and `de0a149d` session detail source-file display. Matrix websearch still returned HTTP 521, so upstream verification used `git fetch origin main` and local Git objects.
+- CCSwitchMulti integration rule: keep official unified session history as the bucket/ledger feature (`openai`/`custom`, backup-based exact restore), and keep the fork Desktop history repair as the visibility/index repair (`state_5.sqlite`, `session_index.jsonl`, `.codex-global-state.json`, rollout `session_meta`, `has_user_event`, balanced recent window). They should be explained together but not merged into one destructive write path.
+- Implemented local hardening: Rust history migration and standalone repair now probe `CODEX_SQLITE_HOME` when `config.toml` lacks `sqlite_home`, with `config.toml` taking precedence. The Python `scripts/codex-history-tool/codex_history_tool.py` mirrors the same active DB fallback. UI copy in `CodexHistoryRepairPanel` now distinguishes official bucket unification from Desktop visibility repair.
+- Also ported official cached tool-call field restoration so existing call items can recover `name`, `namespace`, `arguments`, `input`, `status`, `execution`, `reasoning_content`, and `reasoning`, plus Session Manager source-file display for easier history verification.
+- Verification passed for this integration: `cargo fmt --manifest-path src-tauri\Cargo.toml --check`; `cargo test --manifest-path src-tauri\Cargo.toml codex_history_migration --lib`; `cargo test --manifest-path src-tauri\Cargo.toml codex_chat_history --lib`; `cargo check --manifest-path src-tauri\Cargo.toml --lib`; `pnpm typecheck`; `python -m py_compile scripts\codex-history-tool\codex_history_tool.py`; Python `CODEX_SQLITE_HOME` smoke import. Existing `commands/misc.rs` dead-code warnings remain.
+
 ## 2026-06-17 CCSwitchMulti v3.16.3-1 official merge release
 
 - Official upstream verification: `farion1231/cc-switch` release `v3.16.3` exists, published 2026-06-14, with tag commit `21e695f6` and latest upstream `origin/main` at `0bb3b751` after fetch. For this fork release, merge the official tag `v3.16.3`, not post-release `origin/main`, unless the user explicitly asks for the latest main.
