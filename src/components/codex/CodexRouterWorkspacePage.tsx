@@ -158,15 +158,28 @@ type RouteCandidate = {
   matchPrefixes: string[];
 };
 
+type CodexCatalogModelDraft = {
+  model: string;
+  displayName?: string;
+  display_name?: string;
+  contextWindow?: string | number;
+  context_window?: string | number;
+};
+
+type CodexModelCatalogDraft = {
+  models: CodexCatalogModelDraft[];
+  spawnAgentModels?: string[];
+};
+
 /// 从 Provider 私有配置里读取 Codex 多模型路由配置；没有配置时返回 null，避免把普通模型源误判成路由方案。
-function readCodexRouting(provider: Provider): CodexRouting | null {
+export function readCodexRouting(provider: Provider): CodexRouting | null {
   const routing = provider.settingsConfig?.codexRouting;
   if (!routing || typeof routing !== "object") return null;
   return routing as CodexRouting;
 }
 
 /// 判断一个 Provider 是否已经承载 Codex 多模型路由；即使暂时关闭，只要有规则也归为路由方案方便继续编辑。
-function isRoutingPlan(provider: Provider): boolean {
+export function isRoutingPlan(provider: Provider): boolean {
   const routing = readCodexRouting(provider);
   return Boolean(
     routing && (routing.enabled !== false || (routing.routes?.length ?? 0) > 0),
@@ -361,6 +374,123 @@ function buildRouteCandidates(
   }
 
   return candidates;
+}
+
+/// 把候选选择器里的宽松 route 规整成后端路由器可直接消费的稳定结构。
+export function normalizeCodexRouteForSave(
+  route: CodexRoute,
+  index: number,
+  usedIds: Set<string>,
+): CodexRoute {
+  const id = uniqueRouteId(
+    route.id ??
+      routeTargetProviderId(route) ??
+      route.label ??
+      `route-${index + 1}`,
+    usedIds,
+  );
+  return {
+    ...route,
+    id,
+    enabled: route.enabled !== false,
+    targetProviderId: routeTargetProviderId(route),
+    match: {
+      models: route.match?.models ?? [],
+      prefixes: route.match?.prefixes ?? [],
+    },
+    upstream: {
+      ...route.upstream,
+      apiFormat: routeApiFormat(route),
+      auth: route.upstream?.auth ?? { source: "provider_config" },
+    },
+  };
+}
+
+/// 从已选 route 和目标模型源汇总 MultiRouter 的模型目录；Codex 选择器和 spawn_agent 都依赖这个目录。
+export function buildModelCatalogForRoutes(
+  plan: Provider,
+  routes: CodexRoute[],
+  providersById: Map<string, Provider>,
+): CodexModelCatalogDraft {
+  const existingCatalog = plan.settingsConfig?.modelCatalog;
+  const existingModels = Array.isArray(existingCatalog?.models)
+    ? (existingCatalog.models as CodexCatalogModelDraft[])
+    : [];
+  const byModel = new Map<string, CodexCatalogModelDraft>();
+  for (const model of existingModels) {
+    const id = model.model?.trim();
+    if (id) byModel.set(id, model);
+  }
+
+  for (const route of routes) {
+    const targetProvider = routeTargetProviderId(route)
+      ? providersById.get(routeTargetProviderId(route)!)
+      : undefined;
+    const targetCatalogModels = targetProvider
+      ? readCodexModelCatalog(targetProvider).models
+      : [];
+    for (const catalogModel of targetCatalogModels) {
+      const id = catalogModel.model?.trim();
+      if (!id || byModel.has(id)) continue;
+      byModel.set(id, {
+        model: id,
+        displayName: catalogModel.displayName ?? catalogModel.display_name,
+      });
+    }
+    for (const model of route.match?.models ?? []) {
+      const id = model.trim();
+      if (!id || byModel.has(id)) continue;
+      byModel.set(id, { model: id });
+    }
+  }
+
+  const existingSpawnAgentModels = Array.isArray(
+    existingCatalog?.spawnAgentModels,
+  )
+    ? (existingCatalog.spawnAgentModels as string[])
+    : [];
+  const modelIds = Array.from(byModel.keys());
+  const spawnAgentModels = existingSpawnAgentModels
+    .filter((model) => byModel.has(model))
+    .concat(
+      modelIds.filter((model) => !existingSpawnAgentModels.includes(model)),
+    )
+    .slice(0, 5);
+  return {
+    models: Array.from(byModel.values()),
+    spawnAgentModels,
+  };
+}
+
+/// 生成工作台专用的新 MultiRouter provider；它只承载路由配置，不再让用户填写无关的上游密钥表单。
+export function createDraftRoutingPlan(
+  providers: Provider[],
+  modelSources: Provider[],
+): Provider {
+  const existingIds = new Set(providers.map((provider) => provider.id));
+  const id = uniqueRouteId("codex-multirouter", existingIds);
+  const sourceModels = modelSources.flatMap((provider) =>
+    collectProviderModelIds(provider),
+  );
+  const modelCatalog: CodexModelCatalogDraft = {
+    models: Array.from(new Set(sourceModels)).map((model) => ({ model })),
+    spawnAgentModels: Array.from(new Set(sourceModels)).slice(0, 5),
+  };
+  return {
+    id,
+    name: "New Codex MultiRouter",
+    category: "custom",
+    settingsConfig: {
+      auth: {},
+      config: null,
+      modelCatalog,
+      codexRouting: {
+        enabled: true,
+        routes: [],
+      },
+    },
+    createdAt: Date.now(),
+  };
 }
 
 /// 提取 route 的上游地址；引用真实 Provider 时展示目标 Provider 的配置。
@@ -692,7 +822,7 @@ export function CodexRouterWorkspacePage({
   isCodexTakeoverActive,
   activeProviderId,
   onEditProvider,
-  onCreateProvider,
+  onCreateProvider: _onCreateProvider,
 }: {
   providers: Provider[];
   proxyStatus?: ProxyStatus;
@@ -713,13 +843,32 @@ export function CodexRouterWorkspacePage({
   );
   const [routePickerError, setRoutePickerError] = useState<string | null>(null);
   const [isSavingRoutes, setIsSavingRoutes] = useState(false);
+  const [routePickerSelectAll, setRoutePickerSelectAll] = useState(false);
+  const [optimisticRoutingPlan, setOptimisticRoutingPlan] =
+    useState<Provider | null>(null);
   const queryClient = useQueryClient();
 
-  const routingPlans = providers.filter(isRoutingPlan);
-  const modelSources = providers.filter((provider) => !isRoutingPlan(provider));
+  const effectiveProviders = useMemo(() => {
+    if (!optimisticRoutingPlan) return providers;
+    const replaced = providers.map((provider) =>
+      provider.id === optimisticRoutingPlan.id
+        ? optimisticRoutingPlan
+        : provider,
+    );
+    return providers.some(
+      (provider) => provider.id === optimisticRoutingPlan.id,
+    )
+      ? replaced
+      : [...providers, optimisticRoutingPlan];
+  }, [optimisticRoutingPlan, providers]);
+  const routingPlans = effectiveProviders.filter(isRoutingPlan);
+  const modelSources = effectiveProviders.filter(
+    (provider) => !isRoutingPlan(provider),
+  );
   const providersById = useMemo(
-    () => new Map(providers.map((provider) => [provider.id, provider])),
-    [providers],
+    () =>
+      new Map(effectiveProviders.map((provider) => [provider.id, provider])),
+    [effectiveProviders],
   );
   const routeEntries = routingPlans.flatMap((provider) =>
     (readCodexRouting(provider)?.routes ?? []).map((route, index) => ({
@@ -737,15 +886,65 @@ export function CodexRouterWorkspacePage({
     routingPlans[0] ??
     null;
   const selectedRouting = selectedPlan ? readCodexRouting(selectedPlan) : null;
+  const selectedPlanRouteEntries = selectedPlan
+    ? routeEntries.filter(({ provider }) => provider.id === selectedPlan.id)
+    : routeEntries;
   const selectedRoute =
-    routeEntries.find(
+    selectedPlanRouteEntries.find(
       ({ provider, route, index }) =>
         `${provider.id}:${route.id ?? index}` === selectedRouteKey,
-    ) ?? routeEntries[0];
+    ) ?? selectedPlanRouteEntries[0];
 
-  /// 新建路由方案会打开现有 Provider 创建流程，避免出现两套配置来源。
-  function handleCreatePlan() {
-    onCreateProvider();
+  useEffect(() => {
+    const persistedPlan = optimisticRoutingPlan
+      ? providers.find((provider) => provider.id === optimisticRoutingPlan.id)
+      : null;
+    if (
+      persistedPlan &&
+      JSON.stringify(persistedPlan.settingsConfig?.codexRouting) ===
+        JSON.stringify(optimisticRoutingPlan?.settingsConfig?.codexRouting) &&
+      JSON.stringify(persistedPlan.settingsConfig?.modelCatalog) ===
+        JSON.stringify(optimisticRoutingPlan?.settingsConfig?.modelCatalog)
+    ) {
+      setOptimisticRoutingPlan(null);
+    }
+  }, [optimisticRoutingPlan, providers]);
+
+  /// 新建 MultiRouter 直接创建带 codexRouting 的工作台 provider，不再打开普通供应商表单。
+  async function handleCreatePlan() {
+    const nextPlan = createDraftRoutingPlan(providers, modelSources);
+    setIsSavingRoutes(true);
+    setRoutePickerError(null);
+    setRoutePickerMessage(null);
+    try {
+      await providersApi.add(nextPlan, "codex", false);
+      queryClient.setQueryData(["providers", "codex"], (current: any) =>
+        current?.providers
+          ? {
+              ...current,
+              providers: { ...current.providers, [nextPlan.id]: nextPlan },
+            }
+          : current,
+      );
+      await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
+      await queryClient.refetchQueries({
+        queryKey: ["providers", "codex"],
+        type: "active",
+      });
+      setOptimisticRoutingPlan(nextPlan);
+      setSelectedPlanId(nextPlan.id);
+      setSelectedRouteKey(null);
+      setActiveTab("routes");
+      setRoutePickerSelectAll(true);
+      setIsRoutePickerOpen(true);
+      setRoutePickerMessage("已创建新的多路路由，请选择要接入的候选 router。");
+    } catch (error) {
+      setRoutePickerError(
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      setIsSavingRoutes(false);
+    }
   }
 
   /// 编辑路由方案会进入现有 Provider 编辑表单；该表单里可以增删改具体 route。
@@ -756,25 +955,39 @@ export function CodexRouterWorkspacePage({
   /// 路由规则编辑只更新 codexRouting.routes，不再进入通用 Provider 表单，避免“添加 router”卡死路径。
   async function handleSaveRoutingRoutes(plan: Provider, routes: CodexRoute[]) {
     const currentRouting = readCodexRouting(plan) ?? {};
-    const enabledRouteIds = routes
+    const usedRouteIds = new Set<string>();
+    const normalizedRoutes = routes.map((route, index) =>
+      normalizeCodexRouteForSave(route, index, usedRouteIds),
+    );
+    const enabledRouteIds = normalizedRoutes
       .filter((route) => route.enabled !== false)
       .map((route) => route.id)
       .filter((id): id is string => Boolean(id));
-    const defaultRouteId = routes.some(
+    const defaultRouteId = normalizedRoutes.some(
       (route) => route.id && route.id === currentRouting.defaultRouteId,
     )
       ? currentRouting.defaultRouteId
-      : (enabledRouteIds[0] ?? routes[0]?.id);
+      : (enabledRouteIds[0] ?? normalizedRoutes[0]?.id);
+    const nextRouting: CodexRouting = {
+      ...currentRouting,
+      enabled: currentRouting.enabled ?? true,
+      routes: normalizedRoutes,
+    };
+    if (defaultRouteId) {
+      nextRouting.defaultRouteId = defaultRouteId;
+    } else {
+      delete nextRouting.defaultRouteId;
+    }
     const nextProvider: Provider = {
       ...plan,
       settingsConfig: {
         ...plan.settingsConfig,
-        codexRouting: {
-          ...currentRouting,
-          enabled: currentRouting.enabled ?? true,
-          defaultRouteId,
-          routes,
-        },
+        modelCatalog: buildModelCatalogForRoutes(
+          plan,
+          normalizedRoutes,
+          providersById,
+        ),
+        codexRouting: nextRouting,
       },
     };
 
@@ -783,12 +996,31 @@ export function CodexRouterWorkspacePage({
     setRoutePickerMessage(null);
     try {
       await providersApi.update(nextProvider, "codex");
+      queryClient.setQueryData(["providers", "codex"], (current: any) =>
+        current?.providers
+          ? {
+              ...current,
+              providers: {
+                ...current.providers,
+                [nextProvider.id]: nextProvider,
+              },
+            }
+          : current,
+      );
       await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
+      await queryClient.refetchQueries({
+        queryKey: ["providers", "codex"],
+        type: "active",
+      });
+      setOptimisticRoutingPlan(nextProvider);
       setSelectedPlanId(plan.id);
-      setSelectedRouteKey(routes[0]?.id ? `${plan.id}:${routes[0].id}` : null);
+      setSelectedRouteKey(
+        normalizedRoutes[0]?.id ? `${plan.id}:${normalizedRoutes[0].id}` : null,
+      );
       setRoutePickerMessage(
         "路由规则已保存，候选 router 选择已写入当前多路路由方案。",
       );
+      setRoutePickerSelectAll(false);
       setIsRoutePickerOpen(false);
     } catch (error) {
       setRoutePickerError(
@@ -820,6 +1052,7 @@ export function CodexRouterWorkspacePage({
     setActiveTab("routes");
     setRoutePickerError(null);
     setRoutePickerMessage(null);
+    setRoutePickerSelectAll(false);
     setIsRoutePickerOpen(true);
   }
 
@@ -930,6 +1163,7 @@ export function CodexRouterWorkspacePage({
               providersById={providersById}
               isRoutePickerOpen={isRoutePickerOpen}
               isSavingRoutes={isSavingRoutes}
+              routePickerSelectAll={routePickerSelectAll}
               routePickerMessage={routePickerMessage}
               routePickerError={routePickerError}
               onRoutePickerOpenChange={setIsRoutePickerOpen}
@@ -1280,6 +1514,7 @@ function RoutesTab({
   onSelectRoute,
   isRoutePickerOpen,
   isSavingRoutes,
+  routePickerSelectAll,
   routePickerMessage,
   routePickerError,
   onRoutePickerOpenChange,
@@ -1297,6 +1532,7 @@ function RoutesTab({
   onSelectRoute: (entry: RouteEntry) => void;
   isRoutePickerOpen: boolean;
   isSavingRoutes: boolean;
+  routePickerSelectAll: boolean;
   routePickerMessage: string | null;
   routePickerError: string | null;
   onRoutePickerOpenChange: (open: boolean) => void;
@@ -1410,6 +1646,7 @@ function RoutesTab({
           onSaveRoutes={onSaveRoutes}
           onClose={() => onRoutePickerOpenChange(false)}
           isSaving={isSavingRoutes}
+          selectAllByDefault={routePickerSelectAll}
         />
       ) : null}
 
@@ -1442,12 +1679,14 @@ function RouteCandidatePicker({
   onSaveRoutes,
   onClose,
   isSaving,
+  selectAllByDefault,
 }: {
   selectedPlan: Provider;
   modelSources: Provider[];
   onSaveRoutes: (plan: Provider, routes: CodexRoute[]) => Promise<void>;
   onClose: () => void;
   isSaving: boolean;
+  selectAllByDefault?: boolean;
 }) {
   const candidates = useMemo(
     () => buildRouteCandidates(selectedPlan, modelSources),
@@ -1457,7 +1696,7 @@ function RouteCandidatePicker({
     () =>
       new Set(
         candidates
-          .filter((candidate) => candidate.isExisting)
+          .filter((candidate) => selectAllByDefault || candidate.isExisting)
           .map((candidate) => candidate.id),
       ),
   );
@@ -1474,7 +1713,7 @@ function RouteCandidatePicker({
     setSelectedIds(
       new Set(
         candidates
-          .filter((candidate) => candidate.isExisting)
+          .filter((candidate) => selectAllByDefault || candidate.isExisting)
           .map((candidate) => candidate.id),
       ),
     );
@@ -1485,7 +1724,7 @@ function RouteCandidatePicker({
           .map((candidate) => candidate.id),
       ),
     );
-  }, [candidates]);
+  }, [candidates, selectAllByDefault]);
 
   /// 切换 Set 状态时始终返回新实例，避免 React 因引用未变而跳过刷新。
   function toggleSetValue(
