@@ -1,4 +1,4 @@
-//! 数据库备份和恢复
+﻿//! 数据库备份和恢复
 //!
 //! 提供 SQL 导出/导入和二进制快照备份功能。
 
@@ -8,12 +8,14 @@ use crate::error::AppError;
 use chrono::{Local, Utc};
 use rusqlite::backup::Backup;
 use rusqlite::types::ValueRef;
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
+use serde_json::Value as JsonValue;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
 const CC_SWITCH_SQL_EXPORT_HEADER: &str = "-- CC Switch SQLite 导出";
+const PORTABLE_HOME_TOKEN: &str = "${CC_SWITCH_HOME}";
 
 /// Tables whose data rows are skipped when exporting for WebDAV sync.
 const SYNC_SKIP_TABLES: &[&str] = &[
@@ -49,9 +51,10 @@ impl Database {
         Self::dump_sql(&snapshot, &[])
     }
 
-    /// Export SQL for sync (WebDAV), skipping local-only tables' data
-    pub fn export_sql_string_for_sync(&self) -> Result<String, AppError> {
+    /// Export SQL for sync (WebDAV), skipping local-only tables' data.
+    pub fn export_sql_string_for_sync(&self, include_keys: bool) -> Result<String, AppError> {
         let snapshot = self.snapshot_to_memory()?;
+        Self::prepare_snapshot_for_sync_export(&snapshot, include_keys)?;
         Self::dump_sql(&snapshot, SYNC_SKIP_TABLES)
     }
 
@@ -122,6 +125,9 @@ impl Database {
             .map_err(|e| AppError::Database(format!("执行 SQL 导入失败: {e}")))?;
 
         // 补齐缺失表/索引并进行基础校验
+        if !preserve_tables.is_empty() {
+            Self::localize_imported_sync_snapshot(&temp_conn)?;
+        }
         Self::create_tables_on_conn(&temp_conn)?;
         Self::apply_schema_migrations_on_conn(&temp_conn)?;
         Self::validate_basic_state(&temp_conn)?;
@@ -144,6 +150,125 @@ impl Database {
             .unwrap_or_default();
 
         Ok(backup_id)
+    }
+
+    /// 上传同步快照前只改内存副本：本机路径转为占位符，按用户选择清空密钥。
+    fn prepare_snapshot_for_sync_export(
+        conn: &Connection,
+        include_keys: bool,
+    ) -> Result<(), AppError> {
+        let home = current_home_string();
+        Self::rewrite_text_columns_for_sync(conn, |table, column, text| {
+            let mut next = portableize_local_paths(text, home.as_deref());
+            if !include_keys {
+                next = scrub_sync_secret_text(table, column, &next);
+            }
+            next
+        })
+    }
+
+    /// 下载同步快照后只改待导入临时库：占位符和跨用户路径转成本机路径。
+    fn localize_imported_sync_snapshot(conn: &Connection) -> Result<(), AppError> {
+        let Some(home) = current_home_string() else {
+            return Ok(());
+        };
+        Self::rewrite_text_columns_for_sync(conn, |_table, _column, text| {
+            localize_portable_paths(text, &home)
+        })
+    }
+
+    /// 遍历普通表的 TEXT 列并按回调重写，避免直接改动真实数据库。
+    fn rewrite_text_columns_for_sync<F>(conn: &Connection, mut rewrite: F) -> Result<(), AppError>
+    where
+        F: FnMut(&str, &str, &str) -> String,
+    {
+        let mut table_stmt = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let table_rows = table_stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        let mut tables = Vec::new();
+        for table in table_rows {
+            tables.push(table.map_err(|e| AppError::Database(e.to_string()))?);
+        }
+
+        for table in tables {
+            let text_columns = Self::get_text_columns(conn, &table)?;
+            if text_columns.is_empty() {
+                continue;
+            }
+
+            let quoted_table = quote_sql_identifier(&table);
+            let select_cols = text_columns
+                .iter()
+                .map(|column| quote_sql_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut stmt = conn
+                .prepare(&format!("SELECT rowid, {select_cols} FROM {quoted_table}"))
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            let mut rows = stmt
+                .query([])
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            let mut pending_updates: Vec<(i64, String, String)> = Vec::new();
+
+            while let Some(row) = rows.next().map_err(|e| AppError::Database(e.to_string()))? {
+                let rowid: i64 = row.get(0).map_err(|e| AppError::Database(e.to_string()))?;
+                for (idx, column) in text_columns.iter().enumerate() {
+                    let value: Option<String> = row
+                        .get(idx + 1)
+                        .map_err(|e| AppError::Database(e.to_string()))?;
+                    let Some(text) = value else {
+                        continue;
+                    };
+                    let rewritten = rewrite(&table, column, &text);
+                    if rewritten != text {
+                        pending_updates.push((rowid, column.clone(), rewritten));
+                    }
+                }
+            }
+            drop(rows);
+            drop(stmt);
+
+            for (rowid, column, rewritten) in pending_updates {
+                let quoted_column = quote_sql_identifier(&column);
+                conn.execute(
+                    &format!("UPDATE {quoted_table} SET {quoted_column} = ?1 WHERE rowid = ?2"),
+                    params![rewritten, rowid],
+                )
+                .map_err(|e| {
+                    AppError::Database(format!("重写同步字段 {table}.{column} 失败: {e}"))
+                })?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// 返回指定表中声明为 TEXT 的列，SQLite 动态类型下只处理这些持久文本列。
+    fn get_text_columns(conn: &Connection, table: &str) -> Result<Vec<String>, AppError> {
+        let quoted_table = quote_sql_identifier(table);
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({quoted_table})"))
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            })
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        let mut columns = Vec::new();
+        for row in rows {
+            let (name, ty) = row.map_err(|e| AppError::Database(e.to_string()))?;
+            if ty.to_ascii_uppercase().contains("TEXT") {
+                columns.push(name);
+            }
+        }
+        Ok(columns)
     }
 
     /// 创建内存快照以避免长时间持有数据库锁
@@ -687,9 +812,195 @@ impl Database {
     }
 }
 
+/// 为 SQLite 表名/列名生成双引号标识符，避免动态表名拼出非法 SQL。
+fn quote_sql_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+/// 返回当前用户目录字符串；获取失败时跳过路径改写，避免生成错误路径。
+fn current_home_string() -> Option<String> {
+    dirs::home_dir().map(|path| path.to_string_lossy().to_string())
+}
+
+/// 将本机用户目录替换为同步占位符，让远端快照不绑定上传设备。
+fn portableize_local_paths(text: &str, home: Option<&str>) -> String {
+    let Some(home) = home.filter(|value| !value.trim().is_empty()) else {
+        return text.to_string();
+    };
+    let mut output = text.replace(home, PORTABLE_HOME_TOKEN);
+    let slash_home = home.replace('\\', "/");
+    if slash_home != home {
+        output = output.replace(&slash_home, PORTABLE_HOME_TOKEN);
+    }
+    let json_escaped_home = home.replace('\\', "\\\\");
+    if json_escaped_home != home {
+        output = output.replace(&json_escaped_home, PORTABLE_HOME_TOKEN);
+    }
+    output
+}
+
+/// 将占位符和常见跨用户绝对路径改成本机用户目录。
+fn localize_portable_paths(text: &str, home: &str) -> String {
+    let mut output = text.replace(PORTABLE_HOME_TOKEN, home);
+    output = localize_windows_user_paths(&output, home);
+    output = localize_unix_user_paths(&output, home, "/Users/");
+    localize_unix_user_paths(&output, home, "/home/")
+}
+
+/// 兼容旧快照：把 Windows 用户目录里的用户名改为当前用户名。
+fn localize_windows_user_paths(text: &str, home: &str) -> String {
+    let Some(users_pos) = home.find("\\Users\\") else {
+        return text.to_string();
+    };
+    let marker_end = users_pos + "\\Users\\".len();
+    let marker = &home[..marker_end];
+    let current_user = home[marker_end..].split('\\').next().unwrap_or_default();
+    if current_user.is_empty() {
+        return text.to_string();
+    }
+
+    let mut output = String::with_capacity(text.len());
+    let mut remaining = text;
+    while let Some(pos) = remaining.find(marker) {
+        output.push_str(&remaining[..pos]);
+        let after_marker = &remaining[pos + marker.len()..];
+        let source_user_len = after_marker.find('\\').unwrap_or(after_marker.len());
+        if source_user_len == 0 {
+            output.push_str(marker);
+            remaining = after_marker;
+            continue;
+        }
+        output.push_str(marker);
+        output.push_str(current_user);
+        remaining = &after_marker[source_user_len..];
+    }
+    output.push_str(remaining);
+    output
+}
+
+/// 兼容旧快照：把 Unix/macOS 用户目录里的用户名改为当前用户名。
+fn localize_unix_user_paths(text: &str, home: &str, marker: &str) -> String {
+    if !home.starts_with(marker) {
+        return text.to_string();
+    }
+    let Some(rest) = home.strip_prefix(marker) else {
+        return text.to_string();
+    };
+    let current_user = rest.split('/').next().unwrap_or_default();
+    if current_user.is_empty() {
+        return text.to_string();
+    }
+
+    let mut output = String::with_capacity(text.len());
+    let mut remaining = text;
+    while let Some(pos) = remaining.find(marker) {
+        output.push_str(&remaining[..pos]);
+        let after_marker = &remaining[pos + marker.len()..];
+        let source_user_len = after_marker.find('/').unwrap_or(after_marker.len());
+        if source_user_len == 0 {
+            output.push_str(marker);
+            remaining = after_marker;
+            continue;
+        }
+        output.push_str(marker);
+        output.push_str(current_user);
+        remaining = &after_marker[source_user_len..];
+    }
+    output.push_str(remaining);
+    output
+}
+
+/// 按用户选择从同步快照文本中清理 key/token/password；本地数据库不受影响。
+fn scrub_sync_secret_text(table: &str, column: &str, text: &str) -> String {
+    if let Ok(mut json) = serde_json::from_str::<JsonValue>(text) {
+        scrub_json_secrets(&mut json);
+        if let Ok(serialized) = serde_json::to_string(&json) {
+            return serialized;
+        }
+    }
+
+    if table == "settings" || column.contains("config") || text.contains("bearer_token") {
+        return scrub_toml_like_secrets(text);
+    }
+
+    text.to_string()
+}
+
+/// 递归清理 JSON 对象中的敏感键，保留结构以便下载方补自己的 key。
+fn scrub_json_secrets(value: &mut JsonValue) {
+    match value {
+        JsonValue::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                if is_secret_key(key) {
+                    *child = match child {
+                        JsonValue::Array(_) => JsonValue::Array(Vec::new()),
+                        JsonValue::Object(_) => JsonValue::Object(serde_json::Map::new()),
+                        _ => JsonValue::String(String::new()),
+                    };
+                } else if key.eq_ignore_ascii_case("config") {
+                    if let JsonValue::String(text) = child {
+                        *text = scrub_toml_like_secrets(text);
+                    }
+                } else {
+                    scrub_json_secrets(child);
+                }
+            }
+        }
+        JsonValue::Array(items) => {
+            for item in items {
+                scrub_json_secrets(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 清理 Codex TOML/config 片段中的敏感赋值行。
+fn scrub_toml_like_secrets(text: &str) -> String {
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let key_part = trimmed
+            .split_once('=')
+            .map(|(key, _)| key.trim().trim_matches('"'))
+            .unwrap_or_default();
+        if !key_part.is_empty() && is_secret_key(key_part) {
+            let indent_len = line.len() - trimmed.len();
+            lines.push(format!("{}{} = \"\"", &line[..indent_len], key_part));
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    if text.ends_with('\n') {
+        format!("{}\n", lines.join("\n"))
+    } else {
+        lines.join("\n")
+    }
+}
+
+/// 判断字段名是否属于同步时可清理的密钥类字段。
+fn is_secret_key(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    normalized.contains("apikey")
+        || normalized.contains("secret")
+        || normalized.contains("token")
+        || normalized.contains("authorization")
+        || normalized.contains("bearer")
+        || normalized.contains("password")
+        || normalized == "credential"
+        || normalized == "credentials"
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Database;
+    use super::{
+        current_home_string, localize_portable_paths, scrub_sync_secret_text, Database,
+        PORTABLE_HOME_TOKEN,
+    };
     use crate::error::AppError;
     use crate::settings::{update_settings, AppSettings};
     use serial_test::serial;
@@ -705,7 +1016,7 @@ mod tests {
                 [],
             )?;
         }
-        let remote_sql = remote_db.export_sql_string_for_sync()?;
+        let remote_sql = remote_db.export_sql_string_for_sync(true)?;
 
         let local_db = Database::memory()?;
         {
@@ -779,6 +1090,99 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn sync_export_can_strip_keys_and_portableize_local_paths() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let home = current_home_string().unwrap_or_else(|| "C:\\Users\\tester".to_string());
+        let local_command = format!("{home}\\AppData\\Local\\nodejs\\node.exe");
+        let settings_config = serde_json::json!({
+            "auth": {
+                "OPENAI_API_KEY": "sk-from-provider",
+                "type": "managed_codex_oauth"
+            },
+            "config": "experimental_bearer_token = \"sk-from-toml\"\nmodel = \"gpt-5.5\"\n",
+            "codexRouting": {
+                "routes": [{
+                    "id": "deepseek",
+                    "upstream": {
+                        "apiKey": "sk-from-route",
+                        "auth": { "type": "api_key" }
+                    }
+                }]
+            }
+        });
+        {
+            let conn = crate::database::lock_conn!(db.conn);
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                 VALUES ('codex-openai-router', 'codex', 'Router', ?1, '{}')",
+                [settings_config.to_string()],
+            )?;
+            conn.execute(
+                "INSERT INTO mcp_servers (id, name, server_config, enabled_codex)
+                 VALUES ('matrix-websearch', 'matrix-websearch', ?1, 1)",
+                [serde_json::json!({
+                    "type": "stdio",
+                    "command": local_command,
+                    "env": { "OPENAI_API_KEY": "sk-from-mcp" }
+                })
+                .to_string()],
+            )?;
+        }
+
+        let sql = db.export_sql_string_for_sync(false)?;
+        assert!(
+            !sql.contains("sk-from-provider")
+                && !sql.contains("sk-from-toml")
+                && !sql.contains("sk-from-route")
+                && !sql.contains("sk-from-mcp"),
+            "sync export without keys must not contain API keys: {sql}"
+        );
+        assert!(
+            sql.contains("managed_codex_oauth") && sql.contains("api_key"),
+            "auth mode metadata should be preserved when concrete keys are stripped"
+        );
+        if current_home_string().is_some() {
+            assert!(
+                !sql.contains(&home) && sql.contains(PORTABLE_HOME_TOKEN),
+                "local absolute paths should be portableized"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn path_localization_expands_tokens_and_foreign_windows_profiles() {
+        let home = "C:\\Users\\target";
+        let tokenized = format!("{PORTABLE_HOME_TOKEN}\\AppData\\Local\\node.exe");
+        assert_eq!(
+            localize_portable_paths(&tokenized, home),
+            "C:\\Users\\target\\AppData\\Local\\node.exe"
+        );
+        assert_eq!(
+            localize_portable_paths("C:\\Users\\source\\.codex\\config.toml", home),
+            "C:\\Users\\target\\.codex\\config.toml"
+        );
+    }
+
+    #[test]
+    fn secret_scrubber_keeps_router_auth_shape_without_keys() {
+        let source = serde_json::json!({
+            "codexRouting": {
+                "routes": [{
+                    "upstream": {
+                        "apiKey": "sk-test",
+                        "auth": { "type": "managed_codex_oauth" }
+                    }
+                }]
+            }
+        })
+        .to_string();
+        let scrubbed = scrub_sync_secret_text("providers", "settings_config", &source);
+        assert!(!scrubbed.contains("sk-test"));
+        assert!(scrubbed.contains("managed_codex_oauth"));
     }
 
     #[test]

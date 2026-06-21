@@ -270,6 +270,7 @@ export function WebdavSyncSection({
     remoteRoot: config?.remoteRoot ?? "cc-switch-sync",
     profile: config?.profile ?? "default",
     autoSync: config?.autoSync ?? false,
+    includeKeysOnUpload: config?.includeKeysOnUpload ?? true,
   }));
 
   // ─── S3 form state ─────────────────────────────────────────
@@ -288,6 +289,9 @@ export function WebdavSyncSection({
   );
   const [s3Profile, setS3Profile] = useState(s3Config?.profile ?? "default");
   const [s3AutoSync, setS3AutoSync] = useState(s3Config?.autoSync ?? false);
+  const [s3IncludeKeysOnUpload, setS3IncludeKeysOnUpload] = useState(
+    s3Config?.includeKeysOnUpload ?? true,
+  );
   const [s3Enabled, setS3Enabled] = useState(s3Config?.enabled ?? false);
   const [s3SecretTouched, setS3SecretTouched] = useState(false);
   const [s3Dirty, setS3Dirty] = useState(false);
@@ -366,6 +370,7 @@ export function WebdavSyncSection({
         remoteRoot: nextRemoteRoot,
         profile: nextProfile,
         autoSync: config.autoSync ?? false,
+        includeKeysOnUpload: config.includeKeysOnUpload ?? true,
       };
     });
     setPasswordTouched(false);
@@ -383,6 +388,7 @@ export function WebdavSyncSection({
     setS3RemoteRoot(s3Config.remoteRoot ?? "cc-switch-sync");
     setS3Profile(s3Config.profile ?? "default");
     setS3AutoSync(s3Config.autoSync ?? false);
+    setS3IncludeKeysOnUpload(s3Config.includeKeysOnUpload ?? true);
     setS3Enabled(s3Config.enabled ?? false);
     setS3SecretTouched(false);
   }, [s3Config, s3Dirty]);
@@ -464,6 +470,7 @@ export function WebdavSyncSection({
       remoteRoot: form.remoteRoot.trim() || "cc-switch-sync",
       profile: form.profile.trim() || "default",
       autoSync: form.autoSync,
+      includeKeysOnUpload: form.includeKeysOnUpload,
     };
   }, [form, passwordTouched]);
 
@@ -679,6 +686,7 @@ export function WebdavSyncSection({
       endpoint: s3Endpoint.trim() || undefined,
       remoteRoot: s3RemoteRoot.trim() || "cc-switch-sync",
       profile: s3Profile.trim() || "default",
+      includeKeysOnUpload: s3IncludeKeysOnUpload,
     };
   }, [
     s3Enabled,
@@ -690,6 +698,7 @@ export function WebdavSyncSection({
     s3Endpoint,
     s3RemoteRoot,
     s3Profile,
+    s3IncludeKeysOnUpload,
   ]);
 
   // ─── S3 Handlers ──────────────────────────────────────────
@@ -1122,6 +1131,30 @@ export function WebdavSyncSection({
                 />
               </div>
             </div>
+
+            <div className="flex items-start gap-4">
+              <label className="w-40 text-xs font-medium text-foreground shrink-0">
+                {t("settings.webdavSync.includeKeysOnUpload")}
+                <span className="block text-[10px] font-normal text-muted-foreground">
+                  {t("settings.webdavSync.includeKeysOnUploadHint")}
+                </span>
+              </label>
+              <div className="pt-1">
+                <Switch
+                  checked={form.includeKeysOnUpload}
+                  onCheckedChange={(checked) => {
+                    setForm((prev) => ({
+                      ...prev,
+                      includeKeysOnUpload: checked,
+                    }));
+                    setDirty(true);
+                    setJustSaved(false);
+                  }}
+                  aria-label={t("settings.webdavSync.includeKeysOnUpload")}
+                  disabled={isLoading}
+                />
+              </div>
+            </div>
           </div>
 
           {/* Last sync time */}
@@ -1408,6 +1441,26 @@ export function WebdavSyncSection({
                     markS3Dirty();
                   }}
                   aria-label={t("settings.s3Sync.autoSync")}
+                  disabled={isS3Loading}
+                />
+              </div>
+            </div>
+
+            <div className="flex items-start gap-4">
+              <label className="w-40 text-xs font-medium text-foreground shrink-0">
+                {t("settings.s3Sync.includeKeysOnUpload")}
+                <span className="block text-[10px] font-normal text-muted-foreground">
+                  {t("settings.s3Sync.includeKeysOnUploadHint")}
+                </span>
+              </label>
+              <div className="pt-1">
+                <Switch
+                  checked={s3IncludeKeysOnUpload}
+                  onCheckedChange={(checked) => {
+                    setS3IncludeKeysOnUpload(checked);
+                    markS3Dirty();
+                  }}
+                  aria-label={t("settings.s3Sync.includeKeysOnUpload")}
                   disabled={isS3Loading}
                 />
               </div>

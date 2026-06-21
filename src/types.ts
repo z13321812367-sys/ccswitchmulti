@@ -345,6 +345,7 @@ export interface WebDavSyncSettings {
   password?: string;
   remoteRoot?: string;
   profile?: string;
+  includeKeysOnUpload?: boolean;
   status?: WebDavSyncStatus;
 }
 
@@ -359,6 +360,7 @@ export interface S3SyncSettings {
   endpoint?: string;
   remoteRoot?: string;
   profile?: string;
+  includeKeysOnUpload?: boolean;
   status?: WebDavSyncStatus;
 }
 

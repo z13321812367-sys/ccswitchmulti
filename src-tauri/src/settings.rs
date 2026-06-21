@@ -120,6 +120,8 @@ pub struct WebDavSyncSettings {
     pub remote_root: String,
     #[serde(default = "default_profile")]
     pub profile: String,
+    #[serde(default = "default_true")]
+    pub include_keys_on_upload: bool,
     #[serde(default)]
     pub status: WebDavSyncStatus,
 }
@@ -134,6 +136,7 @@ impl Default for WebDavSyncSettings {
             password: String::new(),
             remote_root: default_remote_root(),
             profile: default_profile(),
+            include_keys_on_upload: true,
             status: WebDavSyncStatus::default(),
         }
     }
@@ -199,6 +202,8 @@ pub struct S3SyncSettings {
     pub remote_root: String,
     #[serde(default = "default_profile")]
     pub profile: String,
+    #[serde(default = "default_true")]
+    pub include_keys_on_upload: bool,
     #[serde(default)]
     pub status: WebDavSyncStatus,
 }
@@ -215,6 +220,7 @@ impl Default for S3SyncSettings {
             endpoint: String::new(),
             remote_root: default_remote_root(),
             profile: default_profile(),
+            include_keys_on_upload: true,
             status: WebDavSyncStatus::default(),
         }
     }

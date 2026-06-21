@@ -104,9 +104,10 @@ impl RemoteLayout {
 
 pub(crate) fn build_local_snapshot(
     db: &crate::database::Database,
+    include_keys: bool,
 ) -> Result<LocalSnapshot, AppError> {
     // Export database to SQL string
-    let sql_string = db.export_sql_string_for_sync()?;
+    let sql_string = db.export_sql_string_for_sync(include_keys)?;
     let db_sql = sql_string.into_bytes();
 
     // Pack skills into deterministic ZIP

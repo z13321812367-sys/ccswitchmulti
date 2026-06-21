@@ -46,6 +46,7 @@ export const settingsSchema = z.object({
       password: z.string().optional(),
       remoteRoot: z.string().trim().optional().or(z.literal("")),
       profile: z.string().trim().optional().or(z.literal("")),
+      includeKeysOnUpload: z.boolean().optional(),
       status: z
         .object({
           lastSyncAt: z.number().nullable().optional(),

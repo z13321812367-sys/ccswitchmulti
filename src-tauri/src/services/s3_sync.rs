@@ -53,7 +53,7 @@ pub async fn upload(
     settings.validate()?;
     let creds = creds_for(settings);
 
-    let snapshot = build_local_snapshot(db)?;
+    let snapshot = build_local_snapshot(db, settings.include_keys_on_upload)?;
 
     // Upload order: artifacts first, manifest last (best-effort consistency)
     let db_key = s3_key(settings, REMOTE_DB_SQL);
