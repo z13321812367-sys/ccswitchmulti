@@ -2667,7 +2667,7 @@ function SpawnAgentCandidatesPanel({
         </div>
       </div>
 
-      <div className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(280px,0.8fr)]">
+      <div className="mt-3 grid items-stretch gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(280px,0.8fr)]">
         <div className="space-y-3">
           <div>
             <div className="mb-2 text-xs font-semibold text-violet-100">
@@ -2742,12 +2742,13 @@ function SpawnAgentCandidatesPanel({
           </div>
         </div>
 
-        <div className="rounded-md border border-violet-800/50 bg-slate-950/35 p-3">
+        <div className="flex h-full min-h-0 flex-col rounded-md border border-violet-800/50 bg-slate-950/35 p-3">
           <Tabs
             value={candidateView}
             onValueChange={(value) =>
               setCandidateView(value as SpawnAgentCandidateView)
             }
+            className="flex h-full min-h-0 flex-col"
           >
             <TabsList className="grid w-full grid-cols-4 bg-slate-950/60 p-1">
               <TabsTrigger value="selected">已选</TabsTrigger>
@@ -2757,8 +2758,12 @@ function SpawnAgentCandidatesPanel({
             </TabsList>
             {(["selected", "routed", "priority", "all"] as const).map(
               (view) => (
-                <TabsContent key={view} value={view} className="mt-3">
-                  <div className="max-h-56 space-y-2 overflow-y-auto pr-1">
+                <TabsContent
+                  key={view}
+                  value={view}
+                  className="mt-3 min-h-0 flex-1"
+                >
+                  <div className="h-full min-h-[220px] space-y-2 overflow-y-auto pr-1">
                     {candidateSourceModels[view].length > 0 ? (
                       candidateSourceModels[view].map((model) => {
                         const catalogModel = selectedCatalogByModel.get(
