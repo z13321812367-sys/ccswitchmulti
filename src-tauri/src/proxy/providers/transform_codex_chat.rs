@@ -1503,11 +1503,9 @@ fn chat_tool_calls_to_response_output_items(
             ));
         }
     } else if let Some(function_call) = message.get("function_call") {
-        if let Some(item) = chat_legacy_function_call_to_response_item(
-            function_call,
-            reasoning,
-            tool_context,
-        ) {
+        if let Some(item) =
+            chat_legacy_function_call_to_response_item(function_call, reasoning, tool_context)
+        {
             output.push(item);
         }
     }

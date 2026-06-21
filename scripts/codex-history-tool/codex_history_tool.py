@@ -44,6 +44,16 @@ class ActiveStateDb:
 
 
 @dataclass
+class StoreReconRow:
+    """记录一个发现到的 state_*.sqlite 及其 provider 分布。"""
+
+    path: Path
+    kind: str
+    total: int
+    provider_counts: dict[str, int]
+
+
+@dataclass
 class HistoryRow:
     """承载一条 threads 表记录中修复与展示需要的字段。"""
 
@@ -183,6 +193,160 @@ def resolve_active_state_db(
         return ActiveStateDb(legacy, "legacy_root")
 
     raise FileNotFoundError(f"state_5.sqlite not found under {codex_home}")
+
+
+def state_db_search_dirs(codex_home: Path, config_text: str) -> list[tuple[str, Path]]:
+    """返回需要扫描 state_*.sqlite 的目录；config.toml 优先于环境变量。"""
+
+    dirs = [("root", codex_home), ("sqlite_subdir", codex_home / "sqlite")]
+    sqlite_home = parse_sqlite_home(config_text)
+    if sqlite_home is not None:
+        dirs.append(("configured_sqlite_home", sqlite_home))
+    else:
+        env_sqlite_home = parse_sqlite_home_env()
+        if env_sqlite_home is not None:
+            dirs.append(("env_sqlite_home", env_sqlite_home))
+    return dirs
+
+
+def scan_all_state_dbs(codex_home: Path, config_text: str) -> list[StoreReconRow]:
+    """扫描所有已知目录里的 state_*.sqlite，并按 provider 汇总 threads 行数。"""
+
+    seen: set[str] = set()
+    results: list[StoreReconRow] = []
+
+    for kind, directory in state_db_search_dirs(codex_home, config_text):
+        if not directory.is_dir():
+            continue
+        for db_path in sorted(directory.glob("state_*.sqlite")):
+            try:
+                abs_path = str(db_path.resolve())
+            except OSError:
+                abs_path = str(db_path)
+            if abs_path in seen:
+                continue
+            seen.add(abs_path)
+
+            try:
+                con = sqlite3.connect(str(db_path))
+                con.row_factory = sqlite3.Row
+                table_names = {
+                    row[0]
+                    for row in con.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    )
+                }
+                if "threads" not in table_names:
+                    con.close()
+                    continue
+
+                total = 0
+                counts: dict[str, int] = {}
+                for row in con.execute(
+                    "SELECT model_provider, COUNT(*) AS cnt FROM threads GROUP BY model_provider"
+                ):
+                    provider = str(row["model_provider"] or "")
+                    if not provider:
+                        continue
+                    count = int(row["cnt"])
+                    counts[provider] = counts.get(provider, 0) + count
+                    total += count
+                con.close()
+                results.append(
+                    StoreReconRow(
+                        path=db_path,
+                        kind=kind,
+                        total=total,
+                        provider_counts=counts,
+                    )
+                )
+            except (OSError, sqlite3.Error):
+                continue
+
+    return results
+
+
+def scan_session_jsonl_providers(codex_home: Path) -> dict[str, int]:
+    """扫描 sessions 与 archived_sessions 中 JSONL 首行的 model_provider。"""
+
+    counts: dict[str, int] = {}
+    for parent_dir in ("sessions", "archived_sessions"):
+        target = codex_home / parent_dir
+        if not target.is_dir():
+            continue
+        for path in target.rglob("*.jsonl"):
+            try:
+                with path.open("r", encoding="utf-8", errors="replace") as handle:
+                    first_line = handle.readline()
+                if not first_line:
+                    continue
+                first = json.loads(first_line)
+                payload = first.get("payload") if isinstance(first, dict) else None
+                provider = (
+                    str(payload["model_provider"])
+                    if isinstance(payload, dict) and payload.get("model_provider")
+                    else None
+                )
+                if provider:
+                    counts[provider] = counts.get(provider, 0) + 1
+            except (OSError, json.JSONDecodeError):
+                continue
+    return counts
+
+
+def reconcile_history(args: argparse.Namespace) -> dict[str, Any]:
+    """对账所有 state DB 与 JSONL 归桶情况，定位 provider 分裂或漂移。"""
+
+    codex_home = resolve_user_path(args.codex_home) or default_codex_home()
+    config_path = codex_home / "config.toml"
+    config_text = (
+        config_path.read_text(encoding="utf-8", errors="replace")
+        if config_path.exists()
+        else ""
+    )
+    live_provider = parse_top_level_model_provider(config_text)
+    stores = scan_all_state_dbs(codex_home, config_text)
+    jsonl_providers = scan_session_jsonl_providers(codex_home)
+
+    all_providers: set[str] = set()
+    for store in stores:
+        all_providers.update(store.provider_counts)
+    all_providers.update(jsonl_providers)
+    providers = sorted(provider for provider in all_providers if provider)
+
+    rows: list[dict[str, Any]] = []
+    for store in stores:
+        row: dict[str, Any] = {
+            "path": str(store.path),
+            "kind": store.kind,
+            "total": store.total,
+        }
+        for provider in providers:
+            row[provider] = store.provider_counts.get(provider, 0)
+        rows.append(row)
+
+    jsonl_row: dict[str, Any] = {
+        "path": str(codex_home / "sessions"),
+        "kind": "jsonl (sessions + archived)",
+        "total": sum(jsonl_providers.values()),
+    }
+    for provider in providers:
+        jsonl_row[provider] = jsonl_providers.get(provider, 0)
+    rows.append(jsonl_row)
+
+    drift_detected = live_provider is not None and any(
+        provider != live_provider
+        for provider in providers
+        if any(row.get(provider, 0) for row in rows)
+    )
+
+    return {
+        "codexHome": str(codex_home),
+        "liveConfigModelProvider": live_provider,
+        "providersFound": providers,
+        "stores": rows,
+        "driftDetected": drift_detected,
+    }
 
 
 def table_columns(con: sqlite3.Connection, table: str) -> set[str]:
@@ -953,11 +1117,40 @@ def build_parser() -> argparse.ArgumentParser:
     repair_parser.add_argument("--sync-rollout-mtime", dest="sync_rollout_mtime", action="store_true", default=True)
     repair_parser.add_argument("--no-sync-rollout-mtime", dest="sync_rollout_mtime", action="store_false")
     repair_parser.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+
+    reconcile_parser = subparsers.add_parser(
+        "reconcile",
+        help="Scan all state DBs + JSONL and show per-store provider drift",
+    )
+    add_common_args(reconcile_parser)
+    reconcile_parser.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
 def print_human(payload: dict[str, Any]) -> None:
     """打印便于 PowerShell/终端阅读的摘要，同时避免输出完整会话内容。"""
+
+    if "stores" in payload:
+        providers = payload.get("providersFound", [])
+        print(f"codex_home={payload['codexHome']}")
+        print(f"live_config_model_provider={payload.get('liveConfigModelProvider') or '-'}")
+        print(f"drift_detected={payload.get('driftDetected')}")
+        if not payload["stores"]:
+            print("stores=[]")
+            return
+        columns = ["kind", "total", *providers, "path"]
+        widths = {
+            column: max(
+                len(str(column)),
+                *[len(str(row.get(column, ""))) for row in payload["stores"]],
+            )
+            for column in columns
+        }
+        print("  ".join(column.ljust(widths[column]) for column in columns))
+        print("  ".join("-" * widths[column] for column in columns))
+        for row in payload["stores"]:
+            print("  ".join(str(row.get(column, "")).ljust(widths[column]) for column in columns))
+        return
 
     if "items" in payload:
         print(f"codex_home={payload['codexHome']}")
@@ -980,7 +1173,12 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
     try:
-        payload = list_history(args) if args.command == "list" else repair_history(args)
+        if args.command == "list":
+            payload = list_history(args)
+        elif args.command == "reconcile":
+            payload = reconcile_history(args)
+        else:
+            payload = repair_history(args)
     except Exception as exc:
         if args.json:
             print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)

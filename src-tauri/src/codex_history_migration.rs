@@ -3363,22 +3363,49 @@ fn migrate_codex_state_dbs_to_target(
     Ok(migrated)
 }
 
-fn codex_state_db_paths(codex_dir: &Path, config_text: &str) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    push_unique_path(&mut paths, codex_dir.join(CODEX_STATE_DB_FILENAME));
-    // Codex lets SQLite state move away from CODEX_HOME; config takes precedence.
-    if let Some(sqlite_home) = sqlite_home_from_codex_config(config_text) {
-        push_unique_path(&mut paths, sqlite_home.join(CODEX_STATE_DB_FILENAME));
-    } else if let Some(sqlite_home) = sqlite_home_from_env() {
-        push_unique_path(&mut paths, sqlite_home.join(CODEX_STATE_DB_FILENAME));
+fn find_state_db_files_in(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+
+    let mut results = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("sqlite") {
+            continue;
+        }
+        let stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("");
+        if stem.starts_with("state_") {
+            results.push(path);
+        }
     }
-    paths
+    results.sort();
+    results
 }
 
-fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
-    if !paths.contains(&path) {
-        paths.push(path);
+fn push_unique_state_db_paths(paths: &mut Vec<PathBuf>, dir: &Path) {
+    for db_path in find_state_db_files_in(dir) {
+        if !paths.contains(&db_path) {
+            paths.push(db_path);
+        }
     }
+}
+
+fn codex_state_db_paths(codex_dir: &Path, config_text: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    push_unique_state_db_paths(&mut paths, codex_dir);
+    push_unique_state_db_paths(&mut paths, &codex_dir.join("sqlite"));
+
+    // Codex lets SQLite state move away from CODEX_HOME; config takes precedence.
+    if let Some(sqlite_home) = sqlite_home_from_codex_config(config_text) {
+        push_unique_state_db_paths(&mut paths, &sqlite_home);
+    } else if let Some(sqlite_home) = sqlite_home_from_env() {
+        push_unique_state_db_paths(&mut paths, &sqlite_home);
+    }
+    paths
 }
 
 fn sqlite_home_from_codex_config(config_text: &str) -> Option<PathBuf> {
@@ -3685,6 +3712,11 @@ mod tests {
         let codex_dir = dir.path().join(".codex");
         let sqlite_home = dir.path().join("sqlite-home");
         let _guard = EnvVarGuard::set("CODEX_SQLITE_HOME", &sqlite_home);
+        fs::create_dir_all(codex_dir.join("sqlite")).expect("create codex sqlite dir");
+        fs::create_dir_all(&sqlite_home).expect("create env sqlite home");
+        fs::write(codex_dir.join(CODEX_STATE_DB_FILENAME), b"root").expect("root db");
+        fs::write(codex_dir.join("sqlite").join("state_6.sqlite"), b"subdir").expect("subdir db");
+        fs::write(sqlite_home.join("state_7.sqlite"), b"env").expect("env db");
 
         let paths = codex_state_db_paths(&codex_dir, "");
 
@@ -3692,7 +3724,8 @@ mod tests {
             paths,
             vec![
                 codex_dir.join(CODEX_STATE_DB_FILENAME),
-                sqlite_home.join(CODEX_STATE_DB_FILENAME),
+                codex_dir.join("sqlite").join("state_6.sqlite"),
+                sqlite_home.join("state_7.sqlite"),
             ]
         );
     }
@@ -3707,6 +3740,12 @@ mod tests {
         let _guard = EnvVarGuard::set("CODEX_SQLITE_HOME", &env_sqlite_home);
         let config_sqlite_home_text = config_sqlite_home.to_string_lossy().replace('\\', "/");
         let config_text = format!("sqlite_home = \"{config_sqlite_home_text}\"\n");
+        fs::create_dir_all(&codex_dir).expect("create codex dir");
+        fs::create_dir_all(&env_sqlite_home).expect("create env sqlite home");
+        fs::create_dir_all(&config_sqlite_home).expect("create config sqlite home");
+        fs::write(codex_dir.join(CODEX_STATE_DB_FILENAME), b"root").expect("root db");
+        fs::write(env_sqlite_home.join("state_6.sqlite"), b"env").expect("env db");
+        fs::write(config_sqlite_home.join("state_7.sqlite"), b"config").expect("config db");
 
         let paths = codex_state_db_paths(&codex_dir, &config_text);
 
@@ -3714,7 +3753,7 @@ mod tests {
             paths,
             vec![
                 codex_dir.join(CODEX_STATE_DB_FILENAME),
-                config_sqlite_home.join(CODEX_STATE_DB_FILENAME),
+                config_sqlite_home.join("state_7.sqlite"),
             ]
         );
     }
@@ -5300,11 +5339,16 @@ base_url = "https://proxy.example/v1"
 
     #[test]
     #[serial]
-    fn state_db_paths_include_codex_sqlite_home_env() {
+    fn provider_bucket_state_db_paths_include_codex_sqlite_home_env() {
         let dir = tempdir().expect("tempdir");
         let codex_dir = dir.path().join(".codex");
         let sqlite_home = dir.path().join("sqlite-home");
         let _guard = EnvVarGuard::set("CODEX_SQLITE_HOME", &sqlite_home);
+        std::fs::create_dir_all(codex_dir.join("sqlite")).expect("create codex sqlite dir");
+        std::fs::create_dir_all(&sqlite_home).expect("create sqlite_home");
+        let _ = std::fs::write(codex_dir.join(CODEX_STATE_DB_FILENAME), b"");
+        let _ = std::fs::write(codex_dir.join("sqlite").join("state_6.sqlite"), b"");
+        let _ = std::fs::write(sqlite_home.join("state_7.sqlite"), b"");
 
         let paths = codex_state_db_paths(&codex_dir, "");
 
@@ -5312,20 +5356,28 @@ base_url = "https://proxy.example/v1"
             paths,
             vec![
                 codex_dir.join(CODEX_STATE_DB_FILENAME),
-                sqlite_home.join(CODEX_STATE_DB_FILENAME),
+                codex_dir.join("sqlite").join("state_6.sqlite"),
+                sqlite_home.join("state_7.sqlite"),
             ]
         );
     }
 
     #[test]
     #[serial]
-    fn config_sqlite_home_takes_precedence_over_codex_sqlite_home_env() {
+    fn provider_bucket_config_sqlite_home_takes_precedence_over_codex_sqlite_home_env() {
         let dir = tempdir().expect("tempdir");
         let codex_dir = dir.path().join(".codex");
         let env_sqlite_home = dir.path().join("env-sqlite-home");
         let config_sqlite_home = dir.path().join("config-sqlite-home");
         let _guard = EnvVarGuard::set("CODEX_SQLITE_HOME", &env_sqlite_home);
-        let config_text = format!("sqlite_home = \"{}\"\n", config_sqlite_home.display());
+        let config_sqlite_home_text = config_sqlite_home.to_string_lossy().replace('\\', "/");
+        let config_text = format!("sqlite_home = \"{config_sqlite_home_text}\"\n");
+        std::fs::create_dir_all(&codex_dir).expect("create codex_dir");
+        std::fs::create_dir_all(&env_sqlite_home).expect("create env sqlite_home");
+        std::fs::create_dir_all(&config_sqlite_home).expect("create config_sqlite_home");
+        let _ = std::fs::write(codex_dir.join(CODEX_STATE_DB_FILENAME), b"");
+        let _ = std::fs::write(env_sqlite_home.join("state_6.sqlite"), b"");
+        let _ = std::fs::write(config_sqlite_home.join("state_7.sqlite"), b"");
 
         let paths = codex_state_db_paths(&codex_dir, &config_text);
 
@@ -5333,7 +5385,7 @@ base_url = "https://proxy.example/v1"
             paths,
             vec![
                 codex_dir.join(CODEX_STATE_DB_FILENAME),
-                config_sqlite_home.join(CODEX_STATE_DB_FILENAME),
+                config_sqlite_home.join("state_7.sqlite"),
             ]
         );
     }

@@ -7,7 +7,7 @@ It uses only the Python standard library. No helper executable is required.
 This tool complements the official **Unified Codex Session History** setting:
 
 - Official unified history merges the `openai` and `custom` resume buckets and uses a backup ledger for exact restore.
-- This tool repairs Desktop visibility when the data still exists but the local `state_5.sqlite`, `session_index.jsonl`, workspace hints, or rollout metadata keep sessions out of the sidebar.
+- This tool repairs Desktop visibility when the data still exists but local `state_*.sqlite` files, `session_index.jsonl`, workspace hints, or rollout metadata keep sessions out of the sidebar.
 
 For the official bucket-unification behavior and safety model, see:
 
@@ -36,6 +36,14 @@ The default repair mode matches the currently successful Desktop-sidebar fix:
 python .\codex_history_tool.py repair --project-path "C:\Users\sunda\Documents\LLMservice" --json
 ```
 
+## Reconcile Stores
+
+Use `reconcile` before repairing when you need to see every discovered state DB and JSONL provider bucket side by side.
+
+```powershell
+python .\codex_history_tool.py reconcile --codex-home "$env:USERPROFILE\.codex"
+```
+
 ## Apply Repair
 
 Close Codex Desktop first unless you intentionally pass `--force`.
@@ -55,6 +63,6 @@ python .\codex_history_tool.py repair --session-id "<session-id>" --apply
 Useful overrides:
 
 - `--codex-home <path>`: choose another Codex directory.
-- `--state-db <path>`: force a specific state SQLite file. Without this, the tool probes `~/.codex/sqlite/state_5.sqlite`, `sqlite_home` from `config.toml`, `CODEX_SQLITE_HOME`, then the legacy root `state_5.sqlite`.
+- `--state-db <path>`: force a specific state SQLite file for `list`/`repair`. `reconcile` scans all discovered `state_*.sqlite` files under the Codex root, `sqlite/`, `sqlite_home` from `config.toml`, or `CODEX_SQLITE_HOME`.
 - `--target-provider <id>`: default is the live `config.toml` provider, falling back to `codex_model_router_v2`.
 - `--max-per-project 10 --max-total 300`: balanced recent-window caps.
