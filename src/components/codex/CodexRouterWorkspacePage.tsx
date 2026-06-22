@@ -74,6 +74,7 @@ import type {
   CodexModelPickerUnlockResult,
   CodexMultiRouterDiagnostics,
   CodexRouterLogEvent,
+  GlobalProxyConfig,
   ProxyStatus,
 } from "@/types/proxy";
 
@@ -171,6 +172,18 @@ type MultiRouterSettingsDraft = {
   defaultRouteId?: string;
 };
 
+type ProxyListenDraftValidation =
+  | {
+      ok: true;
+      listenAddress: string;
+      listenPort: number;
+      baseUrl: string;
+    }
+  | {
+      ok: false;
+      error: string;
+    };
+
 type CodexCatalogModelDraft = {
   model: string;
   displayName?: string;
@@ -190,6 +203,51 @@ const OPENAI_CODEX_FALLBACK_MODELS = [
   "gpt-5.4-mini",
   "gpt-5.3-codex-spark",
 ];
+const DEFAULT_CODEX_PROXY_LISTEN_ADDRESS = "127.0.0.1";
+const DEFAULT_CODEX_PROXY_LISTEN_PORT = 15721;
+
+/// 把监听地址转换成客户端可连接的 host；0.0.0.0/:: 只能绑定，不能直接作为 Codex base_url。
+export function codexProxyConnectHost(listenAddress: string): string {
+  const trimmed = listenAddress.trim();
+  if (trimmed === "0.0.0.0") return "127.0.0.1";
+  if (trimmed === "::") return "::1";
+  return trimmed || DEFAULT_CODEX_PROXY_LISTEN_ADDRESS;
+}
+
+/// 根据监听地址和端口生成 Codex Desktop 实际使用的 OpenAI Responses base_url。
+export function buildCodexProxyBaseUrl(
+  listenAddress: string,
+  listenPort: number,
+): string {
+  const connectHost = codexProxyConnectHost(listenAddress);
+  const hostForUrl =
+    connectHost.includes(":") && !connectHost.startsWith("[")
+      ? `[${connectHost}]`
+      : connectHost;
+  return `http://${hostForUrl}:${listenPort}/v1`;
+}
+
+/// 校验 MultiRouter 设置页里的本地代理监听草稿，避免保存空地址或非法端口导致接管配置不可用。
+export function validateProxyListenDraft(
+  listenAddress: string,
+  listenPort: string,
+): ProxyListenDraftValidation {
+  const address = listenAddress.trim() || DEFAULT_CODEX_PROXY_LISTEN_ADDRESS;
+  const portText = listenPort.trim();
+  if (!/^\d+$/.test(portText)) {
+    return { ok: false, error: "监听端口必须是 1024-65535 之间的数字。" };
+  }
+  const port = Number.parseInt(portText, 10);
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+    return { ok: false, error: "监听端口必须是 1024-65535 之间的数字。" };
+  }
+  return {
+    ok: true,
+    listenAddress: address,
+    listenPort: port,
+    baseUrl: buildCodexProxyBaseUrl(address, port),
+  };
+}
 
 /// 从 Provider 私有配置里读取 Codex 多模型路由配置；没有配置时返回 null，避免把普通模型源误判成路由方案。
 export function readCodexRouting(provider: Provider): CodexRouting | null {
@@ -638,6 +696,14 @@ export function createDraftRoutingPlan(
     category: "custom",
     settingsConfig: {
       auth: {},
+      base_url: buildCodexProxyBaseUrl(
+        DEFAULT_CODEX_PROXY_LISTEN_ADDRESS,
+        DEFAULT_CODEX_PROXY_LISTEN_PORT,
+      ),
+      baseUrl: buildCodexProxyBaseUrl(
+        DEFAULT_CODEX_PROXY_LISTEN_ADDRESS,
+        DEFAULT_CODEX_PROXY_LISTEN_PORT,
+      ),
       config: null,
       modelCatalog,
       codexRouting: {
@@ -677,6 +743,19 @@ export function applyMultiRouterSettingsDraft(
     settingsConfig: {
       ...plan.settingsConfig,
       auth: plan.settingsConfig?.auth ?? {},
+      base_url:
+        plan.settingsConfig?.base_url ??
+        buildCodexProxyBaseUrl(
+          DEFAULT_CODEX_PROXY_LISTEN_ADDRESS,
+          DEFAULT_CODEX_PROXY_LISTEN_PORT,
+        ),
+      baseUrl:
+        plan.settingsConfig?.baseUrl ??
+        plan.settingsConfig?.base_url ??
+        buildCodexProxyBaseUrl(
+          DEFAULT_CODEX_PROXY_LISTEN_ADDRESS,
+          DEFAULT_CODEX_PROXY_LISTEN_PORT,
+        ),
       config: plan.settingsConfig?.config ?? null,
       codexRouting: nextRouting,
     },
@@ -1392,6 +1471,7 @@ export function CodexRouterWorkspacePage({
               modelSources={modelSources}
               onCreatePlan={handleCreatePlan}
               onSelectPlan={handleSelectPlan}
+              onEditPlan={handleEditPlan}
               onSelectRoute={handleSelectRoute}
               providersById={providersById}
               onJump={setActiveTab}
@@ -1547,6 +1627,7 @@ function OverviewTab({
   providersById,
   onCreatePlan,
   onSelectPlan,
+  onEditPlan,
   onSelectRoute,
   onJump,
 }: {
@@ -1556,6 +1637,7 @@ function OverviewTab({
   providersById: Map<string, Provider>;
   onCreatePlan: () => void;
   onSelectPlan: (provider: Provider) => void;
+  onEditPlan: (provider: Provider, detail?: string) => void;
   onSelectRoute: (entry: RouteEntry) => void;
   onJump: (tab: WorkspaceTab) => void;
 }) {
@@ -1588,14 +1670,34 @@ function OverviewTab({
             />
           ) : (
             routingPlans.map((provider) => (
-              <button
+              <div
                 key={provider.id}
-                type="button"
-                onClick={() => onSelectPlan(provider)}
                 className="group rounded-lg border border-blue-600/40 bg-slate-950/40 p-4 text-left transition hover:border-blue-400 hover:bg-blue-950/30 hover:shadow-[0_0_0_1px_rgba(96,165,250,0.35)]"
               >
                 <PlanCardContent provider={provider} />
-              </button>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => onSelectPlan(provider)}
+                    className="gap-2"
+                  >
+                    <Route className="h-4 w-4" />
+                    路由规则
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => onEditPlan(provider, "重命名多路路由")}
+                    className="gap-2"
+                  >
+                    <Pencil className="h-4 w-4" />
+                    重命名/设置
+                  </Button>
+                </div>
+              </div>
             ))
           )}
         </div>
@@ -1698,14 +1800,34 @@ function SourcesTab({
         />
         <div className="mt-3 grid gap-2">
           {routingPlans.map((provider) => (
-            <button
+            <div
               key={provider.id}
-              type="button"
-              onClick={() => onSelectPlan(provider)}
               className="rounded-lg border border-blue-700/40 bg-slate-950/40 p-3 text-left transition hover:border-blue-400 hover:bg-blue-950/30"
             >
               <PlanCardContent provider={provider} compact />
-            </button>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => onSelectPlan(provider)}
+                  className="gap-2"
+                >
+                  <Route className="h-4 w-4" />
+                  路由规则
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => onEditPlan(provider, "重命名多路路由")}
+                  className="gap-2"
+                >
+                  <Pencil className="h-4 w-4" />
+                  重命名/设置
+                </Button>
+              </div>
+            </div>
           ))}
           {routingPlans.length === 0 && (
             <EmptyState
@@ -1970,6 +2092,7 @@ function MultiRouterSettingsPanel({
   onClose: () => void;
   isSaving: boolean;
 }) {
+  const queryClient = useQueryClient();
   const selectedRouting = readCodexRouting(selectedPlan) ?? {};
   const [name, setName] = useState(selectedPlan.name);
   const [notes, setNotes] = useState(selectedPlan.notes ?? "");
@@ -1977,6 +2100,16 @@ function MultiRouterSettingsPanel({
   const [defaultRouteId, setDefaultRouteId] = useState(
     selectedRouting.defaultRouteId ?? "",
   );
+  const [globalProxyConfig, setGlobalProxyConfig] =
+    useState<GlobalProxyConfig | null>(null);
+  const [listenAddress, setListenAddress] = useState(
+    DEFAULT_CODEX_PROXY_LISTEN_ADDRESS,
+  );
+  const [listenPort, setListenPort] = useState(
+    String(DEFAULT_CODEX_PROXY_LISTEN_PORT),
+  );
+  const [listenerError, setListenerError] = useState<string | null>(null);
+  const [isSavingListener, setIsSavingListener] = useState(false);
 
   useEffect(() => {
     const routing = readCodexRouting(selectedPlan) ?? {};
@@ -1986,14 +2119,75 @@ function MultiRouterSettingsPanel({
     setDefaultRouteId(routing.defaultRouteId ?? "");
   }, [selectedPlan]);
 
-  /// 保存前只提交方案草稿，不接收 API Key/base_url 等普通上游字段。
+  useEffect(() => {
+    let cancelled = false;
+    /// MultiRouter 设置页复用全局代理监听配置；读取失败时保留 127.0.0.1:15721 兜底，不阻塞方案改名。
+    async function loadGlobalProxyConfig() {
+      try {
+        const config = await proxyApi.getGlobalProxyConfig();
+        if (cancelled) return;
+        setGlobalProxyConfig(config);
+        setListenAddress(
+          config.listenAddress || DEFAULT_CODEX_PROXY_LISTEN_ADDRESS,
+        );
+        setListenPort(
+          String(config.listenPort || DEFAULT_CODEX_PROXY_LISTEN_PORT),
+        );
+        setListenerError(null);
+      } catch (error) {
+        if (cancelled) return;
+        setListenerError(
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    }
+    loadGlobalProxyConfig();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /// 保存前同时写回方案草稿和全局监听配置；API Key 仍不在 MultiRouter 页面直接编辑。
   async function handleSave() {
+    const listener = validateProxyListenDraft(listenAddress, listenPort);
+    if (!listener.ok) {
+      setListenerError(listener.error);
+      return;
+    }
+
+    setIsSavingListener(true);
+    setListenerError(null);
+    try {
+      const currentConfig =
+        globalProxyConfig ?? (await proxyApi.getGlobalProxyConfig());
+      if (
+        currentConfig.listenAddress !== listener.listenAddress ||
+        currentConfig.listenPort !== listener.listenPort
+      ) {
+        const nextConfig = {
+          ...currentConfig,
+          listenAddress: listener.listenAddress,
+          listenPort: listener.listenPort,
+        };
+        await proxyApi.updateGlobalProxyConfig(nextConfig);
+        setGlobalProxyConfig(nextConfig);
+        queryClient.invalidateQueries({ queryKey: ["globalProxyConfig"] });
+        queryClient.invalidateQueries({ queryKey: ["proxyConfig"] });
+        queryClient.invalidateQueries({ queryKey: ["proxyStatus"] });
+      }
+    } catch (error) {
+      setListenerError(error instanceof Error ? error.message : String(error));
+      setIsSavingListener(false);
+      return;
+    }
+
     await onSave(selectedPlan, {
       name,
       notes,
       enabled,
       defaultRouteId,
     });
+    setIsSavingListener(false);
   }
 
   const routeOptions = selectedRoutes
@@ -2005,6 +2199,13 @@ function MultiRouterSettingsPanel({
     .filter((route): route is { id: string; label: string; enabled: boolean } =>
       Boolean(route.id),
     );
+  const listenerPreview = validateProxyListenDraft(listenAddress, listenPort);
+  const previewBaseUrl = listenerPreview.ok
+    ? listenerPreview.baseUrl
+    : buildCodexProxyBaseUrl(
+        DEFAULT_CODEX_PROXY_LISTEN_ADDRESS,
+        DEFAULT_CODEX_PROXY_LISTEN_PORT,
+      );
   const autoManagedRows = [
     {
       label: "Codex provider id",
@@ -2013,7 +2214,7 @@ function MultiRouterSettingsPanel({
     },
     {
       label: "base_url",
-      value: "http://127.0.0.1:15721/v1",
+      value: previewBaseUrl,
       detail: "切换或接管时由 CC Switch 投影到 Codex live config",
     },
     {
@@ -2033,25 +2234,25 @@ function MultiRouterSettingsPanel({
       <SectionHeader
         icon={Settings2}
         title="多路路由设置"
-        detail="这里配置的是 MultiRouter 方案本身；API Key、API 地址和本地代理接管参数由系统统一维护，不需要逐个多路路由手填。"
+        detail="这里配置 MultiRouter 方案名称、默认路由和本地代理监听入口；上游 API Key 仍由各 route 目标模型源维护。"
         action={
           <div className="flex flex-wrap gap-2">
             <Button
               size="sm"
               variant="outline"
               onClick={onClose}
-              disabled={isSaving}
+              disabled={isSaving || isSavingListener}
             >
               关闭
             </Button>
             <Button
               size="sm"
               onClick={handleSave}
-              disabled={isSaving}
+              disabled={isSaving || isSavingListener}
               className="gap-2 bg-blue-600 hover:bg-blue-500"
             >
               <Save className="h-4 w-4" />
-              {isSaving ? "保存中" : "保存设置"}
+              {isSaving || isSavingListener ? "保存中" : "保存设置"}
             </Button>
           </div>
         }
@@ -2068,7 +2269,7 @@ function MultiRouterSettingsPanel({
               onChange={(event) => setName(event.target.value)}
               className="h-10 rounded-md border border-blue-700/50 bg-slate-950/80 px-3 text-sm outline-none transition placeholder:text-slate-500 focus:border-blue-400 focus:ring-2 focus:ring-blue-500/30"
               placeholder="例如：Codex MultiRouter"
-              disabled={isSaving}
+              disabled={isSaving || isSavingListener}
             />
           </div>
           <div className="grid gap-2">
@@ -2079,7 +2280,7 @@ function MultiRouterSettingsPanel({
               rows={3}
               className="min-h-[84px] resize-y rounded-md border border-blue-700/50 bg-slate-950/80 px-3 py-2 text-sm outline-none transition placeholder:text-slate-500 focus:border-blue-400 focus:ring-2 focus:ring-blue-500/30"
               placeholder="例如：默认 Codex 多模型路由"
-              disabled={isSaving}
+              disabled={isSaving || isSavingListener}
             />
           </div>
           <label className="flex items-start justify-between gap-3 rounded-lg border border-slate-700 bg-slate-950/50 p-3">
@@ -2096,7 +2297,7 @@ function MultiRouterSettingsPanel({
               checked={enabled}
               onChange={(event) => setEnabled(event.target.checked)}
               className="mt-1 h-5 w-5 accent-blue-500"
-              disabled={isSaving}
+              disabled={isSaving || isSavingListener}
             />
           </label>
           <div className="grid gap-2">
@@ -2107,7 +2308,9 @@ function MultiRouterSettingsPanel({
               value={defaultRouteId}
               onChange={(event) => setDefaultRouteId(event.target.value)}
               className="h-10 rounded-md border border-blue-700/50 bg-slate-950/80 px-3 text-sm outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-500/30"
-              disabled={isSaving || routeOptions.length === 0}
+              disabled={
+                isSaving || isSavingListener || routeOptions.length === 0
+              }
             >
               <option value="">不设置默认路由</option>
               {routeOptions.map((route) => (
@@ -2121,6 +2324,43 @@ function MultiRouterSettingsPanel({
               没有精确命中 model
               时才会使用默认路由；匹配规则仍在“编辑匹配规则”里选择。
             </p>
+          </div>
+          <div className="grid gap-3 rounded-lg border border-blue-700/40 bg-blue-950/10 p-3 sm:grid-cols-[1fr_120px]">
+            <div className="grid gap-2">
+              <label className="text-xs font-semibold text-slate-300">
+                监听接口
+              </label>
+              <input
+                value={listenAddress}
+                onChange={(event) => setListenAddress(event.target.value)}
+                className="h-10 rounded-md border border-blue-700/50 bg-slate-950/80 px-3 font-mono text-sm outline-none transition placeholder:text-slate-500 focus:border-blue-400 focus:ring-2 focus:ring-blue-500/30"
+                placeholder="127.0.0.1"
+                disabled={isSaving || isSavingListener}
+              />
+            </div>
+            <div className="grid gap-2">
+              <label className="text-xs font-semibold text-slate-300">
+                监听端口
+              </label>
+              <input
+                value={listenPort}
+                onChange={(event) => setListenPort(event.target.value)}
+                className="h-10 rounded-md border border-blue-700/50 bg-slate-950/80 px-3 font-mono text-sm outline-none transition placeholder:text-slate-500 focus:border-blue-400 focus:ring-2 focus:ring-blue-500/30"
+                placeholder="15721"
+                inputMode="numeric"
+                disabled={isSaving || isSavingListener}
+              />
+            </div>
+            <div className="sm:col-span-2">
+              <p className="break-all text-xs leading-5 text-slate-500">
+                Codex Desktop 使用：{previewBaseUrl}
+              </p>
+              {listenerError ? (
+                <p className="mt-1 text-xs leading-5 text-rose-300">
+                  {listenerError}
+                </p>
+              ) : null}
+            </div>
           </div>
         </div>
 

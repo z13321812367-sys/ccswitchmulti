@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import type { Provider } from "@/types";
 import {
   applyMultiRouterSettingsDraft,
+  buildCodexProxyBaseUrl,
   buildModelCatalogForRoutes,
   createDraftRoutingPlan,
   isRoutingPlan,
   mergeRoutePickerDraftIds,
   normalizeCodexRouteForSave,
   readCodexRouting,
+  validateProxyListenDraft,
 } from "./CodexRouterWorkspacePage";
 
 describe("Codex MultiRouter workspace route persistence helpers", () => {
@@ -51,6 +53,8 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
 
     expect(plan.id).toBe("codex-multirouter");
     expect(isRoutingPlan(plan)).toBe(true);
+    expect(plan.settingsConfig.base_url).toBe("http://127.0.0.1:15721/v1");
+    expect(plan.settingsConfig.baseUrl).toBe("http://127.0.0.1:15721/v1");
     expect(readCodexRouting(plan)?.enabled).toBe(true);
     expect(readCodexRouting(plan)?.routes).toEqual([]);
     expect(plan.settingsConfig.modelCatalog.models).toEqual([
@@ -250,6 +254,8 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
 
     expect(updated.name).toBe("Daily MultiRouter");
     expect(updated.notes).toBe("primary plan");
+    expect(updated.settingsConfig.base_url).toBe("http://127.0.0.1:15721/v1");
+    expect(updated.settingsConfig.baseUrl).toBe("http://127.0.0.1:15721/v1");
     expect(updated.settingsConfig.modelCatalog).toEqual(
       savedPlan.settingsConfig.modelCatalog,
     );
@@ -258,5 +264,23 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       readCodexRouting(savedPlan)?.routes,
     );
     expect(readCodexRouting(updated)?.defaultRouteId).toBeUndefined();
+  });
+
+  it("normalizes listener config into a usable Codex proxy base url", () => {
+    expect(buildCodexProxyBaseUrl("0.0.0.0", 15721)).toBe(
+      "http://127.0.0.1:15721/v1",
+    );
+    expect(buildCodexProxyBaseUrl("::", 15721)).toBe("http://[::1]:15721/v1");
+
+    expect(validateProxyListenDraft("127.0.0.1", "15721")).toEqual({
+      ok: true,
+      listenAddress: "127.0.0.1",
+      listenPort: 15721,
+      baseUrl: "http://127.0.0.1:15721/v1",
+    });
+    expect(validateProxyListenDraft("127.0.0.1", "abc")).toEqual({
+      ok: false,
+      error: "监听端口必须是 1024-65535 之间的数字。",
+    });
   });
 });

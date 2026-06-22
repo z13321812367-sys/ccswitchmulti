@@ -2818,27 +2818,29 @@ impl ProxyService {
         config: &Value,
         provider: Option<&Provider>,
     ) -> Result<(), String> {
-        if crate::settings::preserve_codex_official_auth_on_switch() {
-            if let Some(auth) = config
-                .get("auth")
-                .filter(|auth| Self::codex_auth_has_proxy_placeholder(auth))
-            {
-                let config_str = config.get("config").and_then(|v| v.as_str()).unwrap_or("");
-                let prepared_config =
-                    crate::codex_config::prepare_codex_live_config_text_with_optional_catalog(
-                        config, config_str,
-                    )
+        // 接管态的 `PROXY_MANAGED` 只是本地代理门面 token，不能写入 auth.json。
+        // 否则 Codex Desktop 会失去原始 ChatGPT OAuth 登录材料，表现为切换
+        // MultiRouter/本地代理后要求重新登录。这里不再依赖兼容设置开关：只要是
+        // 接管写入的占位符，就固定写入 config.toml 的 bearer token 并保留 auth.json。
+        if let Some(auth) = config
+            .get("auth")
+            .filter(|auth| Self::codex_auth_has_proxy_placeholder(auth))
+        {
+            let config_str = config.get("config").and_then(|v| v.as_str()).unwrap_or("");
+            let prepared_config =
+                crate::codex_config::prepare_codex_live_config_text_with_optional_catalog(
+                    config, config_str,
+                )
+                .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
+            let live_config =
+                crate::codex_config::prepare_codex_provider_live_config(auth, &prepared_config)
                     .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
-                let live_config =
-                    crate::codex_config::prepare_codex_provider_live_config(auth, &prepared_config)
-                        .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
-                let merged_config =
-                    crate::codex_config::merge_codex_provider_config_with_live(&live_config)
-                        .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
-                crate::codex_config::write_codex_live_config_atomic(Some(&merged_config))
+            let merged_config =
+                crate::codex_config::merge_codex_provider_config_with_live(&live_config)
                     .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
-                return Ok(());
-            }
+            crate::codex_config::write_codex_live_config_atomic(Some(&merged_config))
+                .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
+            return Ok(());
         }
 
         self.write_codex_live_for_provider(config, provider)
@@ -4285,7 +4287,7 @@ wire_api = "responses"
 
     #[tokio::test]
     #[serial]
-    async fn codex_takeover_preserve_disabled_uses_legacy_auth_write_path() {
+    async fn codex_takeover_preserves_oauth_auth_json_even_when_setting_disabled() {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
         crate::settings::update_settings(crate::settings::AppSettings {
@@ -4349,26 +4351,15 @@ wire_api = "responses"
             crate::config::read_json_file(&crate::codex_config::get_codex_auth_path())
                 .expect("read live auth");
         assert_eq!(
-            live_auth
-                .get("OPENAI_API_KEY")
-                .and_then(|value| value.as_str()),
-            Some(PROXY_TOKEN_PLACEHOLDER),
-            "disabled preservation should keep the legacy auth.json takeover placeholder"
-        );
-        assert_eq!(
-            live_auth
-                .get("tokens")
-                .and_then(|tokens| tokens.get("access_token"))
-                .and_then(|value| value.as_str()),
-            Some("oauth-access"),
-            "the new config-only takeover branch must not run when preservation is disabled"
+            live_auth, oauth_auth,
+            "Codex takeover must preserve ChatGPT OAuth auth even when the old compatibility setting is disabled"
         );
 
         let live_config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
             .expect("read live config");
         assert!(
             live_config.contains("experimental_bearer_token = \"PROXY_MANAGED\""),
-            "disabled preservation should keep legacy auth.json writes while also giving the requires_openai_auth proxy facade its local bearer token"
+            "takeover should move the local proxy placeholder into config.toml instead of auth.json"
         );
 
         crate::settings::update_settings(crate::settings::AppSettings::default())
