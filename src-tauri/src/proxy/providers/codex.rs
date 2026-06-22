@@ -1553,6 +1553,75 @@ mod tests {
     }
 
     #[test]
+    fn test_codex_responses_provider_does_not_convert_to_chat() {
+        let mut provider = create_provider(json!({
+            "config": r#"model = "gpt-5.5"
+model_provider = "custom"
+
+[model_providers.custom]
+name = "OpenAI"
+base_url = "https://www.matrixminecraft.cn:24443/ccswitch/v1"
+wire_api = "responses"
+experimental_bearer_token = "ccsw-test"
+"#,
+        }));
+        provider.meta = Some(ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            ..Default::default()
+        });
+
+        assert!(!codex_provider_uses_chat_completions(&provider));
+        assert!(!should_convert_codex_responses_to_chat(
+            &provider,
+            "/v1/responses"
+        ));
+    }
+
+    #[test]
+    fn test_codex_responses_provider_ignores_stale_top_level_proxy_url() {
+        let mut provider = create_provider(json!({
+            "config": r#"base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+model = "gpt-5.5"
+model_provider = "custom"
+
+[model_providers.custom]
+name = "OpenAI"
+base_url = "https://www.matrixminecraft.cn:24443/ccswitch/v1"
+wire_api = "responses"
+experimental_bearer_token = "ccsw-test"
+
+[model_providers.codex_model_router_v2]
+name = "OpenAI Multi-Model Router"
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+requires_openai_auth = true
+experimental_bearer_token = "PROXY_MANAGED"
+"#,
+        }));
+        provider.meta = Some(ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            extract_codex_base_url_from_toml(
+                provider
+                    .settings_config
+                    .get("config")
+                    .and_then(|value| value.as_str())
+                    .expect("config toml")
+            )
+            .as_deref(),
+            Some("https://www.matrixminecraft.cn:24443/ccswitch/v1")
+        );
+        assert!(!should_convert_codex_responses_to_chat(
+            &provider,
+            "/responses"
+        ));
+    }
+
+    #[test]
     fn test_codex_model_route_resolves_deepseek_chat_provider() {
         let provider = create_provider(json!({
             "modelCatalog": {
