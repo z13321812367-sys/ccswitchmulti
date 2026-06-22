@@ -777,8 +777,7 @@ disable_response_storage = true
 [model_providers.custom]
 name = "NewAPI"
 base_url = "{codex_base_url}"
-wire_api = "responses"
-requires_openai_auth = true"#
+wire_api = "responses""#
         );
 
         let settings_config = serde_json::json!({
@@ -1147,6 +1146,10 @@ mod tests {
             .expect("config toml");
 
         assert!(config.contains("base_url = \"https://api.example.com/v1\""));
+        assert!(
+            !config.contains("requires_openai_auth"),
+            "direct third-party Codex providers must not force ChatGPT OAuth"
+        );
         assert_eq!(
             provider
                 .settings_config

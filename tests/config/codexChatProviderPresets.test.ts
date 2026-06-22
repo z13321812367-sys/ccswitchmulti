@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { codexProviderPresets } from "@/config/codexProviderPresets";
+import {
+  codexProviderPresets,
+  generateThirdPartyConfig,
+} from "@/config/codexProviderPresets";
 import {
   extractCodexBaseUrl,
   extractCodexModelName,
@@ -179,6 +182,17 @@ const expectedChatPresets = new Map<
 ]);
 
 describe("Codex Chat provider presets", () => {
+  it("keeps generated third-party bearer configs independent from OpenAI OAuth", () => {
+    const config = generateThirdPartyConfig(
+      "Remote CCSwitch",
+      "https://www.matrixminecraft.cn:24443/ccswitch/v1",
+      "gpt-5.5",
+    );
+
+    expect(extractCodexWireApi(config)).toBe("responses");
+    expect(config).not.toContain("requires_openai_auth");
+  });
+
   it("marks migrated Chat Completions presets for local routing", () => {
     for (const [name, expected] of expectedChatPresets) {
       const preset = codexProviderPresets.find((item) => item.name === name);
@@ -204,7 +218,9 @@ describe("Codex Chat provider presets", () => {
   });
 
   it("declares DeepSeek Codex models as text-only", () => {
-    const preset = codexProviderPresets.find((item) => item.name === "DeepSeek");
+    const preset = codexProviderPresets.find(
+      (item) => item.name === "DeepSeek",
+    );
 
     expect(preset?.modelCatalog).toEqual(
       expect.arrayContaining([

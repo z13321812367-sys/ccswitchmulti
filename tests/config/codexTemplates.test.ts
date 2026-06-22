@@ -13,5 +13,9 @@ describe("Codex custom templates", () => {
     expect(template.auth).toEqual({ OPENAI_API_KEY: "" });
     expect(parsed.features?.goals).toBeUndefined();
     expect(parsed.model_providers?.custom).toBeDefined();
+    expect(
+      (parsed.model_providers?.custom as { requires_openai_auth?: boolean })
+        .requires_openai_auth,
+    ).toBeUndefined();
   });
 });

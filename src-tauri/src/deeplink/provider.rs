@@ -381,7 +381,6 @@ disable_response_storage = true
 name = {provider_display_name}
 base_url = {endpoint}
 wire_api = "responses"
-requires_openai_auth = true
 "#
     );
 
@@ -899,6 +898,13 @@ mod tests {
                 .get("base_url")
                 .and_then(|value| value.as_str()),
             Some("https://api.example.com/v1")
+        );
+        assert_eq!(
+            custom_provider
+                .get("requires_openai_auth")
+                .and_then(|value| value.as_bool()),
+            None,
+            "deeplink third-party Codex providers should use bearer auth instead of ChatGPT OAuth"
         );
     }
 

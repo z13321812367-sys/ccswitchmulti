@@ -65,8 +65,7 @@ disable_response_storage = true
 [model_providers.custom]
 name = ${tomlString(providerName)}
 base_url = ${tomlString(baseUrl)}
-wire_api = "responses"
-requires_openai_auth = true`;
+wire_api = "responses"`;
 }
 
 function modelCatalog(
@@ -282,8 +281,7 @@ name = "Azure OpenAI"
 base_url = "https://YOUR_RESOURCE_NAME.openai.azure.com/openai"
 env_key = "OPENAI_API_KEY"
 query_params = { "api-version" = "2025-04-01-preview" }
-wire_api = "responses"
-requires_openai_auth = true`,
+wire_api = "responses"`,
     endpointCandidates: ["https://YOUR_RESOURCE_NAME.openai.azure.com/openai"],
     theme: {
       icon: "codex",
@@ -951,8 +949,7 @@ disable_response_storage = true
 [model_providers.custom]
 name = "APIKEY.FUN"
 base_url = "https://api.apikey.fun/v1"
-wire_api = "responses"
-requires_openai_auth = true`,
+wire_api = "responses"`,
     endpointCandidates: [
       "https://api.apikey.fun/v1",
       "https://slb.apikey.fun/v1",
@@ -977,8 +974,7 @@ disable_response_storage = true
 [model_providers.custom]
 name = "APINebula"
 base_url = "https://apinebula.com/v1"
-wire_api = "responses"
-requires_openai_auth = true`,
+wire_api = "responses"`,
     endpointCandidates: ["https://apinebula.com/v1"],
     apiFormat: "openai_responses",
     isPartner: true,
@@ -998,8 +994,7 @@ disable_response_storage = true
 [model_providers.custom]
 name = "AtlasCloud"
 base_url = "https://api.atlascloud.ai/v1"
-wire_api = "responses"
-requires_openai_auth = true`,
+wire_api = "responses"`,
     endpointCandidates: ["https://api.atlascloud.ai/v1"],
     apiFormat: "openai_chat",
     modelCatalog: modelCatalog([
@@ -1029,8 +1024,7 @@ model_verbosity = "high"
 [model_providers.custom]
 name = "sudocode"
 base_url = "https://sudocode.us/v1"
-wire_api = "responses"
-requires_openai_auth = true`,
+wire_api = "responses"`,
     endpointCandidates: ["https://sudocode.us/v1", "https://sudocode.run/v1"],
     apiFormat: "openai_responses",
     icon: "sudocode",
@@ -1278,7 +1272,6 @@ personality = "pragmatic"
 name = "E-FlowCode"
 base_url = "https://e-flowcode.cc/v1"
 wire_api = "responses"
-requires_openai_auth = true
 model_context_window = 1000000
 model_auto_compact_token_limit = 9000000`,
     category: "third_party",
@@ -1301,7 +1294,6 @@ disable_response_storage = true
 [model_providers.custom]
 name = "PIPELLM"
 wire_api = "responses"
-requires_openai_auth = true
 base_url = "https://cc-api.pipellm.ai/v1"`,
     category: "aggregator",
     endpointCandidates: ["https://cc-api.pipellm.ai/v1"],
