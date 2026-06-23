@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
+import { useDarkMode } from "@/hooks/useDarkMode";
 import { useTranslation } from "react-i18next";
 import { Eye, EyeOff, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -34,6 +35,7 @@ export function UniversalProviderFormModal({
   editingProvider,
   initialPreset,
 }: UniversalProviderFormModalProps) {
+  const isDarkMode = useDarkMode();
   const { t } = useTranslation();
   const isEditMode = !!editingProvider;
 
@@ -657,6 +659,7 @@ wire_api = "responses"`;
                   value={JSON.stringify(claudeConfigJson, null, 2)}
                   onChange={() => {}}
                   height={180}
+                  darkMode={isDarkMode}
                 />
               </div>
             )}
@@ -672,6 +675,7 @@ wire_api = "responses"`;
                   value={JSON.stringify(codexConfigJson, null, 2)}
                   onChange={() => {}}
                   height={280}
+                  darkMode={isDarkMode}
                 />
               </div>
             )}
@@ -687,6 +691,7 @@ wire_api = "responses"`;
                   value={JSON.stringify(geminiConfigJson, null, 2)}
                   onChange={() => {}}
                   height={140}
+                  darkMode={isDarkMode}
                 />
               </div>
             )}
