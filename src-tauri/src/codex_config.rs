@@ -337,6 +337,66 @@ fn parse_codex_positive_u64(value: Option<&Value>) -> Option<u64> {
     }
 }
 
+/// 从 Codex 官方 models_cache 中读取模型上下文窗口。
+///
+/// Codex 自身会从官方模型源刷新 `models_cache.json`。这里把它作为官方
+/// GPT/Codex 模型上下文的动态来源，避免把 OpenAI 经常调整的数值固化在
+/// CC Switch 代码或用户 DB 中。读取失败时静默回退到后续默认值。
+fn codex_cached_model_context_windows() -> std::collections::HashMap<String, u64> {
+    let Ok(Some(cache)) = read_json_file_if_exists(&get_codex_models_cache_path()) else {
+        return std::collections::HashMap::new();
+    };
+    let mut windows = std::collections::HashMap::new();
+
+    if let Some(models) = cache.get("models").and_then(Value::as_array) {
+        for model in models {
+            let Some(id) = model
+                .get("slug")
+                .or_else(|| model.get("model"))
+                .or_else(|| model.get("id"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            else {
+                continue;
+            };
+            if let Some(context_window) = parse_codex_positive_u64(
+                model
+                    .get("context_window")
+                    .or_else(|| model.get("max_context_window"))
+                    .or_else(|| model.get("contextWindow"))
+                    .or_else(|| model.get("maxContextWindow")),
+            ) {
+                windows.insert(id.to_string(), context_window);
+            }
+        }
+    }
+
+    if let Some(models) = cache.get("models").and_then(Value::as_object) {
+        for (fallback_id, model) in models {
+            let id = model
+                .get("slug")
+                .or_else(|| model.get("model"))
+                .or_else(|| model.get("id"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .unwrap_or(fallback_id);
+            if let Some(context_window) = parse_codex_positive_u64(
+                model
+                    .get("context_window")
+                    .or_else(|| model.get("max_context_window"))
+                    .or_else(|| model.get("contextWindow"))
+                    .or_else(|| model.get("maxContextWindow")),
+            ) {
+                windows.insert(id.to_string(), context_window);
+            }
+        }
+    }
+
+    windows
+}
+
 fn extract_codex_top_level_u64(config_text: &str, field: &str) -> Option<u64> {
     let doc = config_text.parse::<toml::Value>().ok()?;
     doc.get(field)
@@ -739,6 +799,7 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
     let default_context_window =
         extract_codex_top_level_u64(config_text, "model_context_window").unwrap_or(128_000);
     let default_model = extract_codex_top_level_string(config_text, "model");
+    let cached_context_windows = codex_cached_model_context_windows();
     let mut seen = std::collections::HashSet::new();
     let mut specs = Vec::new();
 
@@ -768,6 +829,7 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
                 .get("contextWindow")
                 .or_else(|| model_config.get("context_window")),
         )
+        .or_else(|| cached_context_windows.get(model).copied())
         .unwrap_or(default_context_window);
 
         let text_only = codex_routing_capabilities_for_model(settings, model)
@@ -3548,6 +3610,60 @@ openai_base_url = "http://127.0.0.1:15721/v1"
                 .get("availability_nux")
                 .is_some_and(|value| value.is_null()),
             "generated third-party entries should not inherit GPT-5.5 launch messaging"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn codex_model_catalog_prefers_cached_official_context_window_over_default() {
+        let _home = TestHomeGuard::new();
+        seed_codex_models_cache(json!([{
+            "slug": "gpt-5.5",
+            "display_name": "GPT-5.5",
+            "context_window": 400000
+        }]));
+        let settings = json!({
+            "modelCatalog": {
+                "models": [
+                    { "model": "gpt-5.5", "displayName": "GPT-5.5" }
+                ]
+            }
+        });
+
+        let specs = codex_catalog_model_specs(&settings, r#"model_context_window = 128000"#);
+
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].model, "gpt-5.5");
+        assert_eq!(
+            specs[0].context_window, 400_000,
+            "official cache should supply the current GPT context window when DB catalog omits it"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn codex_model_catalog_keeps_explicit_context_window_over_cached_official_value() {
+        let _home = TestHomeGuard::new();
+        seed_codex_models_cache(json!([{
+            "slug": "gpt-5.5",
+            "display_name": "GPT-5.5",
+            "context_window": 400000
+        }]));
+        let settings = json!({
+            "modelCatalog": {
+                "models": [
+                    { "model": "gpt-5.5", "displayName": "GPT-5.5", "contextWindow": 272000 }
+                ]
+            }
+        });
+
+        let specs = codex_catalog_model_specs(&settings, r#"model_context_window = 128000"#);
+
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].model, "gpt-5.5");
+        assert_eq!(
+            specs[0].context_window, 272_000,
+            "user/provider explicit catalog context should still override cached official metadata"
         );
     }
 
