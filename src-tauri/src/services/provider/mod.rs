@@ -632,7 +632,7 @@ openai_base_url = "http://127.0.0.1:15721/v1"
                         { "model": "gpt-5.4", "displayName": "GPT-5.4", "contextWindow": 272000 },
                         { "model": "gpt-5.4-mini", "displayName": "GPT-5.4 Mini", "contextWindow": 128000 },
                         { "model": "gpt-5.3-codex-spark", "displayName": "Codex Spark", "contextWindow": 128000 },
-                        { "model": "qwen3.6", "displayName": "Qwen 3.6", "contextWindow": 128000 },
+                        { "model": "qwen3.6", "displayName": "Qwen 3.6", "contextWindow": 262144 },
                         { "model": "deepseek-v4-flash", "displayName": "DeepSeek V4 Flash", "contextWindow": 1000000 },
                         { "model": "deepseek-v4-pro", "displayName": "DeepSeek V4 Pro", "contextWindow": 1000000 }
                     ]

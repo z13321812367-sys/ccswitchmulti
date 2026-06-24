@@ -61,6 +61,30 @@ describe("codexSpawnAgentCandidates", () => {
     expect(readCodexModelCatalog(provider).spawnAgentModels).toEqual([
       "deepseek-v4-flash",
       "qwen3.6",
+      "gpt-5.4",
+      "gpt-5.4-mini",
+      "deepseek-v4-pro",
+    ]);
+  });
+
+  it("读取已有 catalog 时也会为 qwen3.6 补上已知上下文窗口", () => {
+    const provider: Provider = {
+      id: "codex-qwen-local",
+      name: "Qwen Local",
+      settingsConfig: {
+        base_url: "https://www.matrixminecraft.cn:24443/vllm/v1",
+        modelCatalog: {
+          models: [{ model: "qwen3.6", displayName: "Qwen 3.6" }],
+        },
+      },
+    };
+
+    expect(readCodexModelCatalog(provider).models).toEqual([
+      {
+        model: "qwen3.6",
+        displayName: "Qwen 3.6",
+        contextWindow: 262144,
+      },
     ]);
   });
 

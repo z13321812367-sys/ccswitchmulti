@@ -39,6 +39,14 @@
 - 回归测试：`proxy::handlers::tests::codex_catalog_models_response_keeps_catalog_and_openai_data` 必须断言四个上下文字段都存在并等于源 catalog 值。
 - 后续根治：`src-tauri/src/codex_config.rs` 生成 catalog spec 时，官方 GPT/Codex 模型若 DB `modelCatalog` 未显式写 contextWindow，应优先读取 Codex 官方 `models_cache.json` 的动态上下文窗口，再回退到 `model_context_window` / 128000。不要继续把 `272000` 等 OpenAI 数值当成唯一真实来源。
 
+## 2026-06-24 Qwen Local Context Window Fetch Fix
+
+- 用户现场把问题边界收紧到“获取模型列表阶段没拿到 `qwen3.6=262144`，导致 Codex catalog/压缩阈值先错了”，而不是单纯的 `/responses -> chat` 输出预算裁剪。上游报错里出现的 `262144` 只是运行时错误文本，本地之前不会把它自动回写到 provider catalog。
+- 旧链路里 `src-tauri/src/services/model_fetch.rs::fetch_models` 只会从远端 `/models` 解析 `context_window/max_context_window/contextWindow/maxContextWindow`。当本地 vLLM / relay 只返回 `id=qwen3.6` 而不带窗口时，前端只能靠 `src/utils/codexModelContext.ts` 的兜底推断。
+- 之前这套兜底只显式覆盖了 DeepSeek 别名，没覆盖 `qwen3.6`，于是“获取模型列表”写回 provider catalog 时会留下空上下文，后续 `src-tauri/src/codex_config.rs::codex_catalog_model_specs` 就把它回退成默认 `model_context_window` / `128000`。
+- 当前修复把兜底提升成通用 `KNOWN_MODEL_CONTEXT_WINDOWS`，先补上 `qwen3.6 = 262144`；同时 `src/utils/codexSpawnAgentCandidates.ts::readCodexModelCatalog` 读取已有 catalog 时也会对缺失上下文的已知模型做同样推断，避免老配置只有模型名、重新进路由页后仍继续带着错误的 `128000`。
+- 回归验证：`tests/utils/codexModelContext.test.ts` 新增 `qwen3.6` 用例，`tests/utils/codexSpawnAgentCandidates.test.ts` 新增“读取已有 catalog 也会补 262144”用例；`pnpm test:unit -- tests/utils/codexModelContext.test.ts tests/utils/codexSpawnAgentCandidates.test.ts`、`pnpm typecheck`、`cargo test --manifest-path src-tauri/Cargo.toml switching_codex_router_provider_auto_enables_dedicated_local_takeover --lib` 全部通过。
+
 ## 2026-06-24 Codex Provider Model Context Window Fallback
 
 - 根因：DeepSeek 等 OpenAI-compatible provider 的 `/models` 端点仅返回模型 id（如 `deepseek-chat`、`deepseek-reasoner`、`deepseek-v4-flash`），不承诺返回 `context_window` 字段。而 Codex provider 表单的"获取模型列表"按钮和 MultiRouter 工作台的自动候选刷新都只在 `fetched.contextWindow` 为 truthy 时才写入上下文窗口，远端没给就留空。
