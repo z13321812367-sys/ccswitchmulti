@@ -44,6 +44,7 @@ import {
   type FetchedModel,
 } from "@/lib/api/model-fetch";
 import { CustomUserAgentField } from "./CustomUserAgentField";
+import { LocalProxyRequestOverridesField } from "./LocalProxyRequestOverridesField";
 import { cn } from "@/lib/utils";
 import { resolveFetchedCodexModelContextWindow } from "@/utils/codexModelContext";
 import type {
@@ -104,6 +105,10 @@ interface CodexFormFieldsProps {
   // Local proxy User-Agent override
   customUserAgent: string;
   onCustomUserAgentChange: (value: string) => void;
+  localProxyHeadersOverride: string;
+  onLocalProxyHeadersOverrideChange: (value: string) => void;
+  localProxyBodyOverride: string;
+  onLocalProxyBodyOverrideChange: (value: string) => void;
 }
 
 type CodexCatalogRow = CodexCatalogModel & { rowId: string };
@@ -304,6 +309,10 @@ export function CodexFormFields({
   speedTestEndpoints,
   customUserAgent,
   onCustomUserAgentChange,
+  localProxyHeadersOverride,
+  onLocalProxyHeadersOverrideChange,
+  localProxyBodyOverride,
+  onLocalProxyBodyOverrideChange,
 }: CodexFormFieldsProps) {
   const { t } = useTranslation();
 
@@ -323,7 +332,11 @@ export function CodexFormFields({
   const selectedSpawnAgentModelSet = new Set(spawnAgentModels);
 
   // needsLocalRouting 非默认值说明预设/用户动过路由配置，需要让模型映射保持可见
-  const hasAnyAdvancedValue = !!customUserAgent || needsLocalRouting;
+  const hasRequestOverrides = Boolean(
+    localProxyHeadersOverride.trim() || localProxyBodyOverride.trim(),
+  );
+  const hasAnyAdvancedValue =
+    !!customUserAgent || hasRequestOverrides || needsLocalRouting;
   const [advancedExpanded, setAdvancedExpanded] = useState(hasAnyAdvancedValue);
 
   // 预设/编辑加载填充高级值后自动展开（仅从折叠→展开，不会自动折叠）
@@ -1402,8 +1415,9 @@ export function CodexFormFields({
 
             <div
               className={cn(
-                needsLocalRouting &&
-                  canEditReasoning &&
+                "space-y-3",
+                (shouldShowSpeedTest ||
+                  (needsLocalRouting && canEditReasoning)) &&
                   "border-t border-border-default pt-3",
               )}
             >
@@ -1412,6 +1426,14 @@ export function CodexFormFields({
                 value={customUserAgent}
                 onChange={onCustomUserAgentChange}
               />
+              <div className="border-t border-border-default pt-3">
+                <LocalProxyRequestOverridesField
+                  headersJson={localProxyHeadersOverride}
+                  bodyJson={localProxyBodyOverride}
+                  onHeadersJsonChange={onLocalProxyHeadersOverrideChange}
+                  onBodyJsonChange={onLocalProxyBodyOverrideChange}
+                />
+              </div>
             </div>
 
             {/* 模型映射 —— 仅在本地路由 + 可编辑时显示；上方恒有 UA 字段，分隔线无需条件 */}
