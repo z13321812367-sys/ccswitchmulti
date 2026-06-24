@@ -16,6 +16,7 @@ jobs:
   release:
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: windows-2022
@@ -151,7 +152,7 @@ jobs:
           echo "✅ Tauri signing key prepared"
 
       - name: Import Apple signing certificate
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.KEYCHAIN_PASSWORD != ''
         shell: bash
         run: |
           set -euo pipefail
@@ -274,10 +275,12 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "release-assets/$NEW_ZIP"
           echo "macOS zip ready: $NEW_ZIP"
 
-          # 3) Create styled DMG with create-dmg (Tauri's built-in DMG styling doesn't work on CI)
+          # 3) Create styled DMG only when signing identity is available.
+          # Fork repos often lack Apple signing secrets; in that case still ship
+          # the updater tarball and zip instead of failing the whole release.
           if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
-            echo "❌ APPLE_SIGNING_IDENTITY is missing before DMG creation" >&2
-            exit 1
+            echo "⚠️ APPLE_SIGNING_IDENTITY is missing; skipping macOS DMG packaging and notarization"
+            exit 0
           fi
 
           HOMEBREW_NO_AUTO_UPDATE=1 brew install create-dmg
@@ -305,7 +308,7 @@ jobs:
           echo "✅ Styled DMG created: $NEW_DMG"
 
       - name: Notarize macOS DMG
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && env.APPLE_SIGNING_IDENTITY != '' && secrets.APPLE_ID != '' && secrets.APPLE_PASSWORD != '' && secrets.APPLE_TEAM_ID != ''
         shell: bash
         timeout-minutes: 30
         env:
@@ -368,17 +371,22 @@ jobs:
             echo "❌ No .app found for verification" >&2
             exit 1
           fi
-          echo "=== Verifying .app: $APP_PATH ==="
-          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
-          echo "✅ codesign verification passed"
-          spctl -a -t exec -vv "$APP_PATH"
-          echo "✅ spctl assessment passed"
-          xcrun stapler validate "$APP_PATH"
-          echo "✅ .app stapler validation passed"
+
+          if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            echo "=== Verifying signed .app: $APP_PATH ==="
+            codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+            echo "✅ codesign verification passed"
+            spctl -a -t exec -vv "$APP_PATH"
+            echo "✅ spctl assessment passed"
+            xcrun stapler validate "$APP_PATH"
+            echo "✅ .app stapler validation passed"
+          else
+            echo "⚠️ APPLE_SIGNING_IDENTITY is missing; skipping signed macOS verification"
+          fi
 
           # Verify .dmg (from release-assets/, created by create-dmg + notarized)
           DMG_PATH=$(find release-assets -maxdepth 1 -name "*.dmg" -type f | head -1 || true)
-          if [ -n "$DMG_PATH" ]; then
+          if [ -n "$DMG_PATH" ] && [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
             echo "=== Verifying .dmg: $DMG_PATH ==="
             codesign --verify --verbose=2 "$DMG_PATH"
             echo "✅ .dmg codesign verification passed"
@@ -387,8 +395,7 @@ jobs:
             xcrun stapler validate "$DMG_PATH"
             echo "✅ .dmg stapler validation passed"
           else
-            echo "❌ No .dmg found for verification — release would ship without verified DMG" >&2
-            exit 1
+            echo "⚠️ No signed macOS DMG available; skipping DMG verification"
           fi
 
       - name: Prepare Windows Assets
