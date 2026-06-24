@@ -1,0 +1,120 @@
+name: Supplemental Linux Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build and upload Linux assets for
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  linux-x86_64:
+    name: Build and upload Linux x86_64 assets
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system deps
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            curl \
+            wget \
+            file \
+            patchelf \
+            libssl-dev \
+            rpm \
+            elfutils \
+            xdg-utils \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libayatana-appindicator3-dev
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+            || sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.0-dev
+          sudo apt-get install -y --no-install-recommends libsoup-3.0-dev \
+            || sudo apt-get install -y --no-install-recommends libsoup2.4-dev
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 9.15.0
+          run_install: false
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify release inputs
+        shell: bash
+        run: |
+          set -euxo pipefail
+          expected="${{ inputs.tag }}"
+          expected="${expected#v}"
+          actual="$(node -p "require('./package.json').version")"
+          test "$actual" = "$expected"
+
+      - name: Build history repair sidecar
+        run: cargo build --manifest-path src-tauri/Cargo.toml --bin codex-history-repairer --features history-repairer --release
+
+      - name: Build Linux bundles
+        shell: bash
+        run: |
+          set -euxo pipefail
+          config="$(mktemp)"
+          printf '{"bundle":{"createUpdaterArtifacts":false}}' > "$config"
+          pnpm tauri build --bundles appimage,deb,rpm --config "$config"
+          rm -f "$config"
+
+      - name: Stage release assets
+        shell: bash
+        run: |
+          set -euxo pipefail
+          version="${{ inputs.tag }}"
+          version="${version#v}"
+          mkdir -p release-assets
+          cp "$(find src-tauri/target/release/bundle/appimage -name '*.AppImage' | head -1)" \
+            "release-assets/CCSwitchMulti_${version}_amd64.AppImage"
+          cp "$(find src-tauri/target/release/bundle/deb -name '*.deb' | head -1)" \
+            "release-assets/CCSwitchMulti_${version}_amd64.deb"
+          cp "$(find src-tauri/target/release/bundle/rpm -name '*.rpm' | head -1)" \
+            "release-assets/CCSwitchMulti-${version}-1.x86_64.rpm"
+          sha256sum release-assets/*
+
+      - name: Upload Linux assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          gh release upload "${{ inputs.tag }}" release-assets/* --clobber --repo "$GITHUB_REPOSITORY"
+          gh release delete-asset "${{ inputs.tag }}" linux-build-note.md --yes --repo "$GITHUB_REPOSITORY" || true
+
+      - name: Refresh release checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          gh release view "${{ inputs.tag }}" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[] | select(.name != "SHA256SUMS.txt") | select(.digest != null and .digest != "") | "\(.digest | sub("^sha256:";"") | ascii_upcase)  \(.name)"' \
+            | sort > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          gh release upload "${{ inputs.tag }}" SHA256SUMS.txt --clobber --repo "$GITHUB_REPOSITORY"
