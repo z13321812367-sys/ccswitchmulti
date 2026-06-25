@@ -210,6 +210,17 @@ type ProviderModelRefreshState = {
   modelCount?: number;
 };
 
+// 自动刷新事务的内部结果；读取和写回分开返回，便于统一控制 loading 终态。
+type ProviderModelRefreshResult =
+  | { status: "stale" }
+  | { status: "empty" }
+  | {
+      status: "updated";
+      models: FetchedModel[];
+      nextProvider: Provider;
+      affectedPlans: Provider[];
+    };
+
 type ProviderModelFetchConfig = {
   baseUrl: string;
   apiKey: string;
@@ -250,7 +261,10 @@ type CodexCatalogModelDraft = {
 
 /// 读取 catalog 条目的真实上游模型名；未配置别名映射时，上游模型名就是可见模型名。
 function catalogDraftUpstreamModel(
-  model: Pick<CodexCatalogModelDraft, "model" | "upstreamModel" | "upstream_model">,
+  model: Pick<
+    CodexCatalogModelDraft,
+    "model" | "upstreamModel" | "upstream_model"
+  >,
 ): string {
   return (model.upstreamModel ?? model.upstream_model ?? model.model).trim();
 }
@@ -301,19 +315,19 @@ function hashSensitiveAttemptPart(value: string): string {
 function withModelRefreshTimeout<T>(
   promise: Promise<T>,
   timeoutMs = MODEL_REFRESH_TIMEOUT_MS,
+  onTimeout?: () => void,
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timeoutId = window.setTimeout(() => {
+      onTimeout?.();
       reject(
         new Error(
-          `模型列表读取超过 ${Math.round(timeoutMs / 1000)} 秒，请检查网络或 provider /models 端点。`,
+          `模型列表读取或写回超过 ${Math.round(timeoutMs / 1000)} 秒，请检查网络、provider /models 端点或本地配置写入状态。`,
         ),
       );
     }, timeoutMs);
 
-    promise
-      .then(resolve, reject)
-      .finally(() => window.clearTimeout(timeoutId));
+    promise.then(resolve, reject).finally(() => window.clearTimeout(timeoutId));
   });
 }
 
@@ -404,7 +418,9 @@ function providerWithFetchedModelCatalog(
       ...(model.display_name ? { display_name: model.display_name } : {}),
       ...(model.contextWindow ? { contextWindow: model.contextWindow } : {}),
       ...(model.context_window ? { context_window: model.context_window } : {}),
-      ...(model.inputModalities ? { inputModalities: model.inputModalities } : {}),
+      ...(model.inputModalities
+        ? { inputModalities: model.inputModalities }
+        : {}),
       ...(model.input_modalities
         ? { input_modalities: model.input_modalities }
         : {}),
@@ -1891,6 +1907,8 @@ export function CodexRouterWorkspacePage({
   const modelRefreshAttemptedKeysRef = useRef<Set<string>>(new Set());
   // 记录每个 provider 当前最新的 /models 刷新 attempt；普通 rerender 会触发 effect cleanup，不能因此吞掉同批并发请求的终态。
   const modelRefreshActiveAttemptKeysRef = useRef<Record<string, string>>({});
+  // 记录已超时的 attempt，避免后台迟到的 IPC 继续把 loading/error 覆盖成 success。
+  const modelRefreshTimedOutAttemptKeysRef = useRef<Set<string>>(new Set());
   const queryClient = useQueryClient();
 
   const effectiveProviders = useMemo(() => {
@@ -1938,6 +1956,7 @@ export function CodexRouterWorkspacePage({
       if (modelRefreshAttemptedKeysRef.current.has(attemptKey)) continue;
       modelRefreshAttemptedKeysRef.current.add(attemptKey);
       modelRefreshActiveAttemptKeysRef.current[provider.id] = attemptKey;
+      modelRefreshTimedOutAttemptKeysRef.current.delete(attemptKey);
 
       if (fetchConfig.skipReason) {
         setProviderModelRefreshStates((current) => ({
@@ -1958,21 +1977,81 @@ export function CodexRouterWorkspacePage({
         },
       }));
 
-      withModelRefreshTimeout(
-        fetchModelsForConfig(
+      const isCurrentAttempt = () =>
+        modelRefreshActiveAttemptKeysRef.current[provider.id] === attemptKey &&
+        !modelRefreshTimedOutAttemptKeysRef.current.has(attemptKey);
+
+      // 将 /models 读取、provider catalog 写回、受影响路由方案重建视为一个事务；
+      // 任何阶段卡住都必须让刷新卡片落到终态，不能只保护最前面的网络请求。
+      const refreshTask = (async (): Promise<ProviderModelRefreshResult> => {
+        const models = await fetchModelsForConfig(
           fetchConfig.baseUrl,
           fetchConfig.apiKey,
           fetchConfig.isFullUrl,
           undefined,
           fetchConfig.customUserAgent,
-        ),
+        );
+        if (!isCurrentAttempt()) {
+          return { status: "stale" };
+        }
+        if (models.length === 0) {
+          return { status: "empty" };
+        }
+
+        const nextProvider = providerWithFetchedModelCatalog(provider, models);
+        setProviderModelRefreshStates((current) => ({
+          ...current,
+          [provider.id]: {
+            status: "loading",
+            message: `已读取 ${models.length} 个模型，正在写回本地配置...`,
+            modelCount: models.length,
+          },
+        }));
+
+        await providersApi.update(nextProvider, "codex");
+        if (!isCurrentAttempt()) {
+          return { status: "stale" };
+        }
+
+        const updatedProvidersById = new Map(providersById);
+        updatedProvidersById.set(nextProvider.id, nextProvider);
+        const affectedPlans: Provider[] = [];
+        for (const plan of routingPlans) {
+          const routes = readCodexRouting(plan)?.routes ?? [];
+          if (
+            !routes.some(
+              (route) => routeTargetProviderId(route) === nextProvider.id,
+            )
+          ) {
+            continue;
+          }
+          const nextPlan: Provider = {
+            ...plan,
+            settingsConfig: {
+              ...plan.settingsConfig,
+              modelCatalog: buildModelCatalogForRoutes(
+                plan,
+                routes,
+                updatedProvidersById,
+              ),
+            },
+          };
+          await providersApi.update(nextPlan, "codex");
+          if (!isCurrentAttempt()) {
+            return { status: "stale" };
+          }
+          affectedPlans.push(nextPlan);
+        }
+
+        return { status: "updated", models, nextProvider, affectedPlans };
+      })();
+
+      withModelRefreshTimeout(refreshTask, MODEL_REFRESH_TIMEOUT_MS, () =>
+        modelRefreshTimedOutAttemptKeysRef.current.add(attemptKey),
       )
-        .then(async (models) => {
-          const isCurrentAttempt = () =>
-            modelRefreshActiveAttemptKeysRef.current[provider.id] ===
-            attemptKey;
-          if (models.length === 0) {
-            if (!isCurrentAttempt()) return;
+        .then(async (result) => {
+          if (result.status === "stale") return;
+          if (result.status === "empty") {
             setProviderModelRefreshStates((current) => ({
               ...current,
               [provider.id]: {
@@ -1984,56 +2063,22 @@ export function CodexRouterWorkspacePage({
             }));
             return;
           }
-
-          const nextProvider = providerWithFetchedModelCatalog(
-            provider,
-            models,
-          );
           if (!isCurrentAttempt()) return;
-          await providersApi.update(nextProvider, "codex");
-          if (!isCurrentAttempt()) return;
-          const updatedProvidersById = new Map(providersById);
-          updatedProvidersById.set(nextProvider.id, nextProvider);
-          const affectedPlans: Provider[] = [];
-          for (const plan of routingPlans) {
-            const routes = readCodexRouting(plan)?.routes ?? [];
-            if (
-              !routes.some(
-                (route) => routeTargetProviderId(route) === nextProvider.id,
-              )
-            ) {
-              continue;
-            }
-            const nextPlan: Provider = {
-              ...plan,
-              settingsConfig: {
-                ...plan.settingsConfig,
-                modelCatalog: buildModelCatalogForRoutes(
-                  plan,
-                  routes,
-                  updatedProvidersById,
-                ),
-              },
-            };
-            await providersApi.update(nextPlan, "codex");
-            if (!isCurrentAttempt()) return;
-            affectedPlans.push(nextPlan);
-          }
           queryClient.setQueryData(["providers", "codex"], (current: any) =>
             current?.providers
               ? {
                   ...current,
                   providers: {
                     ...current.providers,
-                    [nextProvider.id]: nextProvider,
+                    [result.nextProvider.id]: result.nextProvider,
                     ...Object.fromEntries(
-                      affectedPlans.map((plan) => [plan.id, plan]),
+                      result.affectedPlans.map((plan) => [plan.id, plan]),
                     ),
                   },
                 }
               : current,
           );
-          const selectedAffectedPlan = affectedPlans.find(
+          const selectedAffectedPlan = result.affectedPlans.find(
             (plan) => plan.id === selectedPlanId,
           );
           if (selectedAffectedPlan) {
@@ -2043,8 +2088,8 @@ export function CodexRouterWorkspacePage({
             ...current,
             [provider.id]: {
               status: "success",
-              message: `已读取并更新 ${models.length} 个模型。`,
-              modelCount: models.length,
+              message: `已读取并更新 ${result.models.length} 个模型。`,
+              modelCount: result.models.length,
             },
           }));
           await queryClient.invalidateQueries({
@@ -2053,8 +2098,7 @@ export function CodexRouterWorkspacePage({
         })
         .catch((error) => {
           if (
-            modelRefreshActiveAttemptKeysRef.current[provider.id] !==
-            attemptKey
+            modelRefreshActiveAttemptKeysRef.current[provider.id] !== attemptKey
           ) {
             return;
           }

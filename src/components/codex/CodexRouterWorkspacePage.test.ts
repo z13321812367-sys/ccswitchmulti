@@ -4,10 +4,7 @@ import userEvent from "@testing-library/user-event";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { providersApi } from "@/lib/api";
-import {
-  fetchModelsForConfig,
-  type FetchedModel,
-} from "@/lib/api/model-fetch";
+import { fetchModelsForConfig, type FetchedModel } from "@/lib/api/model-fetch";
 import type { Provider } from "@/types";
 import {
   applyMultiRouterSettingsDraft,
@@ -453,9 +450,70 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     });
     expect(
       screen.getByText(
-        "获取模型列表失败，请检查当前 provider 配置：模型列表读取超过 30 秒，请检查网络或 provider /models 端点。",
+        "获取模型列表失败，请检查当前 provider 配置：模型列表读取或写回超过 30 秒，请检查网络、provider /models 端点或本地配置写入状态。",
       ),
     ).toBeInTheDocument();
+  });
+
+  it("settles a provider refresh when saving fetched models never returns", async () => {
+    vi.useFakeTimers();
+    const saveRefresh = createDeferred<boolean>();
+    vi.mocked(fetchModelsForConfig).mockResolvedValueOnce([
+      { id: "model-from-upstream", ownedBy: null },
+    ]);
+    vi.mocked(providersApi.update).mockReturnValue(saveRefresh.promise);
+    const provider: Provider = {
+      id: "codex-save-timeout-source",
+      name: "Save Timeout Source",
+      category: "custom",
+      settingsConfig: {
+        baseUrl: "https://save-timeout.example/v1",
+        auth: { OPENAI_API_KEY: "key-save-timeout" },
+        modelCatalog: { models: [{ model: "old-save-timeout" }] },
+      },
+    };
+    const plan = createDraftRoutingPlan([provider], [provider]);
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [provider, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "routes",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(fetchModelsForConfig).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByText("已读取 1 个模型，正在写回本地配置..."),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    expect(
+      screen.getByText(
+        "获取模型列表失败，请检查当前 provider 配置：模型列表读取或写回超过 30 秒，请检查网络、provider /models 端点或本地配置写入状态。",
+      ),
+    ).toBeInTheDocument();
+
+    saveRefresh.resolve(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(
+      screen.queryByText("已读取并更新 1 个模型。"),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps a visible alias when route page refreshes provider models from upstream ids", async () => {
@@ -498,22 +556,20 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
 
     await waitFor(() =>
       expect(
-        vi
-          .mocked(providersApi.update)
-          .mock.calls.some(([savedProvider]) => {
-            if (savedProvider.id !== provider.id) return false;
-            return (
-              JSON.stringify(savedProvider.settingsConfig.modelCatalog.models) ===
-              JSON.stringify([
-                {
-                  model: "gpt-5.5-thirdparty",
-                  upstreamModel: "gpt-5.5",
-                  displayName: "Third-party GPT",
-                  contextWindow: 272000,
-                },
-              ])
-            );
-          }),
+        vi.mocked(providersApi.update).mock.calls.some(([savedProvider]) => {
+          if (savedProvider.id !== provider.id) return false;
+          return (
+            JSON.stringify(savedProvider.settingsConfig.modelCatalog.models) ===
+            JSON.stringify([
+              {
+                model: "gpt-5.5-thirdparty",
+                upstreamModel: "gpt-5.5",
+                displayName: "Third-party GPT",
+                contextWindow: 272000,
+              },
+            ])
+          );
+        }),
       ).toBe(true),
     );
   });

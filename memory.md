@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-06-25 MultiRouter Model Refresh Save-Back Timeout Fix
+
+- MultiRouter 路由页“候选 provider 模型列表刷新”卡在“正在读取模型列表...”不只可能发生在 `/models` IPC/网络阶段；`src/components/codex/CodexRouterWorkspacePage.tsx` 在读取成功后还会 `providersApi.update` 写回普通 provider 的 `modelCatalog`，并重建/写回受影响 MultiRouter plan 的 `modelCatalog`。旧 `withModelRefreshTimeout` 只包住 `fetchModelsForConfig`，如果后续 provider/plan 保存、Codex live catalog/cache 同步或本地 DB/文件写入挂起，UI 仍会永久停留在 loading。
+- 当前修复把“读取 `/models` -> 写回 provider catalog -> 写回受影响路由方案”视作一个刷新事务，30 秒超时覆盖整个事务；读取完成进入保存阶段时，卡片文案改为“已读取 N 个模型，正在写回本地配置...”，避免把保存阶段误判成远端 `/models` 还在读。
+- 超时 attempt 会被记录到 `modelRefreshTimedOutAttemptKeysRef`，后台迟到的 Promise 不允许再把 error/loading 覆盖成 success；同时 catch 只在该 provider 仍然是当前 attempt 时写错误态，避免旧 attempt 超时覆盖新 attempt。
+- 回归测试 `src/components/codex/CodexRouterWorkspacePage.test.ts` 覆盖两类永久 loading 边界：`fetchModelsForConfig` 永不返回，以及 `providersApi.update` 写回刷新结果永不返回。后者会先显示写回阶段文案，30 秒后落到错误态，迟到 resolve 不能再变成成功态。
+
 ## 2026-06-25 Codex Catalog Visible Alias And Upstream Model Split
 
 - 第三方 Codex provider 的 `modelCatalog.models[].model` 是 Codex/子 Agent 可见候选名，不再强制等于真实上游模型名；新增 `upstreamModel`/`upstream_model` 表示请求发往上游时使用的模型。为空或等于 `model` 时按旧配置兼容处理。
