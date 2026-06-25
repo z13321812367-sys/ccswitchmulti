@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-06-25 MultiRouter Model Refresh v3.16.3-21 Hotfix Boundary
+
+- 用户/外部反馈截图仍停在“候选 provider 模型列表刷新 / 正在读取模型列表...”时，必须区分三个版本边界：本机安装目录 `C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe` 仍是 `3.16.3-18`，公开 `v3.16.3-19` 完全不含刷新状态机修复，公开 `v3.16.3-20` 含 `ddfeed42`/`33a0bc58` 但不含 `966a8e38 fix(codex): settle model refresh save-back hangs`。
+- `v3.16.3-20` 的 `withModelRefreshTimeout` 只包住 `fetchModelsForConfig(...)`，读取成功后的 `providersApi.update(nextProvider)` 与受影响 plan 写回仍可能永久挂起；当前 HEAD `966a8e38` 才把读取、provider catalog 写回、MultiRouter plan catalog 写回合成同一个 30 秒超时事务，并显示“已读取 N 个模型，正在写回本地配置...”阶段文案。
+- 本轮现场验证：`pnpm test:unit -- src/components/codex/CodexRouterWorkspacePage.test.ts` 通过 20 个测试；截图类问题应通过补发 `v3.16.3-21` 处理，release notes 不能再建议 save-back 卡住用户只升级到 `v3.16.3-20`。
+
 ## 2026-06-25 MultiRouter Model Refresh Save-Back Timeout Fix
 
 - MultiRouter 路由页“候选 provider 模型列表刷新”卡在“正在读取模型列表...”不只可能发生在 `/models` IPC/网络阶段；`src/components/codex/CodexRouterWorkspacePage.tsx` 在读取成功后还会 `providersApi.update` 写回普通 provider 的 `modelCatalog`，并重建/写回受影响 MultiRouter plan 的 `modelCatalog`。旧 `withModelRefreshTimeout` 只包住 `fetchModelsForConfig`，如果后续 provider/plan 保存、Codex live catalog/cache 同步或本地 DB/文件写入挂起，UI 仍会永久停留在 loading。
