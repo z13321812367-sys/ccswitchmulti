@@ -232,6 +232,8 @@ type ProxyListenDraftValidation =
 
 type CodexCatalogModelDraft = {
   model: string;
+  upstreamModel?: string;
+  upstream_model?: string;
   displayName?: string;
   display_name?: string;
   contextWindow?: string | number;
@@ -245,6 +247,13 @@ type CodexCatalogModelDraft = {
   vision?: boolean;
   capabilities?: CodexRouteCapabilities;
 };
+
+/// 读取 catalog 条目的真实上游模型名；未配置别名映射时，上游模型名就是可见模型名。
+function catalogDraftUpstreamModel(
+  model: Pick<CodexCatalogModelDraft, "model" | "upstreamModel" | "upstream_model">,
+): string {
+  return (model.upstreamModel ?? model.upstream_model ?? model.model).trim();
+}
 
 type CodexModelCatalogDraft = {
   models: CodexCatalogModelDraft[];
@@ -385,37 +394,73 @@ function providerWithFetchedModelCatalog(
 ): Provider {
   const currentCatalog = readCodexModelCatalog(provider);
   const fetchConfig = getProviderModelFetchConfig(provider);
-  const byModel = new Map<string, CodexCatalogModelDraft>();
-  for (const model of currentCatalog.models) {
+  const models = currentCatalog.models.map((model) => {
     const id = model.model?.trim();
-    if (!id) continue;
-    byModel.set(id, {
-      model: id,
+    return {
+      model: id ?? "",
+      ...(model.upstreamModel ? { upstreamModel: model.upstreamModel } : {}),
+      ...(model.upstream_model ? { upstream_model: model.upstream_model } : {}),
       ...(model.displayName ? { displayName: model.displayName } : {}),
       ...(model.display_name ? { display_name: model.display_name } : {}),
       ...(model.contextWindow ? { contextWindow: model.contextWindow } : {}),
       ...(model.context_window ? { context_window: model.context_window } : {}),
-    });
+      ...(model.inputModalities ? { inputModalities: model.inputModalities } : {}),
+      ...(model.input_modalities
+        ? { input_modalities: model.input_modalities }
+        : {}),
+      ...(model.textOnly !== undefined ? { textOnly: model.textOnly } : {}),
+      ...(model.text_only !== undefined ? { text_only: model.text_only } : {}),
+      ...(model.supportsImage !== undefined
+        ? { supportsImage: model.supportsImage }
+        : {}),
+      ...(model.supports_image !== undefined
+        ? { supports_image: model.supports_image }
+        : {}),
+      ...(model.vision !== undefined ? { vision: model.vision } : {}),
+    } satisfies CodexCatalogModelDraft;
+  });
+  const byFetchedModel = new Map<string, number>();
+  const byVisibleModel = new Map<string, number>();
+  for (const model of currentCatalog.models) {
+    const id = model.model?.trim();
+    if (!id) continue;
+    const index = models.findIndex((item) => item.model === id);
+    if (index < 0) continue;
+    byVisibleModel.set(id, index);
+    const upstreamModel = catalogDraftUpstreamModel(models[index]);
+    if (upstreamModel) {
+      byFetchedModel.set(upstreamModel, index);
+    }
   }
 
   for (const fetched of fetchedModels) {
     const id = fetched.id.trim();
     if (!id) continue;
-    const existing = byModel.get(id);
+    const existingIndex = byFetchedModel.get(id) ?? byVisibleModel.get(id);
     const contextWindow = resolveFetchedCodexModelContextWindow(fetched, {
       providerId: provider.id,
       providerName: provider.name,
       baseUrl: fetchConfig.baseUrl,
       existingModels: currentCatalog.models,
     });
-    byModel.set(id, {
-      ...(existing ?? { model: id, displayName: id }),
+    if (existingIndex !== undefined) {
+      models[existingIndex] = {
+        ...models[existingIndex],
+        ...(contextWindow ? { contextWindow } : {}),
+      };
+      continue;
+    }
+    const nextModel: CodexCatalogModelDraft = {
       model: id,
+      upstreamModel: id,
+      displayName: id,
       ...(contextWindow ? { contextWindow } : {}),
-    });
+    };
+    byFetchedModel.set(id, models.length);
+    byVisibleModel.set(id, models.length);
+    models.push(nextModel);
   }
 
-  const models = Array.from(byModel.values());
   return {
     ...provider,
     settingsConfig: {
@@ -895,12 +940,14 @@ function catalogDraftFromSourceModel(
   source?: CodexCatalogModelDraft | CodexCatalogModel,
 ): CodexCatalogModelDraft {
   const displayName = source?.displayName ?? source?.display_name;
+  const upstreamModel = source?.upstreamModel ?? source?.upstream_model;
   const contextWindow = source?.contextWindow ?? source?.context_window;
   const capabilities = capabilitiesFromImageSupport(
     source ? imageSupportFromCatalogModel(source) : undefined,
   );
   return {
     model: id,
+    ...(upstreamModel ? { upstreamModel } : {}),
     ...(displayName ? { displayName } : {}),
     ...(contextWindow ? { contextWindow } : {}),
     ...(source?.inputModalities

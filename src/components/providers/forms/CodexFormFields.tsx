@@ -114,9 +114,17 @@ function createCatalogRow(seed?: Partial<CodexCatalogModel>): CodexCatalogRow {
   return {
     rowId: crypto.randomUUID(),
     model: seed?.model ?? "",
+    upstreamModel: seed?.upstreamModel ?? seed?.upstream_model ?? "",
     displayName: seed?.displayName ?? "",
     contextWindow: seed?.contextWindow ?? "",
   };
+}
+
+// 读取 catalog 行的真实上游模型名；为空时回退到可见模型名，兼容旧配置。
+function catalogRowUpstreamModel(
+  row: Pick<CodexCatalogModel, "model" | "upstreamModel" | "upstream_model">,
+): string {
+  return (row.upstreamModel ?? row.upstream_model ?? row.model ?? "").trim();
 }
 
 // 将逗号或换行分隔的字符串整理成 route 匹配列表。
@@ -183,7 +191,12 @@ function routingRowsMatchConfig(
 // Compares rows (with rowId) to incoming models (without) by data fields only,
 // so both sync effects can use the same equality definition.
 function catalogRowsMatchModels(
-  rows: Array<Pick<CodexCatalogRow, "model" | "displayName" | "contextWindow">>,
+  rows: Array<
+    Pick<
+      CodexCatalogRow,
+      "model" | "upstreamModel" | "upstream_model" | "displayName" | "contextWindow"
+    >
+  >,
   models: CodexCatalogModel[],
 ): boolean {
   if (rows.length !== models.length) return false;
@@ -191,6 +204,7 @@ function catalogRowsMatchModels(
     const incoming = models[i];
     return (
       row.model === (incoming.model ?? "") &&
+      catalogRowUpstreamModel(row) === catalogRowUpstreamModel(incoming) &&
       (row.displayName ?? "") === (incoming.displayName ?? "") &&
       String(row.contextWindow ?? "") === String(incoming.contextWindow ?? "")
     );
@@ -208,11 +222,17 @@ function mergeFetchedModelsIntoCatalogRows(
   } = {},
 ): CodexCatalogRow[] {
   const next = [...rows];
-  const rowByModel = new Map(
-    next
-      .map((row, index) => [row.model.trim(), { row, index }] as const)
-      .filter(([model]) => Boolean(model)),
-  );
+  const rowByFetchedModel = new Map<string, { row: CodexCatalogRow; index: number }>();
+  next.forEach((row, index) => {
+    const upstreamModel = catalogRowUpstreamModel(row);
+    if (upstreamModel) {
+      rowByFetchedModel.set(upstreamModel, { row, index });
+    }
+    const visibleModel = row.model.trim();
+    if (visibleModel && !rowByFetchedModel.has(visibleModel)) {
+      rowByFetchedModel.set(visibleModel, { row, index });
+    }
+  });
 
   for (const fetched of fetchedModels) {
     const model = fetched.id.trim();
@@ -222,7 +242,7 @@ function mergeFetchedModelsIntoCatalogRows(
       existingModels: rows,
     });
     const contextWindowText = contextWindow ? String(contextWindow) : undefined;
-    const existing = rowByModel.get(model);
+    const existing = rowByFetchedModel.get(model);
     if (existing) {
       if (!existing.row.contextWindow && contextWindowText) {
         next[existing.index] = {
@@ -234,10 +254,11 @@ function mergeFetchedModelsIntoCatalogRows(
     }
     const row = createCatalogRow({
       model,
+      upstreamModel: model,
       displayName: model,
       ...(contextWindowText ? { contextWindow: contextWindowText } : {}),
     });
-    rowByModel.set(model, { row, index: next.length });
+    rowByFetchedModel.set(model, { row, index: next.length });
     next.push(row);
   }
 
@@ -308,6 +329,7 @@ export function CodexFormFields({
   const [catalogRows, setCatalogRows] = useState<CodexCatalogRow[]>(() =>
     catalogModels.map((m) => createCatalogRow(m)),
   );
+  const catalogRowsRef = useRef<CodexCatalogRow[]>(catalogRows);
   const [routingRows, setRoutingRows] = useState<CodexRoutingRow[]>(() =>
     (codexRouting.routes ?? []).map((route) => createRoutingRow(route)),
   );
@@ -319,6 +341,11 @@ export function CodexFormFields({
   const routingPropKeyRef = useRef(JSON.stringify(codexRouting));
   const skipCatalogEchoRef = useRef(false);
   const skipRoutingEchoRef = useRef(false);
+
+  // 保留最新的模型映射行给异步刷新回调用，避免点击“获取模型列表”时合并到旧闭包里的 catalogRows。
+  useEffect(() => {
+    catalogRowsRef.current = catalogRows;
+  }, [catalogRows]);
 
   // 父 → 子：仅当 prop 数据真的变化（预设切换 / 编辑加载）时才重建 rowId；
   // 同 shape 时保留现有 rowId，避免编辑过程中焦点丢失。
@@ -455,16 +482,27 @@ export function CodexFormFields({
       .then((models) => {
         setFetchedModels(models);
         if (onCatalogModelsChange && models.length > 0) {
-          setCatalogRows((current) =>
-            mergeFetchedModelsIntoCatalogRows(current, models, {
+          const mergedRows = mergeFetchedModelsIntoCatalogRows(
+            catalogRowsRef.current,
+            models,
+            {
               providerId,
               baseUrl: codexBaseUrl,
               websiteUrl,
-            }),
+            },
           );
+          catalogRowsRef.current = mergedRows;
+          setCatalogRows(mergedRows);
           const autoSelected = models
-            .map((model) => model.id.trim())
-            .filter(Boolean)
+            .map((model) => {
+              const upstreamModel = model.id.trim();
+              return (
+                mergedRows.find(
+                  (row) => catalogRowUpstreamModel(row) === upstreamModel,
+                )?.model.trim() ?? upstreamModel
+              );
+            })
+            .filter((model): model is string => Boolean(model))
             .slice(0, 5);
           if (onSpawnAgentModelsChange && spawnAgentModels.length === 0) {
             onSpawnAgentModelsChange(autoSelected);
@@ -504,14 +542,38 @@ export function CodexFormFields({
   const handleUpdateCatalogRow = useCallback(
     (index: number, patch: Partial<CodexCatalogModel>) => {
       setCatalogRows((current) =>
-        current.map((row, i) => (i === index ? { ...row, ...patch } : row)),
+        current.map((row, i) => {
+          if (i !== index) return row;
+          const next = { ...row, ...patch };
+          if (
+            patch.model !== undefined &&
+            patch.upstreamModel === undefined &&
+            patch.upstream_model === undefined
+          ) {
+            const previousVisibleModel = row.model.trim();
+            const previousUpstreamModel = catalogRowUpstreamModel(row);
+            if (
+              previousVisibleModel &&
+              (!previousUpstreamModel ||
+                previousUpstreamModel === previousVisibleModel)
+            ) {
+              next.upstreamModel = previousVisibleModel;
+            }
+          }
+          return next;
+        }),
       );
     },
     [],
   );
 
   const handleSelectFetchedCatalogModel = useCallback(
-    (index: number, modelId: string, currentDisplayName?: string) => {
+    (
+      index: number,
+      modelId: string,
+      currentVisibleModel?: string,
+      currentDisplayName?: string,
+    ) => {
       const fetched = fetchedModels.find((model) => model.id === modelId);
       const contextWindow = fetched
         ? resolveFetchedCodexModelContextWindow(fetched, {
@@ -523,7 +585,8 @@ export function CodexFormFields({
         : undefined;
 
       handleUpdateCatalogRow(index, {
-        model: modelId,
+        model: currentVisibleModel?.trim() ? currentVisibleModel : modelId,
+        upstreamModel: modelId,
         displayName: currentDisplayName?.trim() ? currentDisplayName : modelId,
         ...(contextWindow ? { contextWindow: String(contextWindow) } : {}),
       });
@@ -1372,7 +1435,7 @@ export function CodexFormFields({
                 {catalogRows.length > 0 && (
                   <div className="space-y-2">
                     {/* 列头：md+ 显示 */}
-                    <div className="hidden grid-cols-[88px_1fr_1fr_140px_76px_36px] gap-2 px-1 text-xs font-medium text-muted-foreground md:grid">
+                    <div className="hidden grid-cols-[88px_1fr_1fr_1fr_132px_76px_36px] gap-2 px-1 text-xs font-medium text-muted-foreground md:grid">
                       <span>
                         {t("codexConfig.spawnAgentColumn", {
                           defaultValue: "子 Agent",
@@ -1385,7 +1448,12 @@ export function CodexFormFields({
                       </span>
                       <span>
                         {t("codexConfig.catalogColumnModel", {
-                          defaultValue: "实际请求模型",
+                          defaultValue: "候选模型名",
+                        })}
+                      </span>
+                      <span>
+                        {t("codexConfig.catalogColumnUpstreamModel", {
+                          defaultValue: "上游模型名",
                         })}
                       </span>
                       <span>
@@ -1404,7 +1472,7 @@ export function CodexFormFields({
                     {catalogRows.map((row, index) => (
                       <div
                         key={row.rowId}
-                        className="grid grid-cols-1 gap-2 md:grid-cols-[88px_1fr_1fr_140px_76px_36px]"
+                        className="grid grid-cols-1 gap-2 md:grid-cols-[88px_1fr_1fr_1fr_132px_76px_36px]"
                       >
                         <label className="flex h-9 items-center gap-2 text-xs text-muted-foreground">
                           <input
@@ -1445,23 +1513,40 @@ export function CodexFormFields({
                             defaultValue: "菜单显示名",
                           })}
                         />
+                        <Input
+                          value={row.model}
+                          onChange={(event) =>
+                            handleUpdateCatalogRow(index, {
+                              model: event.target.value,
+                            })
+                          }
+                          placeholder={t("codexConfig.catalogModelPlaceholder", {
+                            defaultValue: "例如: gpt-5.5-thirdparty",
+                          })}
+                          aria-label={t("codexConfig.catalogColumnModel", {
+                            defaultValue: "候选模型名",
+                          })}
+                        />
                         <div className="flex gap-1">
                           <Input
-                            value={row.model}
+                            value={row.upstreamModel ?? row.upstream_model ?? ""}
                             onChange={(event) =>
                               handleUpdateCatalogRow(index, {
-                                model: event.target.value,
+                                upstreamModel: event.target.value,
                               })
                             }
                             placeholder={t(
-                              "codexConfig.catalogModelPlaceholder",
+                              "codexConfig.catalogUpstreamModelPlaceholder",
                               {
-                                defaultValue: "例如: deepseek-v4-flash",
+                                defaultValue: "留空则使用候选模型名",
                               },
                             )}
-                            aria-label={t("codexConfig.catalogColumnModel", {
-                              defaultValue: "实际请求模型",
-                            })}
+                            aria-label={t(
+                              "codexConfig.catalogColumnUpstreamModel",
+                              {
+                                defaultValue: "上游模型名",
+                              },
+                            )}
                             className="flex-1"
                           />
                           {fetchedModels.length > 0 && (
@@ -1471,6 +1556,7 @@ export function CodexFormFields({
                                 handleSelectFetchedCatalogModel(
                                   index,
                                   id,
+                                  row.model,
                                   row.displayName,
                                 )
                               }

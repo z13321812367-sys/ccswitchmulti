@@ -1,8 +1,16 @@
 # CC Switch Repository Memory
 
+## 2026-06-25 Codex Catalog Visible Alias And Upstream Model Split
+
+- 第三方 Codex provider 的 `modelCatalog.models[].model` 是 Codex/子 Agent 可见候选名，不再强制等于真实上游模型名；新增 `upstreamModel`/`upstream_model` 表示请求发往上游时使用的模型。为空或等于 `model` 时按旧配置兼容处理。
+- 普通表单和 MultiRouter 自动 `/models` 刷新合并时必须按 `upstreamModel || upstream_model || model` 优先匹配远端返回的 id，避免用户把 `gpt-5.5` 改成 `gpt-5.5-thirdparty` 后，下一次刷新又新增一个重复的 `gpt-5.5` 或把别名覆盖掉。新增远端模型默认写成 `model=id, upstreamModel=id`，保存时若二者相同会省略 upstream 字段。
+- 运行时出站映射顺序固定为：route 级 `codexResolvedUpstreamModelOverride` / `modelMap` 优先，其次 catalog 条目的 `upstreamModel`，最后回退到 provider/config 里的单模型字段。这个映射必须同时覆盖 Responses 原生直连和 Responses->Chat 转换路径。
+- Codex catalog 文件可以携带 `upstreamModel` 作为 cc-switch 私有元数据，但 OpenAI-compatible `/v1/models` 的 `data[]` 只能暴露可见模型名和上下文窗口，不应把真实 upstream alias 暴露出去。
+
 ## 2026-06-25 MultiRouter Model Refresh Release Boundary And Timeout Guard
 
 - 用户/他人看到 MultiRouter 路由页“候选 provider 模型列表刷新”一直卡在“正在读取模型列表...”时，先确认运行版本；`v3.16.3-19` tag 指向 `6a1cf4e1`，不包含本地 `ddfeed42 fix(codex): settle multirouter model refresh states`，而本机安装目录 `C:\Users\sunda\AppData\Local\CCSwitchMulti\cc-switch.exe` 仍是 `3.16.3-18`，所以截图类问题很可能是发布包未带修复而不是 HEAD 修复失效。
+- 2026-06-25 再次确认：GitHub prerelease `v3.16.3-19` 的 target commit 仍是 `6a1cf4e1`，`ddfeed42` 和 `33a0bc58` 都不在该 tag 内；别人发来的两个 provider 同时显示“正在读取模型列表...”的截图，应优先按“公开包未发布刷新状态机修复”处理。下一次发版必须包含 `ddfeed42`/`33a0bc58`，否则该问题会继续在已安装包里出现。
 - `src/components/codex/CodexRouterWorkspacePage.tsx` 的候选 provider 自动刷新现在有双层保护：per-provider active attemptKey 负责防止 rerender cleanup 吞掉 pending 请求终态；前端 `withModelRefreshTimeout` 再给 IPC/后端异常挂起加 30s 兜底，必须让 UI 从 loading 落到错误态。
 - attemptKey 不能只记录 `Boolean(apiKey)`；API Key 从一个非空值换成另一个非空值时必须重新发起 `/models` 读取，并让旧请求结果无法写回。当前实现对 API Key 做短哈希后参与内存态 attemptKey，不持久化也不展示完整密钥。
 - 回归测试在 `src/components/codex/CodexRouterWorkspacePage.test.ts` 增加两类边界：API Key 变化时 stale request 不写回，以及 `fetchModelsForConfig` 永不返回时 30s 后显示错误而不是永久 loading。

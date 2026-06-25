@@ -1,8 +1,9 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState, type ReactNode } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CodexFormFields } from "@/components/providers/forms/CodexFormFields";
-import type { CodexRoutingConfig } from "@/types";
+import { fetchModelsForConfig } from "@/lib/api/model-fetch";
+import type { CodexCatalogModel, CodexRoutingConfig } from "@/types";
 
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
@@ -19,6 +20,10 @@ vi.mock("@/lib/api/model-fetch", () => ({
 vi.mock("@/components/ui/form", () => ({
   FormLabel: ({ children }: { children: ReactNode }) => <label>{children}</label>,
 }));
+
+beforeEach(() => {
+  vi.mocked(fetchModelsForConfig).mockReset();
+});
 
 function renderRoutingHarness(
   initialRouting?: CodexRoutingConfig,
@@ -72,7 +77,105 @@ function renderRoutingHarness(
   };
 }
 
+function renderCatalogHarness(initialCatalog: CodexCatalogModel[]) {
+  const onCatalogChange = vi.fn();
+  let latestCatalog = initialCatalog;
+
+  function Harness() {
+    const [catalog, setCatalog] =
+      useState<CodexCatalogModel[]>(initialCatalog);
+
+    // 测试壳模拟 ProviderForm 对 modelCatalog 的受控回写。
+    const handleCatalogChange = (next: CodexCatalogModel[]) => {
+      latestCatalog = next;
+      onCatalogChange(next);
+      setCatalog(next);
+    };
+
+    return (
+      <CodexFormFields
+        providerId="codex-thirdparty"
+        codexApiKey="sk-test"
+        onApiKeyChange={vi.fn()}
+        category="custom"
+        shouldShowApiKeyLink={false}
+        websiteUrl=""
+        shouldShowSpeedTest={false}
+        codexBaseUrl="https://api.thirdparty.example/v1"
+        onBaseUrlChange={vi.fn()}
+        isFullUrl={false}
+        onFullUrlChange={vi.fn()}
+        isEndpointModalOpen={false}
+        onEndpointModalToggle={vi.fn()}
+        autoSelect={false}
+        onAutoSelectChange={vi.fn()}
+        apiFormat="openai_chat"
+        onApiFormatChange={vi.fn()}
+        catalogModels={catalog}
+        onCatalogModelsChange={handleCatalogChange}
+        spawnAgentModels={[]}
+        onSpawnAgentModelsChange={vi.fn()}
+        codexRouting={{ enabled: false, defaultRouteId: "", routes: [] }}
+        speedTestEndpoints={[]}
+        customUserAgent=""
+        onCustomUserAgentChange={vi.fn()}
+      />
+    );
+  }
+
+  return {
+    ...render(<Harness />),
+    onCatalogChange,
+    latestCatalog: () => latestCatalog,
+  };
+}
+
 describe("CodexFormFields local model routing", () => {
+  it("keeps the previous model as upstream when the visible catalog model is renamed", async () => {
+    const { latestCatalog } = renderCatalogHarness([
+      { model: "gpt-5.5", displayName: "Third-party GPT" },
+    ]);
+
+    fireEvent.change(screen.getByLabelText("候选模型名"), {
+      target: { value: "gpt-5.5-thirdparty" },
+    });
+
+    await waitFor(() => {
+      expect(latestCatalog()).toMatchObject([
+        {
+          model: "gpt-5.5-thirdparty",
+          upstreamModel: "gpt-5.5",
+        },
+      ]);
+    });
+  });
+
+  it("merges fetched models by upstream model without overwriting a visible alias", async () => {
+    vi.mocked(fetchModelsForConfig).mockResolvedValueOnce([
+      { id: "gpt-5.5", ownedBy: null, contextWindow: 272000 },
+    ]);
+    const { latestCatalog } = renderCatalogHarness([
+      {
+        model: "gpt-5.5-thirdparty",
+        upstreamModel: "gpt-5.5",
+        displayName: "Third-party GPT",
+      },
+    ]);
+
+    fireEvent.click(screen.getByRole("button", { name: "providerForm.fetchModels" }));
+
+    await waitFor(() => {
+      expect(latestCatalog()).toEqual([
+        {
+          model: "gpt-5.5-thirdparty",
+          upstreamModel: "gpt-5.5",
+          displayName: "Third-party GPT",
+          contextWindow: "272000",
+        },
+      ]);
+    });
+  });
+
   it("shows local model routing even when endpoint speed tools are hidden", () => {
     renderRoutingHarness(
       { enabled: false, defaultRouteId: "", routes: [] },

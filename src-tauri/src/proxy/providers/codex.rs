@@ -12,7 +12,6 @@ use crate::provider::{
 use crate::proxy::error::ProxyError;
 use regex::Regex;
 use serde_json::{Map, Value as JsonValue};
-use std::collections::HashSet;
 use std::sync::LazyLock;
 use toml::Value as TomlValue;
 
@@ -1081,22 +1080,63 @@ pub fn codex_provider_upstream_model(provider: &Provider) -> Option<String> {
         })
 }
 
-fn codex_provider_catalog_model_ids(provider: &Provider) -> HashSet<String> {
+/// 按 catalog 可见模型名查找真实上游模型；没有显式别名时回退为可见名本身。
+fn codex_provider_catalog_upstream_model_for_request(
+    provider: &Provider,
+    request_model: &str,
+) -> Option<String> {
     provider
         .settings_config
         .get("modelCatalog")
         .and_then(|catalog| catalog.get("models"))
         .and_then(|models| models.as_array())
-        .map(|models| {
-            models
-                .iter()
-                .filter_map(|model| model.get("model").and_then(|value| value.as_str()))
-                .map(str::trim)
-                .filter(|model| !model.is_empty())
-                .map(ToString::to_string)
-                .collect()
+        .and_then(|models| {
+            models.iter().find_map(|model| {
+                let visible_model = model
+                    .get("model")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|model| !model.is_empty())?;
+                if visible_model != request_model {
+                    return None;
+                }
+                let upstream_model = model
+                    .get("upstreamModel")
+                    .or_else(|| model.get("upstream_model"))
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|model| !model.is_empty())
+                    .unwrap_or(visible_model);
+                Some(upstream_model.to_string())
+            })
         })
-        .unwrap_or_default()
+}
+
+/// 将 Codex 请求体里的可见模型名改回真实上游模型名；route 显式覆盖优先于 catalog 默认映射。
+pub fn apply_codex_request_upstream_model(
+    provider: &Provider,
+    body: &mut JsonValue,
+) -> Option<String> {
+    if let Some(route_override) = provider
+        .settings_config
+        .get(CODEX_RESOLVED_UPSTREAM_MODEL_OVERRIDE)
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    {
+        body["model"] = JsonValue::String(route_override.to_string());
+        return Some(route_override.to_string());
+    }
+
+    let request_model = body
+        .get("model")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|model| !model.is_empty())?;
+    let upstream_model =
+        codex_provider_catalog_upstream_model_for_request(provider, request_model)?;
+    body["model"] = JsonValue::String(upstream_model.clone());
+    Some(upstream_model)
 }
 
 /// For Codex Chat providers, ensure the request uses the configured upstream
@@ -1120,16 +1160,8 @@ pub fn apply_codex_chat_upstream_model(
         return Some(upstream_model);
     }
 
-    let catalog_model_ids = codex_provider_catalog_model_ids(provider);
-    if let Some(request_model) = body
-        .get("model")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|model| !model.is_empty())
-    {
-        if catalog_model_ids.contains(request_model) {
-            return Some(request_model.to_string());
-        }
+    if let Some(upstream_model) = apply_codex_request_upstream_model(provider, body) {
+        return Some(upstream_model);
     }
 
     let upstream_model = codex_provider_upstream_model(provider)?;
@@ -3046,6 +3078,96 @@ wire_api = "responses"
 
         assert_eq!(upstream_model.as_deref(), Some("kimi-k2"));
         assert_eq!(body.get("model").and_then(|v| v.as_str()), Some("kimi-k2"));
+    }
+
+    #[test]
+    fn test_apply_codex_chat_upstream_model_uses_catalog_upstream_model() {
+        let mut provider = create_provider(json!({
+            "config": r#"
+model_provider = "thirdparty"
+model = "gpt-5.5-thirdparty"
+
+[model_providers.thirdparty]
+name = "Third-party GPT"
+base_url = "https://api.thirdparty.example/v1"
+wire_api = "responses"
+"#,
+            "modelCatalog": {
+                "models": [
+                    {
+                        "model": "gpt-5.5-thirdparty",
+                        "upstreamModel": "gpt-5.5"
+                    }
+                ]
+            }
+        }));
+        provider.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            ..Default::default()
+        });
+        let mut body = json!({
+            "model": "gpt-5.5-thirdparty",
+            "input": "ping"
+        });
+
+        let upstream_model = apply_codex_chat_upstream_model(&provider, &mut body);
+
+        assert_eq!(upstream_model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(body.get("model").and_then(|v| v.as_str()), Some("gpt-5.5"));
+    }
+
+    #[test]
+    fn test_apply_codex_request_upstream_model_uses_catalog_for_native_responses() {
+        let provider = create_provider(json!({
+            "modelCatalog": {
+                "models": [
+                    {
+                        "model": "gpt-5.5-thirdparty",
+                        "upstream_model": "gpt-5.5"
+                    }
+                ]
+            }
+        }));
+        let mut body = json!({
+            "model": "gpt-5.5-thirdparty",
+            "input": "ping"
+        });
+
+        let upstream_model = apply_codex_request_upstream_model(&provider, &mut body);
+
+        assert_eq!(upstream_model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(body.get("model").and_then(|v| v.as_str()), Some("gpt-5.5"));
+    }
+
+    #[test]
+    fn test_apply_codex_request_upstream_model_route_override_takes_priority() {
+        let mut settings = json!({
+            "modelCatalog": {
+                "models": [
+                    {
+                        "model": "gpt-5.5-thirdparty",
+                        "upstreamModel": "gpt-5.5"
+                    }
+                ]
+            }
+        });
+        settings.as_object_mut().unwrap().insert(
+            CODEX_RESOLVED_UPSTREAM_MODEL_OVERRIDE.to_string(),
+            json!("route-overridden-model"),
+        );
+        let provider = create_provider(settings);
+        let mut body = json!({
+            "model": "gpt-5.5-thirdparty",
+            "input": "ping"
+        });
+
+        let upstream_model = apply_codex_request_upstream_model(&provider, &mut body);
+
+        assert_eq!(upstream_model.as_deref(), Some("route-overridden-model"));
+        assert_eq!(
+            body.get("model").and_then(|v| v.as_str()),
+            Some("route-overridden-model")
+        );
     }
 
     #[test]

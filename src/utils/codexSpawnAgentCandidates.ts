@@ -2,6 +2,8 @@ import type { Provider } from "@/types";
 
 export interface CodexCatalogModel {
   model?: string;
+  upstreamModel?: string;
+  upstream_model?: string;
   displayName?: string;
   display_name?: string;
   contextWindow?: string | number;

@@ -174,6 +174,11 @@ export const normalizeCodexCatalogModelsForSave = (
     if (!model || seen.has(model)) continue;
     seen.add(model);
 
+    const upstreamModel = (
+      item.upstreamModel ??
+      item.upstream_model ??
+      ""
+    ).trim();
     const displayName = item.displayName?.trim();
     const rawContextWindow = String(item.contextWindow ?? "").replace(
       /[^\d]/g,
@@ -185,6 +190,7 @@ export const normalizeCodexCatalogModelsForSave = (
 
     normalized.push({
       model,
+      ...(upstreamModel && upstreamModel !== model ? { upstreamModel } : {}),
       ...(displayName ? { displayName } : {}),
       ...(contextWindow && contextWindow > 0 ? { contextWindow } : {}),
     });

@@ -458,6 +458,66 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     ).toBeInTheDocument();
   });
 
+  it("keeps a visible alias when route page refreshes provider models from upstream ids", async () => {
+    vi.mocked(fetchModelsForConfig).mockResolvedValueOnce([
+      { id: "gpt-5.5", ownedBy: null, contextWindow: 272000 },
+    ]);
+    const provider: Provider = {
+      id: "codex-thirdparty-gpt",
+      name: "Third-party GPT",
+      category: "custom",
+      settingsConfig: {
+        baseUrl: "https://thirdparty.example/v1",
+        auth: { OPENAI_API_KEY: "key-thirdparty" },
+        modelCatalog: {
+          models: [
+            {
+              model: "gpt-5.5-thirdparty",
+              upstreamModel: "gpt-5.5",
+              displayName: "Third-party GPT",
+            },
+          ],
+        },
+      },
+    };
+    const plan = createDraftRoutingPlan([provider], [provider]);
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [provider, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "routes",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    await waitFor(() =>
+      expect(
+        vi
+          .mocked(providersApi.update)
+          .mock.calls.some(([savedProvider]) => {
+            if (savedProvider.id !== provider.id) return false;
+            return (
+              JSON.stringify(savedProvider.settingsConfig.modelCatalog.models) ===
+              JSON.stringify([
+                {
+                  model: "gpt-5.5-thirdparty",
+                  upstreamModel: "gpt-5.5",
+                  displayName: "Third-party GPT",
+                  contextWindow: 272000,
+                },
+              ])
+            );
+          }),
+      ).toBe(true),
+    );
+  });
+
   it("does not force the workspace back to routes after the initial jump is consumed", async () => {
     const source: Provider = {
       id: "codex-qwen",
@@ -601,6 +661,63 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         contextWindow: 128000,
       },
       { model: "qwen3.6", displayName: "Qwen 3.6", contextWindow: 262144 },
+    ]);
+  });
+
+  it("preserves catalog upstream models when creating and rebuilding routing plans", () => {
+    const thirdParty: Provider = {
+      id: "codex-thirdparty-gpt",
+      name: "Third-party GPT",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: {
+          models: [
+            {
+              model: "gpt-5.5-thirdparty",
+              upstreamModel: "gpt-5.5",
+              displayName: "Third-party GPT",
+              contextWindow: 272000,
+            },
+          ],
+        },
+      },
+      meta: { apiFormat: "openai_responses" },
+    };
+
+    const plan = createDraftRoutingPlan([thirdParty], [thirdParty]);
+    const routes = [
+      normalizeCodexRouteForSave(
+        {
+          label: thirdParty.name,
+          targetProviderId: thirdParty.id,
+          match: { models: ["gpt-5.5-thirdparty"], prefixes: [] },
+        },
+        0,
+        new Set<string>(),
+      ),
+    ];
+
+    expect(plan.settingsConfig.modelCatalog.models).toEqual([
+      {
+        model: "gpt-5.5-thirdparty",
+        upstreamModel: "gpt-5.5",
+        displayName: "Third-party GPT",
+        contextWindow: 272000,
+      },
+    ]);
+    expect(
+      buildModelCatalogForRoutes(
+        plan,
+        routes,
+        new Map([[thirdParty.id, thirdParty]]),
+      ).models,
+    ).toEqual([
+      {
+        model: "gpt-5.5-thirdparty",
+        upstreamModel: "gpt-5.5",
+        displayName: "Third-party GPT",
+        contextWindow: 272000,
+      },
     ]);
   });
 

@@ -147,6 +147,12 @@ function extractCodexCatalogModels(modelCatalog: any): CodexCatalogModel[] {
   return rawCatalogModels
     .map((item: any) => ({
       model: typeof item?.model === "string" ? item.model : "",
+      upstreamModel:
+        typeof item?.upstreamModel === "string"
+          ? item.upstreamModel
+          : typeof item?.upstream_model === "string"
+            ? item.upstream_model
+            : "",
       displayName:
         typeof item?.displayName === "string"
           ? item.displayName

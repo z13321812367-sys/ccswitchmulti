@@ -3177,7 +3177,7 @@ mod tests {
     fn codex_catalog_models_response_keeps_catalog_and_openai_data() {
         let response = codex_catalog_models_response(json!({
             "models": [
-                { "slug": "qwen3.6", "display_name": "Qwen 3.6", "context_window": 262144 },
+                { "slug": "qwen3.6", "display_name": "Qwen 3.6", "context_window": 262144, "upstreamModel": "qwen3.6-upstream" },
                 { "model": "deepseek-v4-flash", "display_name": "DeepSeek V4 Flash", "contextWindow": 1000000 },
                 { "slug": "qwen3.6", "display_name": "duplicate" }
             ]
@@ -3218,6 +3218,14 @@ mod tests {
             qwen.get("maxContextWindow")
                 .and_then(|value| value.as_u64()),
             Some(262_144)
+        );
+        assert!(
+            qwen.get("upstreamModel").is_none(),
+            "OpenAI-compatible data[] entries must not expose private upstream model aliases"
+        );
+        assert!(
+            qwen.get("upstream_model").is_none(),
+            "OpenAI-compatible data[] entries must not expose private upstream model aliases"
         );
     }
 

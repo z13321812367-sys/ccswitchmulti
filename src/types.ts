@@ -257,6 +257,8 @@ export type CodexApiFormat =
 
 export interface CodexCatalogModel {
   model: string;
+  upstreamModel?: string;
+  upstream_model?: string;
   displayName?: string;
   contextWindow?: string | number;
   inputModalities?: Array<"text" | "image">;

@@ -748,6 +748,10 @@ fn codex_catalog_model_entry(
 
     entry_obj.insert("slug".to_string(), json!(spec.model));
     entry_obj.insert("model".to_string(), json!(spec.model));
+    if let Some(upstream_model) = &spec.upstream_model {
+        entry_obj.insert("upstreamModel".to_string(), json!(upstream_model));
+        entry_obj.insert("upstream_model".to_string(), json!(upstream_model));
+    }
     entry_obj.insert("display_name".to_string(), json!(spec.display_name));
     entry_obj.insert("description".to_string(), json!(spec.display_name));
     entry_obj.insert("context_window".to_string(), json!(spec.context_window));
@@ -775,6 +779,7 @@ fn codex_catalog_model_entry(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CodexCatalogModelSpec {
     model: String,
+    upstream_model: Option<String>,
     display_name: String,
     context_window: u64,
     text_only: bool,
@@ -903,6 +908,13 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
             .map(str::trim)
             .filter(|name| !name.is_empty())
             .unwrap_or(model);
+        let upstream_model = model_config
+            .get("upstreamModel")
+            .or_else(|| model_config.get("upstream_model"))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|upstream_model| !upstream_model.is_empty() && *upstream_model != model)
+            .map(ToString::to_string);
         let context_window = parse_codex_positive_u64(
             model_config
                 .get("contextWindow")
@@ -921,6 +933,7 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
 
         specs.push(CodexCatalogModelSpec {
             model: model.to_string(),
+            upstream_model,
             display_name: display_name.to_string(),
             context_window,
             text_only,
@@ -1224,6 +1237,10 @@ fn codex_provider_models_toml_array(specs: &[CodexCatalogModelSpec]) -> Item {
         let mut model = InlineTable::new();
         model.insert("model", spec.model.as_str().into());
         model.insert("id", spec.model.as_str().into());
+        if let Some(upstream_model) = &spec.upstream_model {
+            model.insert("upstreamModel", upstream_model.as_str().into());
+            model.insert("upstream_model", upstream_model.as_str().into());
+        }
         model.insert("display_name", spec.display_name.as_str().into());
         model.insert("displayName", spec.display_name.as_str().into());
         model.insert(
@@ -3852,6 +3869,7 @@ openai_base_url = "http://127.0.0.1:15721/v1"
         });
         let spec = CodexCatalogModelSpec {
             model: "gpt-5.3-codex-spark".to_string(),
+            upstream_model: None,
             display_name: "Codex Spark".to_string(),
             context_window: 128_000,
             text_only: true,
@@ -3968,6 +3986,60 @@ openai_base_url = "http://127.0.0.1:15721/v1"
     }
 
     #[test]
+    fn codex_model_catalog_preserves_visible_alias_and_upstream_model() {
+        let settings = json!({
+            "modelCatalog": {
+                "models": [
+                    {
+                        "model": "gpt-5.5-thirdparty",
+                        "upstreamModel": "gpt-5.5",
+                        "displayName": "Third-party GPT",
+                        "contextWindow": 272000
+                    }
+                ]
+            }
+        });
+        let specs = codex_catalog_model_specs(&settings, r#"model = "gpt-5.5-thirdparty""#);
+
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].model, "gpt-5.5-thirdparty");
+        assert_eq!(specs[0].upstream_model.as_deref(), Some("gpt-5.5"));
+
+        let template = json!({
+            "slug": "gpt-5.5",
+            "display_name": "GPT-5.5",
+            "context_window": 272000,
+            "max_context_window": 272000
+        });
+        let entry = codex_catalog_model_entry(&template, &specs[0], 0);
+
+        assert_eq!(
+            entry.get("slug").and_then(|value| value.as_str()),
+            Some("gpt-5.5-thirdparty")
+        );
+        assert_eq!(
+            entry.get("model").and_then(|value| value.as_str()),
+            Some("gpt-5.5-thirdparty")
+        );
+        assert_eq!(
+            entry.get("id").and_then(|value| value.as_str()),
+            Some("gpt-5.5-thirdparty")
+        );
+        assert_eq!(
+            entry.get("displayName").and_then(|value| value.as_str()),
+            Some("Third-party GPT")
+        );
+        assert_eq!(
+            entry.get("upstreamModel").and_then(|value| value.as_str()),
+            Some("gpt-5.5")
+        );
+        assert_eq!(
+            entry.get("upstream_model").and_then(|value| value.as_str()),
+            Some("gpt-5.5")
+        );
+    }
+
+    #[test]
     fn codex_model_catalog_preserves_openai_gpt_speed_tiers() {
         let template = json!({
             "slug": "gpt-5.5",
@@ -3991,6 +4063,7 @@ openai_base_url = "http://127.0.0.1:15721/v1"
         });
         let spec = CodexCatalogModelSpec {
             model: "gpt-5.4".to_string(),
+            upstream_model: None,
             display_name: "GPT-5.4".to_string(),
             context_window: 272_000,
             text_only: false,
@@ -4034,6 +4107,7 @@ openai_base_url = "http://127.0.0.1:15721/v1"
         });
         let spec = CodexCatalogModelSpec {
             model: "gpt-5.4-mini".to_string(),
+            upstream_model: None,
             display_name: "GPT-5.4 Mini".to_string(),
             context_window: 128_000,
             text_only: false,
