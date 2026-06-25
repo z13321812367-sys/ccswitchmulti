@@ -1900,6 +1900,9 @@ export function CodexRouterWorkspacePage({
   const [routePickerSelectAll, setRoutePickerSelectAll] = useState(false);
   const [optimisticRoutingPlan, setOptimisticRoutingPlan] =
     useState<Provider | null>(null);
+  const [optimisticModelSourcesById, setOptimisticModelSourcesById] = useState<
+    Record<string, Provider>
+  >({});
   const [providerModelRefreshStates, setProviderModelRefreshStates] = useState<
     Record<string, ProviderModelRefreshState>
   >({});
@@ -1912,18 +1915,23 @@ export function CodexRouterWorkspacePage({
   const queryClient = useQueryClient();
 
   const effectiveProviders = useMemo(() => {
-    if (!optimisticRoutingPlan) return providers;
+    const optimisticSourceEntries = Object.entries(optimisticModelSourcesById);
+    const hasOptimisticSources = optimisticSourceEntries.length > 0;
+    if (!optimisticRoutingPlan && !hasOptimisticSources) return providers;
+
     const replaced = providers.map((provider) =>
-      provider.id === optimisticRoutingPlan.id
+      provider.id === optimisticRoutingPlan?.id
         ? optimisticRoutingPlan
-        : provider,
+        : (optimisticModelSourcesById[provider.id] ?? provider),
     );
-    return providers.some(
+    if (!optimisticRoutingPlan) return replaced;
+    const withRoutingPlan = providers.some(
       (provider) => provider.id === optimisticRoutingPlan.id,
     )
       ? replaced
       : [...providers, optimisticRoutingPlan];
-  }, [optimisticRoutingPlan, providers]);
+    return withRoutingPlan;
+  }, [optimisticModelSourcesById, optimisticRoutingPlan, providers]);
   const routingPlans = useMemo(
     () => effectiveProviders.filter(isRoutingPlan),
     [effectiveProviders],
@@ -2064,20 +2072,21 @@ export function CodexRouterWorkspacePage({
             return;
           }
           if (!isCurrentAttempt()) return;
-          queryClient.setQueryData(["providers", "codex"], (current: any) =>
-            current?.providers
-              ? {
-                  ...current,
-                  providers: {
-                    ...current.providers,
-                    [result.nextProvider.id]: result.nextProvider,
-                    ...Object.fromEntries(
-                      result.affectedPlans.map((plan) => [plan.id, plan]),
-                    ),
-                  },
-                }
-              : current,
-          );
+          setOptimisticModelSourcesById((current) => ({
+            ...current,
+            [result.nextProvider.id]: result.nextProvider,
+          }));
+          queryClient.setQueryData(["providers", "codex"], (current: any) => ({
+            ...(current ?? { currentProviderId: "" }),
+            providers: {
+              ...Object.fromEntries(providersById),
+              ...(current?.providers ?? {}),
+              [result.nextProvider.id]: result.nextProvider,
+              ...Object.fromEntries(
+                result.affectedPlans.map((plan) => [plan.id, plan]),
+              ),
+            },
+          }));
           const selectedAffectedPlan = result.affectedPlans.find(
             (plan) => plan.id === selectedPlanId,
           );
@@ -2173,6 +2182,42 @@ export function CodexRouterWorkspacePage({
       setOptimisticRoutingPlan(null);
     }
   }, [optimisticRoutingPlan, providers]);
+
+  // 普通 provider 的 /models 刷新会先写 DB，再等待父级 query refetch；这里保留短期覆盖层，
+  // 确保候选 router 和空 match route 立即消费新 catalog，同时在配置变化或父级追上后自动释放。
+  useEffect(() => {
+    setOptimisticModelSourcesById((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const [providerId, optimisticProvider] of Object.entries(current)) {
+        const persistedProvider = providers.find(
+          (provider) => provider.id === providerId,
+        );
+        if (!persistedProvider) {
+          delete next[providerId];
+          changed = true;
+          continue;
+        }
+
+        const persistedAttemptKey = buildProviderModelRefreshAttemptKey(
+          providerId,
+          getProviderModelFetchConfig(persistedProvider),
+        );
+        const optimisticAttemptKey = buildProviderModelRefreshAttemptKey(
+          providerId,
+          getProviderModelFetchConfig(optimisticProvider),
+        );
+        const catalogPersisted =
+          JSON.stringify(persistedProvider.settingsConfig?.modelCatalog) ===
+          JSON.stringify(optimisticProvider.settingsConfig?.modelCatalog);
+        if (persistedAttemptKey !== optimisticAttemptKey || catalogPersisted) {
+          delete next[providerId];
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [providers]);
 
   /// 新建 MultiRouter 直接创建带 codexRouting 的工作台 provider，不再打开普通供应商表单。
   async function handleCreatePlan() {

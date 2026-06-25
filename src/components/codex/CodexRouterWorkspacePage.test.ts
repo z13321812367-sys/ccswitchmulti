@@ -516,6 +516,66 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("refreshes visible route picker candidates after provider catalog save without parent refetch", async () => {
+    const refresh = createDeferred<FetchedModel[]>();
+    vi.mocked(fetchModelsForConfig).mockReturnValueOnce(refresh.promise);
+    const provider: Provider = {
+      id: "codex-empty-catalog-source",
+      name: "Empty Catalog Source",
+      category: "custom",
+      settingsConfig: {
+        baseUrl: "https://empty-catalog.example/v1",
+        auth: { OPENAI_API_KEY: "key-empty-catalog" },
+        modelCatalog: { models: [] },
+      },
+    };
+    const plan = createDraftRoutingPlan([provider], [provider]);
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [provider, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "routes",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    await waitFor(() => expect(fetchModelsForConfig).toHaveBeenCalledTimes(1));
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "编辑匹配规则" }));
+    expect(
+      screen.getByText("未发现模型目录，保存后可在模型源补充目录"),
+    ).toBeInTheDocument();
+
+    refresh.resolve([{ id: "fresh-route-model", ownedBy: null }]);
+    await waitFor(() =>
+      expect(
+        vi
+          .mocked(providersApi.update)
+          .mock.calls.some(
+            ([savedProvider]) =>
+              savedProvider.id === provider.id &&
+              JSON.stringify(savedProvider.settingsConfig).includes(
+                "fresh-route-model",
+              ),
+          ),
+      ).toBe(true),
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText("fresh-route-model")).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByText("未发现模型目录，保存后可在模型源补充目录"),
+    ).not.toBeInTheDocument();
+  });
+
   it("keeps a visible alias when route page refreshes provider models from upstream ids", async () => {
     vi.mocked(fetchModelsForConfig).mockResolvedValueOnce([
       { id: "gpt-5.5", ownedBy: null, contextWindow: 272000 },

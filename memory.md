@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-06-26 MultiRouter Model Refresh UI Stale Catalog Fix
+
+- 新版仍出现“加载模型列表卡住 / UI 没刷新”时，要区分两类问题：`v3.16.3-21` 已解决 `/models` 读取或保存事务不 settle 导致永久 loading；本次发现的剩余边界是刷新成功后 `nextProvider` 写入 DB/React Query，但当前 `CodexRouterWorkspacePage` 的 `modelSources` 仍可能来自父级旧 `providers` props，导致已打开的 `RouteCandidatePicker` 继续显示旧 catalog 或“未发现模型目录”。
+- 根因位置是 `src/components/codex/CodexRouterWorkspacePage.tsx`：旧 `effectiveProviders` 只叠加 `optimisticRoutingPlan`，没有叠加普通模型源的刷新结果；同时刷新成功分支的 `queryClient.setQueryData(["providers","codex"])` 在 cache 尚无 `providers` 字段时会返回旧引用，不能保证触发 UI 更新。
+- 修复方式是新增 `optimisticModelSourcesById`，在 `fetchModelsForConfig -> providersApi.update(nextProvider)` 成功后立即把普通 provider 的新 catalog 叠加进 `effectiveProviders`，让候选 router 和空 match route 立刻读取新模型；当父级 props 的 catalog 追上或 provider 连接配置/baseUrl/API key 变化时自动释放 overlay，避免旧 catalog 长期压住新配置。
+- 回归测试新增 `refreshes visible route picker candidates after provider catalog save without parent refetch`：provider 初始 catalog 为空，打开候选选择器时显示“未发现模型目录”，`/models` 返回 `fresh-route-model` 且保存成功后，在不模拟父级 refetch 的情况下候选卡片必须立刻显示 `fresh-route-model` 并移除空目录提示。
+- 本轮验证：`pnpm test:unit -- src/components/codex/CodexRouterWorkspacePage.test.ts`（21 个测试通过）、`pnpm typecheck`、`pnpm build:renderer`、`git diff --check`。renderer build 仍只有既有 baseline/browserlist/大 chunk 警告。
+
 ## 2026-06-25 CCSwitchMulti v3.16.3-21 Prerelease
 
 - `v3.16.3-21` 已作为 GitHub prerelease 发布：`https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.16.3-21`。tag 指向 `554bed1c chore(release): prepare v3.16.3-21 hotfix`，业务修复来自 `966a8e38 fix(codex): settle model refresh save-back hangs`。
