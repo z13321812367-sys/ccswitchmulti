@@ -322,6 +322,16 @@ pub fn codex_auth_has_oauth_login_material(auth: &Value) -> bool {
     })
 }
 
+/// 判断当前 live `auth.json` 是否已有真实 ChatGPT/Codex OAuth 登录材料。
+///
+/// official provider 的 DB 快照可能是旧 OAuth token；当 live auth 已经有当前登录态时，
+/// 切回 official 只应刷新 `config.toml`，不能用 DB 快照覆盖 `auth.json`。
+fn live_codex_auth_has_oauth_login_material() -> bool {
+    read_json_file(&get_codex_auth_path())
+        .ok()
+        .is_some_and(|auth| codex_auth_has_oauth_login_material(&auth))
+}
+
 pub fn should_restore_codex_provider_token_for_backfill(
     category: Option<&str>,
     template_settings: &Value,
@@ -2508,8 +2518,8 @@ pub fn strip_codex_unified_session_bucket_from_settings(
 /// Route a Codex live write between full auth+config or config-only.
 ///
 /// Official providers with usable login material own `auth.json`. Third-party
-/// providers only touch `config.toml` when the compatibility setting is enabled
-/// so the user's ChatGPT login cache survives provider switches.
+/// providers only touch `config.toml`, keeping their bearer token in the active
+/// model provider table so the user's ChatGPT login cache survives switches.
 ///
 /// 统一会话开关开启时，官方配置在落盘前注入共享的 `custom` 路由
 /// （见 `inject_codex_unified_session_bucket`）。
@@ -2528,9 +2538,9 @@ pub fn write_codex_live_for_provider(
         };
     let config_text = unified_official_config.as_deref().or(config_text);
 
-    let should_write_auth = (category == Some("official") && codex_auth_has_login_material(auth))
-        || (category != Some("official")
-            && !crate::settings::preserve_codex_official_auth_on_switch());
+    let should_write_auth = category == Some("official")
+        && codex_auth_has_login_material(auth)
+        && !live_codex_auth_has_oauth_login_material();
     let merged_config = config_text
         .map(merge_codex_provider_config_with_live)
         .transpose()?;
@@ -3001,6 +3011,116 @@ base_url = "https://single.example.com/v1"
         assert!(
             err.to_string().contains("config.toml"),
             "error should explain missing config.toml, got: {err}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn third_party_live_write_preserves_existing_codex_oauth_auth() {
+        let _home = TestHomeGuard::new();
+        let live_oauth = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": "live-access",
+                "refresh_token": "live-refresh"
+            }
+        });
+        write_codex_live_atomic(
+            &live_oauth,
+            Some(
+                r#"model_provider = "openai"
+model = "gpt-5.5"
+"#,
+            ),
+        )
+        .expect("seed live OAuth auth");
+
+        write_codex_live_for_provider(
+            Some("custom"),
+            &json!({ "OPENAI_API_KEY": "third-party-key" }),
+            Some(
+                r#"model_provider = "rightcode"
+model = "gpt-5.5"
+
+[model_providers.rightcode]
+name = "RightCode"
+base_url = "https://rightcode.example/v1"
+wire_api = "responses"
+"#,
+            ),
+        )
+        .expect("write third-party provider");
+
+        let live_auth: Value =
+            crate::config::read_json_file(&get_codex_auth_path()).expect("read live auth");
+        assert_eq!(
+            live_auth, live_oauth,
+            "third-party provider switches must not overwrite Codex OAuth auth.json"
+        );
+
+        let live_config = read_codex_config_text().expect("read live config");
+        assert!(
+            live_config.contains("experimental_bearer_token = \"third-party-key\""),
+            "third-party API key should be stored in config.toml, not auth.json"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn official_live_write_preserves_current_oauth_auth_over_stale_db_snapshot() {
+        let _home = TestHomeGuard::new();
+        let live_oauth = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": "current-access",
+                "refresh_token": "current-refresh"
+            }
+        });
+        let stale_db_oauth = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": "stale-access",
+                "refresh_token": "stale-refresh"
+            }
+        });
+        write_codex_live_atomic(
+            &live_oauth,
+            Some(
+                r#"model_provider = "custom"
+model = "gpt-5.5"
+
+[model_providers.custom]
+name = "Relay"
+base_url = "https://relay.example/v1"
+wire_api = "responses"
+experimental_bearer_token = "relay-key"
+"#,
+            ),
+        )
+        .expect("seed live OAuth auth with third-party config");
+
+        write_codex_live_for_provider(
+            Some("official"),
+            &stale_db_oauth,
+            Some(
+                r#"model_provider = "openai"
+model = "gpt-5.5"
+"#,
+            ),
+        )
+        .expect("switch back to official");
+
+        let live_auth: Value =
+            crate::config::read_json_file(&get_codex_auth_path()).expect("read live auth");
+        assert_eq!(
+            live_auth, live_oauth,
+            "switching back to official must keep the current live OAuth auth.json"
+        );
+
+        let live_config = read_codex_config_text().expect("read live config");
+        assert!(
+            !live_config.contains("relay-key"),
+            "official config switch should clean stale third-party bearer token"
         );
     }
 

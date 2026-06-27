@@ -4495,7 +4495,7 @@ experimental_bearer_token = "PROXY_MANAGED"
 
     #[test]
     #[serial]
-    fn codex_custom_provider_live_write_can_overwrite_auth_when_preserve_disabled() {
+    fn codex_custom_provider_live_write_preserves_oauth_auth_even_when_preserve_disabled() {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
         crate::settings::update_settings(crate::settings::AppSettings {
@@ -4565,18 +4565,19 @@ wire_api = "responses"
             crate::config::read_json_file(&crate::codex_config::get_codex_auth_path())
                 .expect("read live auth");
         assert_eq!(
-            live_auth,
-            json!({
-                "OPENAI_API_KEY": PROXY_TOKEN_PLACEHOLDER
-            }),
-            "disabled preservation should let third-party switches overwrite auth.json"
+            live_auth, oauth_auth,
+            "third-party Codex switches must not overwrite ChatGPT OAuth auth.json"
         );
 
         let live_config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
             .expect("read live config");
         assert!(
-            !live_config.contains("experimental_bearer_token"),
-            "provider token should stay in auth.json when preservation is disabled"
+            live_config.contains("experimental_bearer_token"),
+            "provider token should move into config.toml even when preservation is disabled"
+        );
+        assert!(
+            live_config.contains(PROXY_TOKEN_PLACEHOLDER),
+            "config.toml should carry the provider/proxy bearer placeholder"
         );
 
         crate::settings::update_settings(crate::settings::AppSettings::default())
