@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-06-28 CCSwitchMulti v3.16.4-1 Prerelease
+
+- `v3.16.4-1` 已作为 BigStrongSun/ccswitchmulti 的 GitHub prerelease 发布：`https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.16.4-1`。Release 为非 draft、`prerelease=true`，发布时间为 `2026-06-27T20:52:24Z`，target commit 为 `e0228d531d1a7086a808d706e6ecb2618de44f4c`（`docs(memory): record completed v3.16.4-1 merge`）。
+- 本地 Windows release pipeline 成功，导出目录为 `C:\Users\sunda\Documents\LLMservice\最新版ccswitchmulti`，完成时间 `2026-06-28 04:50:26 +08:00`。raw exe `CCSwitchMulti_3.16.4-1_x64.exe` 的 FileVersion/ProductVersion 均验证为 `3.16.4-1`，`latest.json` 指向 `https://github.com/BigStrongSun/ccswitchmulti/releases/download/v3.16.4-1/CCSwitchMulti_3.16.4-1_x64-setup.exe`。
+- 本次 prerelease 上传 8 个资产：`CCSwitchMulti_3.16.4-1_x64-setup.exe`、安装包 `.sig`、`CCSwitchMulti_3.16.4-1_x64-portable.zip`、`CCSwitchMulti_3.16.4-1_x64.exe`、`latest.json`、`SHA256SUMS.txt`、`linux-build-note.md`、`macos-build-note.md`。Linux/macOS 正式二进制未在 Windows 本地构建，后续需要 supplemental workflow 或对应平台构建补齐。
+- 发布前后验证：`pnpm release:local` 运行了 `pnpm typecheck` 并完成 Tauri NSIS Windows x64 build；使用本地 `C:\Users\sunda\.ccswitchmulti\tauri-update.key` 生成 updater 签名；`gh release view v3.16.4-1 --repo BigStrongSun/ccswitchmulti --json tagName,targetCommitish,isDraft,isPrerelease,publishedAt,url,assets` 复核 release 状态和资产摘要；`SHA256SUMS.txt` 中 Windows 资产 hash 与 GitHub release asset digest 对应。
+
 ## 2026-06-28 CCSwitchMulti v3.16.4-1 Official Merge Completed
 
 - `codex/merge-official-v3.16.4` 已完成官方 `farion1231/cc-switch` `v3.16.4` 跟进，版本面更新为 `3.16.4-1`。不要把它理解成直接 merge 官方 tag；这次按 `45555638..e50fc0eb` 的缺口逐个 cherry-pick / 手工合并，保留了 `cc-switch-multi`、`CCSwitchMulti`、`com.ccswitchmulti.desktop`、BigStrongSun updater、MultiRouter workspace、外部 OpenAI-compatible API、Codex history repair、WebDAV/S3 sync 和 fork release 脚本。
