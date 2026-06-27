@@ -83,6 +83,7 @@ const CC_SWITCH_LEGACY_CODEX_MODEL_PROVIDER_IDS: &[&str] = &[
     "dmxapi",
     "doubaoseed",
     "eflowcode",
+    "etok",
     "kimi",
     "lemondata",
     "longcat",
