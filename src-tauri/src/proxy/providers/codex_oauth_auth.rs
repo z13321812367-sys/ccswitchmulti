@@ -187,12 +187,6 @@ struct CodexAccountData {
     pub email: Option<String>,
     /// Refresh Token（持久化）
     pub refresh_token: String,
-    /// 最近一次可用的 access_token；用于重启/睡眠恢复后减少 refresh_token 消耗
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub access_token: Option<String>,
-    /// access_token 的过期时间戳（毫秒）；缺失或即将过期时必须重新 refresh
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub access_token_expires_at_ms: Option<i64>,
     /// 认证时间戳（秒）
     pub authenticated_at: i64,
 }
@@ -423,29 +417,20 @@ impl CodexOAuthManager {
             CodexOAuthError::ParseError("无法从 token 中提取 account_id".to_string())
         })?;
 
-        let expires_at_ms = compute_expires_at_ms(tokens.expires_in);
-
-        // 缓存 access_token，并随账号记录持久化一份短期 token，
-        // 避免应用重启或睡眠恢复后在 access token 仍有效时立刻消耗 refresh token。
+        // access_token 是短期 Bearer 凭据，只放内存；长期恢复依赖磁盘里的 refresh_token。
         {
             let mut tokens_cache = self.access_tokens.write().await;
             tokens_cache.insert(
                 account_id.clone(),
                 CachedAccessToken {
                     token: tokens.access_token.clone(),
-                    expires_at_ms,
+                    expires_at_ms: compute_expires_at_ms(tokens.expires_in),
                 },
             );
         }
 
         let account = self
-            .add_account_internal(
-                account_id,
-                refresh_token,
-                email,
-                Some(tokens.access_token),
-                Some(expires_at_ms),
-            )
+            .add_account_internal(account_id, refresh_token, email)
             .await?;
 
         Ok(Some(account))
@@ -523,39 +508,10 @@ impl CodexOAuthManager {
             .map_err(|e| CodexOAuthError::ParseError(e.to_string()))
     }
 
-    /// 尝试从持久化账号记录恢复仍有效的 access_token。
-    ///
-    /// refresh_token 才是长期凭据；access_token 只是短期缓存。这里必须检查
-    /// 过期时间和刷新缓冲，避免把即将过期的 token 重新放回热路径。
-    async fn load_persisted_access_token(&self, account_id: &str) -> Option<String> {
-        let persisted = {
-            let accounts = self.accounts.read().await;
-            accounts.get(account_id).and_then(|account| {
-                let token = account.access_token.clone()?;
-                let expires_at_ms = account.access_token_expires_at_ms?;
-                Some(CachedAccessToken {
-                    token,
-                    expires_at_ms,
-                })
-            })
-        }?;
-
-        if persisted.is_expiring_soon() {
-            return None;
-        }
-
-        {
-            let mut tokens = self.access_tokens.write().await;
-            tokens.insert(account_id.to_string(), persisted.clone());
-        }
-
-        Some(persisted.token)
-    }
-
     /// 获取指定账号的 refresh_token。
     ///
     /// 读取逻辑独立出来是为了让 access_token 持久缓存与 refresh fallback 的
-    /// 顺序更清晰：先内存、再磁盘短期 token、最后才消耗 refresh token。
+    /// 顺序更清晰：先用内存短期 access_token，只有缺失或过期时才读取 refresh token。
     async fn persisted_refresh_token(&self, account_id: &str) -> Result<String, CodexOAuthError> {
         let accounts = self.accounts.read().await;
         accounts
@@ -581,10 +537,6 @@ impl CodexOAuthManager {
             }
         }
 
-        if let Some(token) = self.load_persisted_access_token(account_id).await {
-            return Ok(token);
-        }
-
         log::info!("[CodexOAuth] 账号 {account_id} 的 access_token 需要刷新");
 
         let refresh_lock = self.get_refresh_lock(account_id).await;
@@ -598,10 +550,6 @@ impl CodexOAuthManager {
                     return Ok(cached.token.clone());
                 }
             }
-        }
-
-        if let Some(token) = self.load_persisted_access_token(account_id).await {
-            return Ok(token);
         }
 
         let refresh_token = self.persisted_refresh_token(account_id).await?;
@@ -619,22 +567,23 @@ impl CodexOAuthManager {
         let access_token = new_tokens.access_token.clone();
         let expires_at_ms = compute_expires_at_ms(new_tokens.expires_in);
 
-        // refresh 成功后同时持久化轮换后的 refresh_token 与短期 access_token。
-        // 这样状态查询、应用重启和短睡眠恢复都优先复用未过期 access_token，
-        // 减少 refresh_token 被频繁使用或并发轮换的机会。
+        // refresh 成功后只持久化服务端轮换的新 refresh_token；
+        // access_token 仍只放内存，保持与原版 cc-switch 的凭据边界一致。
+        let mut should_save = false;
         {
             let mut accounts = self.accounts.write().await;
             if let Some(account) = accounts.get_mut(account_id) {
                 if let Some(new_refresh) = new_tokens.refresh_token.clone() {
                     if new_refresh != refresh_token {
                         account.refresh_token = new_refresh;
+                        should_save = true;
                     }
                 }
-                account.access_token = Some(access_token.clone());
-                account.access_token_expires_at_ms = Some(expires_at_ms);
             }
         }
-        self.save_to_disk().await?;
+        if should_save {
+            self.save_to_disk().await?;
+        }
 
         {
             let mut tokens = self.access_tokens.write().await;
@@ -759,7 +708,6 @@ impl CodexOAuthManager {
 
     /// 获取认证状态摘要（与 Copilot 的格式保持一致，便于复用前端）
     pub async fn get_status(&self) -> CodexOAuthStatus {
-        let auth_error = self.validate_status_default_account().await;
         let accounts_map = self.accounts.read().await.clone();
         let default_id = self.resolve_default_account_id().await;
         let account_list = Self::sorted_accounts(&accounts_map, default_id.as_deref());
@@ -775,44 +723,10 @@ impl CodexOAuthManager {
             default_account_id: default_id,
             authenticated,
             username,
-            auth_error,
         }
     }
 
     // ==================== 内部方法 ====================
-
-    /// 状态查询时验证当前默认账号是否还能刷新 access token。
-    ///
-    /// 休眠/唤醒或长时间未使用后，内存 access token 通常已经过期，
-    /// 旧实现只看磁盘里是否存在 refresh token，导致 UI 仍显示已登录，
-    /// 真实请求才暴露 401。这里仅在服务端明确返回 refresh token 失效时
-    /// 清理账号；网络错误、解析错误等保留账号，避免短暂断网误退出登录。
-    async fn validate_status_default_account(&self) -> Option<String> {
-        let max_attempts = self.accounts.read().await.len();
-
-        for _ in 0..max_attempts {
-            let Some(account_id) = self.resolve_default_account_id().await else {
-                return None;
-            };
-
-            match self.get_valid_token_for_account(&account_id).await {
-                Ok(_) => return None,
-                Err(CodexOAuthError::RefreshTokenInvalid) => {
-                    log::warn!(
-                        "[CodexOAuth] 状态检查发现 refresh_token 已失效，已移除账号: {account_id}"
-                    );
-                    continue;
-                }
-                Err(CodexOAuthError::AccountNotFound(_)) => continue,
-                Err(e) => {
-                    log::warn!("[CodexOAuth] 状态检查无法验证账号 {account_id}: {e}");
-                    return Some(format!("认证状态验证失败：{e}"));
-                }
-            }
-        }
-
-        None
-    }
 
     /// 在刷新明确失败时清理对应账号和内存 token。
     ///
@@ -831,8 +745,6 @@ impl CodexOAuthManager {
         account_id: String,
         refresh_token: String,
         email: Option<String>,
-        access_token: Option<String>,
-        access_token_expires_at_ms: Option<i64>,
     ) -> Result<GitHubAccount, CodexOAuthError> {
         let now = chrono::Utc::now().timestamp();
 
@@ -840,8 +752,6 @@ impl CodexOAuthManager {
             account_id: account_id.clone(),
             email,
             refresh_token,
-            access_token,
-            access_token_expires_at_ms,
             authenticated_at: now,
         };
 
@@ -1030,8 +940,6 @@ pub struct CodexOAuthStatus {
     pub default_account_id: Option<String>,
     pub authenticated: bool,
     pub username: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_error: Option<String>,
 }
 
 // ==================== 工具函数 ====================
@@ -1227,8 +1135,6 @@ mod tests {
                     "acc-123".to_string(),
                     "rt-secret".to_string(),
                     Some("user@example.com".to_string()),
-                    None,
-                    None,
                 )
                 .await
                 .unwrap();
@@ -1251,8 +1157,6 @@ mod tests {
                 "acc-123".to_string(),
                 "rt".to_string(),
                 Some("a@example.com".to_string()),
-                None,
-                None,
             )
             .await
             .unwrap();
@@ -1261,8 +1165,6 @@ mod tests {
                 "acc-456".to_string(),
                 "rt2".to_string(),
                 Some("b@example.com".to_string()),
-                None,
-                None,
             )
             .await
             .unwrap();
@@ -1311,7 +1213,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn status_check_removes_account_when_refresh_token_is_invalid() {
+    async fn get_status_does_not_refresh_or_remove_invalid_account() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = CodexOAuthManager::new_with_oauth_token_url(
+            temp.path().to_path_buf(),
+            "http://127.0.0.1:9/oauth/token".to_string(),
+        );
+
+        manager
+            .add_account_internal(
+                "acc-expired".to_string(),
+                "rt-expired".to_string(),
+                Some("expired@example.com".to_string()),
+            )
+            .await
+            .unwrap();
+
+        let status = manager.get_status().await;
+
+        assert!(status.authenticated);
+        assert_eq!(status.accounts.len(), 1);
+        assert_eq!(status.default_account_id.as_deref(), Some("acc-expired"));
+    }
+
+    #[tokio::test]
+    async fn token_request_removes_account_when_refresh_token_is_invalid() {
         let temp = tempfile::tempdir().unwrap();
         let token_url = spawn_single_refresh_endpoint(401, r#"{"error":"invalid_grant"}"#).await;
         let manager =
@@ -1322,14 +1248,14 @@ mod tests {
                 "acc-expired".to_string(),
                 "rt-expired".to_string(),
                 Some("expired@example.com".to_string()),
-                None,
-                None,
             )
             .await
             .unwrap();
 
+        let result = manager.get_valid_token_for_account("acc-expired").await;
         let status = manager.get_status().await;
 
+        assert!(matches!(result, Err(CodexOAuthError::RefreshTokenInvalid)));
         assert!(!status.authenticated);
         assert!(status.accounts.is_empty());
         assert!(status.default_account_id.is_none());
@@ -1339,7 +1265,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn status_check_refreshes_expired_default_account_when_token_is_valid() {
+    async fn token_request_refreshes_expired_default_account_when_token_is_valid() {
         let temp = tempfile::tempdir().unwrap();
         let token_url = spawn_single_refresh_endpoint(
             200,
@@ -1354,17 +1280,15 @@ mod tests {
                 "acc-valid".to_string(),
                 "old-refresh".to_string(),
                 Some("valid@example.com".to_string()),
-                None,
-                None,
             )
             .await
             .unwrap();
 
-        let status = manager.get_status().await;
         let token = manager
             .get_valid_token_for_account("acc-valid")
             .await
             .unwrap();
+        let status = manager.get_status().await;
 
         assert!(status.authenticated);
         assert_eq!(status.accounts.len(), 1);
@@ -1377,37 +1301,5 @@ mod tests {
                 .map(|account| account.refresh_token.as_str()),
             Some("fresh-refresh")
         );
-    }
-
-    #[tokio::test]
-    async fn persisted_access_token_survives_restart_without_refresh() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().to_path_buf();
-        let expires_at_ms = chrono::Utc::now().timestamp_millis() + 3_600_000;
-
-        {
-            let manager = CodexOAuthManager::new(path.clone());
-            manager
-                .add_account_internal(
-                    "acc-cached".to_string(),
-                    "refresh-should-not-be-used".to_string(),
-                    Some("cached@example.com".to_string()),
-                    Some("persisted-access".to_string()),
-                    Some(expires_at_ms),
-                )
-                .await
-                .unwrap();
-        }
-
-        let manager = CodexOAuthManager::new_with_oauth_token_url(
-            path,
-            "http://127.0.0.1:9/oauth/token".to_string(),
-        );
-        let token = manager
-            .get_valid_token_for_account("acc-cached")
-            .await
-            .unwrap();
-
-        assert_eq!(token, "persisted-access");
     }
 }

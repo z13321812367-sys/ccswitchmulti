@@ -216,7 +216,7 @@ pub async fn auth_get_status(
                 provider: auth_provider.to_string(),
                 authenticated: status.authenticated,
                 default_account_id: default_account_id.clone(),
-                migration_error: status.auth_error,
+                migration_error: None,
                 accounts: status
                     .accounts
                     .into_iter()
