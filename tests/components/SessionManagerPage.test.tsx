@@ -101,7 +101,9 @@ function renderPageWithRepair({
         <SessionManagerPage
           appId={appId}
           initialCodexHistoryRepair={initialCodexHistoryRepair}
-          onInitialCodexHistoryRepairConsumed={onInitialCodexHistoryRepairConsumed}
+          onInitialCodexHistoryRepairConsumed={
+            onInitialCodexHistoryRepairConsumed
+          }
           onCodexHistoryRepairCompleted={onCodexHistoryRepairCompleted}
         />
       </QueryClientProvider>,
@@ -122,8 +124,8 @@ const openSearch = () => {
 };
 
 const closeSearch = () => {
-  const closeButton = Array.from(screen.getAllByRole("button")).find(
-    (button) => button.querySelector(".lucide-x"),
+  const closeButton = Array.from(screen.getAllByRole("button")).find((button) =>
+    button.querySelector(".lucide-x"),
   );
 
   if (!closeButton) {
@@ -382,6 +384,12 @@ describe("SessionManagerPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Codex 历史修复")).toBeInTheDocument();
     });
+
+    expect(
+      screen.getByText(
+        "MultiRouter 已配置成功，现在按顺序完成历史记录自动修复",
+      ),
+    ).toBeInTheDocument();
 
     // 一次性标记应已被消费
     expect(onConsumed).toHaveBeenCalledTimes(1);

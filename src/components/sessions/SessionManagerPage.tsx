@@ -109,6 +109,8 @@ export function SessionManagerPage({
   );
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [showCodexHistoryRepair, setShowCodexHistoryRepair] = useState(false);
+  const [showCodexHistoryRepairGuide, setShowCodexHistoryRepairGuide] =
+    useState(false);
   const isCodexManager = appId === "codex";
 
   // 使用 FlexSearch 全文搜索
@@ -138,6 +140,7 @@ export function SessionManagerPage({
 
   useEffect(() => {
     setShowCodexHistoryRepair(false);
+    setShowCodexHistoryRepairGuide(false);
   }, [isCodexManager]);
 
   // MultiRouter 向导完成后会把用户直接带到 Codex 历史修复页；消费一次后交回普通手动切换。
@@ -145,6 +148,7 @@ export function SessionManagerPage({
     if (!isCodexManager || !initialCodexHistoryRepair) return;
     setProviderFilter("codex");
     setShowCodexHistoryRepair(true);
+    setShowCodexHistoryRepairGuide(true);
     onInitialCodexHistoryRepairConsumed?.();
   }, [
     initialCodexHistoryRepair,
@@ -738,7 +742,10 @@ export function SessionManagerPage({
                             showCodexHistoryRepair ? "secondary" : "ghost"
                           }
                           className="h-8 justify-start gap-2 px-2.5 text-xs"
-                          onClick={() => setShowCodexHistoryRepair(true)}
+                          onClick={() => {
+                            setShowCodexHistoryRepair(true);
+                            setShowCodexHistoryRepairGuide(false);
+                          }}
                         >
                           <FileClock className="size-3.5" />
                           <span className="truncate">历史修复</span>
@@ -750,7 +757,10 @@ export function SessionManagerPage({
                             showCodexHistoryRepair ? "ghost" : "secondary"
                           }
                           className="h-8 justify-start gap-2 px-2.5 text-xs"
-                          onClick={() => setShowCodexHistoryRepair(false)}
+                          onClick={() => {
+                            setShowCodexHistoryRepair(false);
+                            setShowCodexHistoryRepairGuide(false);
+                          }}
                         >
                           <MessageSquare className="size-3.5" />
                           <span className="truncate">会话浏览</span>
@@ -882,7 +892,11 @@ export function SessionManagerPage({
               >
                 <CodexHistoryRepairPanel
                   initialProjectPath={selectedSession?.projectDir}
-                  onClose={() => setShowCodexHistoryRepair(false)}
+                  onClose={() => {
+                    setShowCodexHistoryRepair(false);
+                    setShowCodexHistoryRepairGuide(false);
+                  }}
+                  showAutomationGuide={showCodexHistoryRepairGuide}
                   onRepairApplied={onCodexHistoryRepairCompleted}
                 />
               </div>

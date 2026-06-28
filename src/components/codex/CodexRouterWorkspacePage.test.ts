@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { providersApi } from "@/lib/api";
 import { fetchModelsForConfig, type FetchedModel } from "@/lib/api/model-fetch";
 import type { Provider } from "@/types";
+import type { PaginatedLogs, RequestLog } from "@/types/usage";
 import {
   applyMultiRouterSettingsDraft,
   buildMultiRouterRuntimeStatus,
@@ -20,6 +21,13 @@ import {
   readCodexRouting,
   validateProxyListenDraft,
 } from "./CodexRouterWorkspacePage";
+
+const requestLogsFixture = vi.hoisted(() => ({
+  value: { data: [], isLoading: false } as {
+    data: PaginatedLogs | [];
+    isLoading: boolean;
+  },
+}));
 
 vi.mock("@/lib/api/proxy", () => ({
   proxyApi: {
@@ -51,7 +59,7 @@ vi.mock("@/lib/query/usage", () => ({
     isLoading: false,
     error: null,
   }),
-  useRequestLogs: () => ({ data: [], isLoading: false }),
+  useRequestLogs: () => requestLogsFixture.value,
 }));
 
 vi.mock("@/lib/api", () => ({
@@ -91,7 +99,36 @@ function renderWorkspace(ui: React.ReactElement) {
   );
 }
 
+/// 构造状态页所需的最小代理日志；测试只关心 Codex 最近一次真实转发是否成功。
+function createCodexProxyLog(overrides: Partial<RequestLog> = {}): RequestLog {
+  return {
+    requestId: "req-1",
+    providerId: "codex-router",
+    providerName: "Codex MultiRouter",
+    appType: "codex",
+    model: "gpt-5.4-mini",
+    requestModel: "gpt-5.4-mini",
+    costMultiplier: "1",
+    inputTokens: 1,
+    outputTokens: 1,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    inputCostUsd: "0",
+    outputCostUsd: "0",
+    cacheReadCostUsd: "0",
+    cacheCreationCostUsd: "0",
+    totalCostUsd: "0",
+    isStreaming: false,
+    latencyMs: 100,
+    statusCode: 200,
+    createdAt: Date.now(),
+    dataSource: "proxy",
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
+  requestLogsFixture.value = { data: [], isLoading: false };
   vi.mocked(fetchModelsForConfig).mockReset();
   vi.mocked(providersApi.add).mockResolvedValue(true);
   vi.mocked(providersApi.update).mockResolvedValue(true);
@@ -1398,15 +1435,19 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     };
     const onRuntimeReady = vi.fn();
 
-    // 直接修改 requestLogsFixture：返回一条 200 成功的请求日志，让 latestForwardOk=true
     requestLogsFixture.value = {
-      data: [
-        createCodexProxyLog({
-          providerId: "codex-online-source",
-          model: "test-model",
-          requestModel: "test-model",
-        }),
-      ],
+      data: {
+        data: [
+          createCodexProxyLog({
+            providerId: "codex-online-source",
+            model: "test-model",
+            requestModel: "test-model",
+          }),
+        ],
+        total: 1,
+        page: 0,
+        pageSize: 500,
+      },
       isLoading: false,
     };
 
@@ -1417,7 +1458,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         isCodexTakeoverActive: true,
         activeProviderId: routedPlan.id,
         initialProviderId: routedPlan.id,
-        initialTab: "routes",
+        initialTab: "status",
         onEditProvider: vi.fn(),
         onDeletePlan: vi.fn(),
         onCreateProvider: vi.fn(),

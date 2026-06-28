@@ -965,7 +965,7 @@ function App() {
     };
   };
 
-  // 历史修复写入完成后，先提示重启 Codex，再征求点赞并用默认浏览器打开项目主页。
+  // 历史修复写入完成后，先提示重启 Codex，再征求点赞并用默认浏览器打开 CCSwitchMulti 仓库。
   const handleCodexHistoryRepairCompleted = async () => {
     toast.success("历史记录修复已完成。请完整重启 Codex 后再继续使用。", {
       closeButton: true,
@@ -975,12 +975,14 @@ function App() {
       [
         "历史记录修复已完成，请完整重启 Codex，让侧边栏和模型状态重新加载。",
         "",
-        "如果 CCSwitchMulti 这套 MultiRouter 配置帮到了你，可以帮我点个赞吗？",
-        "点击“确定”会用默认浏览器打开 CCSwitchMulti 主页。",
+        "如果 CCSwitchMulti 这套 MultiRouter 配置帮到了你，可以帮我在 GitHub 仓库点个 Star 吗？",
+        "点击“确定”会用默认浏览器打开 CCSwitchMulti 的 GitHub 仓库页面。",
       ].join("\n"),
     );
     if (shouldOpenHome) {
-      await settingsApi.openExternal("https://ccswitch.io");
+      await settingsApi.openExternal(
+        "https://github.com/BigStrongSun/ccswitchmulti",
+      );
     }
   };
 
