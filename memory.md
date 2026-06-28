@@ -7,16 +7,22 @@
 - 目前 `/models` 刷新只读取模型 id、owned_by、context_window 等元数据并写回 `modelCatalog`，`CodexCatalogModel` 和 `CodexRoutingCapabilities` 只有图片/文本/推理相关能力，没有 `supportsResponses` / per-model `apiFormat` 字段。状态页“协议探测”读取配置判定和 `codex-router.log` 最近真实请求的 `effective_endpoint/responses_to_chat`，不会主动请求远端 `/v1/responses`，所以不会自动发现某个模型不支持 Responses。
 - 若后续实现在线探测，应做成显式手动/批量按钮而不是自动刷新时静默执行：对每个候选模型发最小 `/v1/responses` 探测请求，识别 404/405/400 unsupported endpoint/model 等结果并缓存到 provider `modelCatalog.models[].supportsResponses` 或 `apiFormat`；探测会消耗额度、可能触发供应商限流，也可能误判“模型不支持”与“账号无权限/渠道暂不可用”，因此结果应带时间戳、错误摘要和手动覆盖入口。
 
+## 2026-06-28 Responses-Lite Header Retry Fallback Policy
+
+- 用户指出“第三方一律剥 `x-openai-internal-codex-responses-lite`”仍然过宽，因为未来第三方上游可能支持 Responses-Lite，提前砍掉 header 可能影响它们自己的 Lite 路径、prompt cache 或其它能力协商。策略已改成 optimistic pass-through：默认保留该 header 发给上游，只有上游明确返回 `This model is not supported when using X-OpenAI-Internal-Codex-Responses-Lite.` 这类错误时，才剥离 header 并对同一个 provider 重发一次。
+- 实现落点仍在 `src-tauri/src/proxy/forwarder.rs`。发送前不再调用静态 strip helper；错误响应体读取并解压后调用 `should_retry_without_codex_responses_lite_header()` 判断，条件是 `AppType::Codex`、请求里确实有 Lite header、状态码为 `400/404/422/501` 之一、错误体包含精确 Lite 不支持文本。命中后记录 `upstream_retry_without_responses_lite`，移除该 header 后只重试一次；普通 400、非 Codex app、无 header 或错误体不匹配都不重试。
+- 验证通过：`cargo fmt --manifest-path src-tauri\Cargo.toml --check`；`cargo test --manifest-path src-tauri\Cargo.toml responses_lite --lib`（4 passed）；`cargo test --manifest-path src-tauri\Cargo.toml codex_responses_lite_error_triggers_retry_without_header --lib`。
+
 ## 2026-06-28 Responses-Lite Header Source And Proxy Failure Mechanism
 
 - OpenAI Codex 源码确认 `x-openai-internal-codex-responses-lite` 不是普通透传 header，而是由模型元数据 `ModelInfo.use_responses_lite` 驱动的官方内部协商信号。`codex-rs/protocol/src/openai_models.rs` 定义 `use_responses_lite: bool`；`codex-rs/core/src/client.rs::add_responses_lite_header()` 在该值为 true 时给 HTTP Responses 请求加入 `x-openai-internal-codex-responses-lite: true`；WebSocket 路径则在 `build_ws_client_metadata()` 中写入 `ws_request_header_x_openai_internal_codex_responses_lite=true`。
 - Lite 模式还会改变请求结构，不只是多一个 header：`build_responses_request()` 用 `prompt.get_formatted_input_for_request(model_info.use_responses_lite)`；Lite 为 true 时会去掉图片 detail、把 tools 放进 `AdditionalTools`/instructions 前缀、关闭 `parallel_tool_calls`，并让部分 tool planning 走 Lite 分支。说明服务端会按这个信号选择不同 Responses 处理路径。
-- 中转遇到问题的根因是“协议能力错配”：Codex 官方客户端/后端之间的私有能力信号被 CCSwitchMulti 或其它代理原样转发给第三方 OpenAI-compatible 上游，或者转发给当时尚未支持该模型 Lite 路径的官方后端分支。上游看到 header 后按 Lite 路径校验模型，若该模型/账号/区域/后端版本不支持 Lite，就返回 `This model is not supported when using X-OpenAI-Internal-Codex-Responses-Lite.`。因此第三方上游应剥离，官方托管 `codex_oauth` 路径应保留给官方后端自行协商。
+- 中转遇到问题的根因是“协议能力错配”：Codex 官方客户端/后端之间的私有能力信号被 CCSwitchMulti 或其它代理原样转发给第三方 OpenAI-compatible 上游，或者转发给当时尚未支持该模型 Lite 路径的官方后端分支。上游看到 header 后按 Lite 路径校验模型，若该模型/账号/区域/后端版本不支持 Lite，就返回 `This model is not supported when using X-OpenAI-Internal-Codex-Responses-Lite.`。最新策略不是预先剥离，而是默认透传、命中特定 Lite 不支持错误后剥头重试一次。
 
 ## 2026-06-28 Responses-Lite Header Strip Policy Narrowed
 
 - 上游作者关闭 `#4727` 后重新评估，原先 `should_strip_codex_private_header_for_upstream(_url, name)` 只看 header 名、无条件剥 `x-openai-internal-codex-responses-lite` 的策略过宽。这个 header 对第三方 OpenAI-compatible / MultiRouter 目标确实是官方私有信号，不应透传；但托管 ChatGPT Codex OAuth 目标属于官方协议路径，应该保留给官方后端自行协商，避免改变 Responses-Lite / prompt cache / 官方内部能力分支。
-- 修正后的边界在 `src-tauri/src/proxy/forwarder.rs`：`should_strip_codex_private_header_for_upstream(app_type, provider, url, name)` 只在 `AppType::Codex` 且 `!provider.is_codex_oauth()` 且 header 名为 `x-openai-internal-codex-responses-lite` 时剥离。非 Codex app 流量不套 Codex 私有 header 策略；托管官方 `codex_oauth` 上游保留该 header；第三方 Codex/OpenAI-compatible 上游继续剥离。
+- 该静态剥离策略后来被进一步收窄为 fallback 重试策略：默认保留 header，只有上游明确返回 Lite 不支持错误时剥头重试一次。不要再恢复“第三方 Codex/OpenAI-compatible 上游发送前直接剥离”的口径。
 - 这次验证时主工作区 `src-tauri/tauri.conf.json` 已有未归属脏改，新增 `bundle.windows.nsis.uninstallerIcon` 被当前 `tauri-build` 拒绝，导致主工作区 `cargo test --manifest-path src-tauri\Cargo.toml codex_responses_lite_header --lib` 卡在 build script。为不修改用户的 NSIS/icon 改动，使用临时 detached worktree `C:\Users\sunda\Documents\cc-switch-test-responses-lite` 套同一份 `forwarder.rs` 改动验证：`cargo fmt --manifest-path src-tauri\Cargo.toml --check` 通过；`cargo test --manifest-path src-tauri\Cargo.toml codex_responses_lite_header --lib` 通过 3 个用例：官方托管保留、第三方剥离、非 Codex app 保留。
 
 ## 2026-06-28 Windows Taskbar Icon Install Verification

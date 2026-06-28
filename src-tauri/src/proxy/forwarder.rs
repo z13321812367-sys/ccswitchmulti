@@ -1976,13 +1976,6 @@ impl RequestForwarder {
                 continue;
             }
 
-            // Codex Desktop 会给本地后端发送内部协商头。第三方 OpenAI-compatible
-            // 上游通常不理解这类官方私有协商信号；但托管 ChatGPT Codex OAuth
-            // 后端属于官方协议路径，应保留给官方后端自行协商。
-            if should_strip_codex_private_header_for_upstream(app_type, provider, &url, key) {
-                continue;
-            }
-
             // --- 认证类 — 用 adapter 提供的认证头替换（在原始位置） ---
             if key_str.eq_ignore_ascii_case("authorization")
                 || key_str.eq_ignore_ascii_case("x-api-key")
@@ -2200,128 +2193,62 @@ impl RequestForwarder {
             );
         }
 
-        // 发送请求
-        let response = if is_socks_proxy || !preserve_exact_header_case {
-            // OpenAI / Copilot / Codex 类后端不依赖原始 header 大小写；走 reqwest
-            // 连接池，避免 raw TCP/TLS path 每次请求都重新握手。SOCKS5 也只能走 reqwest。
-            log::debug!(
-                "[Forwarder] Using pooled reqwest client (preserve_exact_header_case={preserve_exact_header_case}, socks_proxy={is_socks_proxy})"
-            );
-            let client = super::http_client::get();
-            let mut request = client.request(method.clone(), &url);
-            if request_is_streaming {
-                // reqwest 的 timeout 是整请求超时；流式请求交给 response_processor
-                // 的首包/静默期超时控制，避免长流被总时长误杀。
-                request = request.timeout(std::time::Duration::from_secs(24 * 60 * 60));
-            } else if !self.non_streaming_timeout.is_zero() {
-                request = request.timeout(self.non_streaming_timeout);
-            }
-            for (key, value) in &ordered_headers {
-                request = request.header(key, value);
-            }
-            let send = request.body(body_bytes).send();
-            let send_result = if request_is_streaming {
-                let header_timeout = if self.streaming_first_byte_timeout.is_zero() {
-                    timeout
-                } else {
-                    self.streaming_first_byte_timeout
-                };
-                match tokio::time::timeout(header_timeout, send).await {
-                    Ok(result) => result,
-                    Err(_) => {
-                        if let Some(trace_id) = codex_trace_id.as_deref() {
-                            super::codex_router_log::append_event(
-                                "upstream_send_error",
-                                &[
-                                    ("trace", trace_id.to_string()),
-                                    ("session", self.session_id.clone()),
-                                    ("model", request_model_for_log.clone()),
-                                    ("provider", provider.id.clone()),
-                                    ("transport", "reqwest".to_string()),
-                                    (
-                                        "elapsed_ms",
-                                        upstream_started_at.elapsed().as_millis().to_string(),
-                                    ),
-                                    ("error", "streaming_response_header_timeout".to_string()),
-                                ],
-                            );
-                        }
-                        return Err(ProxyError::Timeout(format!(
-                            "流式响应首包超时: {}s（上游未返回响应头）",
-                            header_timeout.as_secs()
-                        )));
-                    }
-                }
-            } else {
-                send.await
-            };
-            let reqwest_resp = match send_result {
-                Ok(resp) => resp,
-                Err(err) => {
-                    if let Some(trace_id) = codex_trace_id.as_deref() {
-                        super::codex_router_log::append_event(
-                            "upstream_send_error",
-                            &[
-                                ("trace", trace_id.to_string()),
-                                ("session", self.session_id.clone()),
-                                ("model", request_model_for_log.clone()),
-                                ("provider", provider.id.clone()),
-                                ("transport", "reqwest".to_string()),
-                                (
-                                    "elapsed_ms",
-                                    upstream_started_at.elapsed().as_millis().to_string(),
-                                ),
-                                ("error", err.to_string()),
-                            ],
-                        );
-                    }
-                    return Err(map_reqwest_send_error(err));
-                }
-            };
-            ProxyResponse::Reqwest(reqwest_resp)
-        } else {
-            // HTTP 代理或直连：走 hyper raw write（保持 header 大小写）
-            // 如果有 HTTP 代理，hyper_client 会用 CONNECT 隧道穿过代理
-            let uri: http::Uri = url
-                .parse()
-                .map_err(|e| ProxyError::ForwardFailed(format!("Invalid URL '{url}': {e}")))?;
-            match super::hyper_client::send_request(
-                uri,
-                method.clone(),
-                ordered_headers,
-                extensions.clone(),
-                body_bytes,
-                timeout,
-                upstream_proxy_url.as_deref(),
-            )
-            .await
-            {
-                Ok(response) => response,
-                Err(err) => {
-                    if let Some(trace_id) = codex_trace_id.as_deref() {
-                        super::codex_router_log::append_event(
-                            "upstream_send_error",
-                            &[
-                                ("trace", trace_id.to_string()),
-                                ("session", self.session_id.clone()),
-                                ("model", request_model_for_log.clone()),
-                                ("provider", provider.id.clone()),
-                                ("transport", "hyper".to_string()),
-                                (
-                                    "elapsed_ms",
-                                    upstream_started_at.elapsed().as_millis().to_string(),
-                                ),
-                                ("error", err.to_string()),
-                            ],
-                        );
-                    }
-                    return Err(err);
-                }
+        // 发送请求。默认保留 Codex Responses-Lite 协商头；只有上游明确返回
+        // Lite 不支持错误时，才在错误响应体读取后剥头重发一次。
+        let send_upstream_request = |headers: http::HeaderMap, body_bytes: Vec<u8>| {
+            let method = method.clone();
+            let url = url.clone();
+            let extensions = extensions.clone();
+            let upstream_proxy_url = upstream_proxy_url.clone();
+            async move {
+                send_forwarder_upstream_request(
+                    method,
+                    url,
+                    headers,
+                    extensions,
+                    body_bytes,
+                    timeout,
+                    request_is_streaming,
+                    self.non_streaming_timeout,
+                    self.streaming_first_byte_timeout,
+                    is_socks_proxy,
+                    preserve_exact_header_case,
+                    upstream_proxy_url.as_deref(),
+                )
+                .await
             }
         };
 
+        let mut response = send_upstream_request(ordered_headers.clone(), body_bytes.clone())
+            .await
+            .map_err(|err| {
+                if let Some(trace_id) = codex_trace_id.as_deref() {
+                    let transport = if is_socks_proxy || !preserve_exact_header_case {
+                        "reqwest"
+                    } else {
+                        "hyper"
+                    };
+                    super::codex_router_log::append_event(
+                        "upstream_send_error",
+                        &[
+                            ("trace", trace_id.to_string()),
+                            ("session", self.session_id.clone()),
+                            ("model", request_model_for_log.clone()),
+                            ("provider", provider.id.clone()),
+                            ("transport", transport.to_string()),
+                            (
+                                "elapsed_ms",
+                                upstream_started_at.elapsed().as_millis().to_string(),
+                            ),
+                            ("error", err.to_string()),
+                        ],
+                    );
+                }
+                err
+            })?;
+
         // 检查响应状态
-        let status = response.status();
+        let mut status = response.status();
         let upstream_elapsed_ms = upstream_started_at.elapsed().as_millis().to_string();
         if let Some(trace_id) = codex_trace_id.as_deref() {
             super::codex_router_log::append_event(
@@ -2336,6 +2263,106 @@ impl RequestForwarder {
                     ("elapsed_ms", upstream_elapsed_ms.clone()),
                 ],
             );
+        }
+
+        if !status.is_success() {
+            let status_code = status.as_u16();
+            let body_text = read_decoded_error_body(response).await?;
+            if let Some(trace_id) = codex_trace_id.as_deref() {
+                append_upstream_error_event(
+                    trace_id,
+                    &self.session_id,
+                    &request_model_for_log,
+                    &provider.id,
+                    status_code,
+                    body_text.as_deref(),
+                );
+            }
+
+            if should_retry_without_codex_responses_lite_header(
+                app_type,
+                &ordered_headers,
+                status_code,
+                body_text.as_deref(),
+            ) {
+                let mut retry_headers = ordered_headers.clone();
+                retry_headers.remove(http::HeaderName::from_static(
+                    "x-openai-internal-codex-responses-lite",
+                ));
+                log::warn!(
+                    "[{tag}] 上游拒绝 Codex Responses-Lite，剥离内部协商头后重试一次 (model={request_model})"
+                );
+                if let Some(trace_id) = codex_trace_id.as_deref() {
+                    super::codex_router_log::append_event(
+                        "upstream_retry_without_responses_lite",
+                        &[
+                            ("trace", trace_id.to_string()),
+                            ("session", self.session_id.clone()),
+                            ("model", request_model_for_log.clone()),
+                            ("provider", provider.id.clone()),
+                            ("status", status_code.to_string()),
+                            (
+                                "body_summary",
+                                body_text
+                                    .as_deref()
+                                    .map(summarize_upstream_body)
+                                    .unwrap_or_else(|| "<empty>".to_string()),
+                            ),
+                        ],
+                    );
+                }
+                response = send_upstream_request(retry_headers, body_bytes.clone())
+                    .await
+                    .map_err(|err| {
+                        if let Some(trace_id) = codex_trace_id.as_deref() {
+                            let transport = if is_socks_proxy || !preserve_exact_header_case {
+                                "reqwest"
+                            } else {
+                                "hyper"
+                            };
+                            super::codex_router_log::append_event(
+                                "upstream_send_error",
+                                &[
+                                    ("trace", trace_id.to_string()),
+                                    ("session", self.session_id.clone()),
+                                    ("model", request_model_for_log.clone()),
+                                    ("provider", provider.id.clone()),
+                                    ("transport", transport.to_string()),
+                                    (
+                                        "elapsed_ms",
+                                        upstream_started_at.elapsed().as_millis().to_string(),
+                                    ),
+                                    ("error", err.to_string()),
+                                ],
+                            );
+                        }
+                        err
+                    })?;
+                status = response.status();
+                if let Some(trace_id) = codex_trace_id.as_deref() {
+                    super::codex_router_log::append_event(
+                        "upstream_status",
+                        &[
+                            ("trace", trace_id.to_string()),
+                            ("session", self.session_id.clone()),
+                            ("model", request_model_for_log.clone()),
+                            ("provider", provider.id.clone()),
+                            ("status", status.as_u16().to_string()),
+                            ("streaming", request_is_streaming.to_string()),
+                            (
+                                "elapsed_ms",
+                                upstream_started_at.elapsed().as_millis().to_string(),
+                            ),
+                            ("retry", "without_responses_lite".to_string()),
+                        ],
+                    );
+                }
+            } else {
+                return Err(ProxyError::UpstreamError {
+                    status: status_code,
+                    body: body_text,
+                });
+            }
         }
 
         if status.is_success() {
@@ -2371,37 +2398,15 @@ impl RequestForwarder {
             ))
         } else {
             let status_code = status.as_u16();
-            // 错误响应同样可能被上游压缩（content-encoding）。reqwest 未启用任何
-            // 自动解压 feature，这里拿到的是原始字节；不解压的话，压缩过的错误体会
-            // 在 from_utf8 处变成非 UTF-8 而被丢弃，隐藏掉上游的限流/鉴权等详情。
-            let encoding = get_content_encoding(response.headers());
-            let raw = response.bytes().await?;
-            let decoded = match encoding {
-                Some(encoding) => match decompress_body(&encoding, &raw) {
-                    Ok(Some(decompressed)) => decompressed,
-                    // 不支持的编码 / 解压失败：退回原始字节，尽量保留可读信息
-                    _ => raw.to_vec(),
-                },
-                None => raw.to_vec(),
-            };
-            let body_text = String::from_utf8(decoded).ok();
+            let body_text = read_decoded_error_body(response).await?;
             if let Some(trace_id) = codex_trace_id.as_deref() {
-                super::codex_router_log::append_event(
-                    "upstream_error",
-                    &[
-                        ("trace", trace_id.to_string()),
-                        ("session", self.session_id.clone()),
-                        ("model", request_model_for_log.clone()),
-                        ("provider", provider.id.clone()),
-                        ("status", status_code.to_string()),
-                        (
-                            "body_summary",
-                            body_text
-                                .as_deref()
-                                .map(summarize_upstream_body)
-                                .unwrap_or_else(|| "<empty>".to_string()),
-                        ),
-                    ],
+                append_upstream_error_event(
+                    trace_id,
+                    &self.session_id,
+                    &request_model_for_log,
+                    &provider.id,
+                    status_code,
+                    body_text.as_deref(),
                 );
             }
 
@@ -3025,15 +3030,136 @@ fn is_managed_account_upstream_url(url: &str) -> bool {
 /// - 非 Codex app 流量不处理，避免误删其它客户端自定义 header；
 /// - 托管 ChatGPT Codex OAuth 是官方后端协议路径，保留内部协商头；
 /// - 第三方 OpenAI-compatible / MultiRouter 目标不承诺支持官方私有头，默认剥离。
-fn should_strip_codex_private_header_for_upstream(
+fn should_retry_without_codex_responses_lite_header(
     app_type: &AppType,
-    provider: &Provider,
-    _url: &str,
-    name: &http::HeaderName,
+    headers: &http::HeaderMap,
+    status: u16,
+    body: Option<&str>,
 ) -> bool {
     matches!(app_type, AppType::Codex)
-        && !provider.is_codex_oauth()
-        && is_codex_responses_lite_header(name)
+        && matches!(status, 400 | 404 | 422 | 501)
+        && headers.contains_key(http::HeaderName::from_static(
+            "x-openai-internal-codex-responses-lite",
+        ))
+        && body
+            .map(|body| {
+                body.contains(
+                    "This model is not supported when using X-OpenAI-Internal-Codex-Responses-Lite",
+                )
+            })
+            .unwrap_or(false)
+}
+
+/// 发送一次上游请求，不做业务级重试。
+///
+/// 调用方负责决定是否根据错误体重放请求；这里只封装 reqwest/hyper 两条传输路径，
+/// 避免 Responses-Lite fallback 和常规发送逻辑出现分叉。
+async fn send_forwarder_upstream_request(
+    method: http::Method,
+    url: String,
+    headers: http::HeaderMap,
+    extensions: Extensions,
+    body_bytes: Vec<u8>,
+    timeout: std::time::Duration,
+    request_is_streaming: bool,
+    non_streaming_timeout: std::time::Duration,
+    streaming_first_byte_timeout: std::time::Duration,
+    is_socks_proxy: bool,
+    preserve_exact_header_case: bool,
+    upstream_proxy_url: Option<&str>,
+) -> Result<ProxyResponse, ProxyError> {
+    if is_socks_proxy || !preserve_exact_header_case {
+        log::debug!(
+            "[Forwarder] Using pooled reqwest client (preserve_exact_header_case={preserve_exact_header_case}, socks_proxy={is_socks_proxy})"
+        );
+        let client = super::http_client::get();
+        let mut request = client.request(method.clone(), &url);
+        if request_is_streaming {
+            request = request.timeout(std::time::Duration::from_secs(24 * 60 * 60));
+        } else if !non_streaming_timeout.is_zero() {
+            request = request.timeout(non_streaming_timeout);
+        }
+        for (key, value) in &headers {
+            request = request.header(key, value);
+        }
+        let send = request.body(body_bytes).send();
+        let send_result = if request_is_streaming {
+            let header_timeout = if streaming_first_byte_timeout.is_zero() {
+                timeout
+            } else {
+                streaming_first_byte_timeout
+            };
+            match tokio::time::timeout(header_timeout, send).await {
+                Ok(result) => result,
+                Err(_) => {
+                    return Err(ProxyError::Timeout(format!(
+                        "流式响应首包超时: {}s（上游未返回响应头）",
+                        header_timeout.as_secs()
+                    )));
+                }
+            }
+        } else {
+            send.await
+        };
+        return send_result
+            .map(ProxyResponse::Reqwest)
+            .map_err(map_reqwest_send_error);
+    }
+
+    let uri: http::Uri = url
+        .parse()
+        .map_err(|e| ProxyError::ForwardFailed(format!("Invalid URL '{url}': {e}")))?;
+    super::hyper_client::send_request(
+        uri,
+        method,
+        headers,
+        extensions,
+        body_bytes,
+        timeout,
+        upstream_proxy_url,
+    )
+    .await
+}
+
+/// 读取并解压上游错误响应体，保留可读错误摘要给日志、fallback 判断和客户端。
+async fn read_decoded_error_body(response: ProxyResponse) -> Result<Option<String>, ProxyError> {
+    let encoding = get_content_encoding(response.headers());
+    let raw = response.bytes().await?;
+    let decoded = match encoding {
+        Some(encoding) => match decompress_body(&encoding, &raw) {
+            Ok(Some(decompressed)) => decompressed,
+            _ => raw.to_vec(),
+        },
+        None => raw.to_vec(),
+    };
+    Ok(String::from_utf8(decoded).ok())
+}
+
+/// 记录上游错误响应。body 只进入摘要，避免把完整 prompt 或大响应写入日志。
+fn append_upstream_error_event(
+    trace_id: &str,
+    session_id: &str,
+    request_model: &str,
+    provider_id: &str,
+    status: u16,
+    body_text: Option<&str>,
+) {
+    super::codex_router_log::append_event(
+        "upstream_error",
+        &[
+            ("trace", trace_id.to_string()),
+            ("session", session_id.to_string()),
+            ("model", request_model.to_string()),
+            ("provider", provider_id.to_string()),
+            ("status", status.to_string()),
+            (
+                "body_summary",
+                body_text
+                    .map(summarize_upstream_body)
+                    .unwrap_or_else(|| "<empty>".to_string()),
+            ),
+        ],
+    );
 }
 
 /// 识别会触发上游 Responses-Lite 分支的 Codex 内部请求头。
@@ -3477,60 +3603,59 @@ mod tests {
         }
     }
 
-    // 验证托管官方 Codex OAuth upstream 保留官方私有协商头。
+    // 验证只有上游明确返回 Responses-Lite 不支持时，才触发剥头重试。
     #[test]
-    fn codex_responses_lite_header_is_preserved_for_managed_official_upstream() {
+    fn codex_responses_lite_error_triggers_retry_without_header() {
         let header = http::HeaderName::from_static("x-openai-internal-codex-responses-lite");
-        let provider = test_provider_with_type(Some("codex_oauth"));
+        let mut headers = http::HeaderMap::new();
+        headers.insert(header, http::HeaderValue::from_static("true"));
 
-        assert!(!should_strip_codex_private_header_for_upstream(
+        assert!(should_retry_without_codex_responses_lite_header(
             &AppType::Codex,
-            &provider,
-            "https://chatgpt.com/backend-api/codex/responses",
-            &header
+            &headers,
+            400,
+            Some("This model is not supported when using X-OpenAI-Internal-Codex-Responses-Lite.")
         ));
     }
 
-    // 验证第三方 OpenAI-compatible upstream 也不会收到官方客户端私有 header。
+    // 验证普通 400 不触发剥头重试，避免隐藏真实请求错误。
     #[test]
-    fn codex_responses_lite_header_is_stripped_for_third_party_upstream() {
+    fn ordinary_upstream_error_does_not_trigger_responses_lite_retry() {
         let header = http::HeaderName::from_static("x-openai-internal-codex-responses-lite");
-        let provider = test_provider_with_type(None);
+        let mut headers = http::HeaderMap::new();
+        headers.insert(header, http::HeaderValue::from_static("true"));
 
-        assert!(should_strip_codex_private_header_for_upstream(
+        assert!(!should_retry_without_codex_responses_lite_header(
             &AppType::Codex,
-            &provider,
-            "https://api.example.com/v1/responses",
-            &header
+            &headers,
+            400,
+            Some("invalid_request_error: missing required field")
         ));
     }
 
-    // 验证非 Codex app 流量不应用 Codex 私有 header 策略。
+    // 验证非 Codex app 流量不应用 Codex Responses-Lite fallback。
     #[test]
-    fn codex_responses_lite_header_is_preserved_for_non_codex_app() {
+    fn non_codex_app_does_not_trigger_responses_lite_retry() {
         let header = http::HeaderName::from_static("x-openai-internal-codex-responses-lite");
-        let provider = test_provider_with_type(None);
+        let mut headers = http::HeaderMap::new();
+        headers.insert(header, http::HeaderValue::from_static("true"));
 
-        assert!(!should_strip_codex_private_header_for_upstream(
+        assert!(!should_retry_without_codex_responses_lite_header(
             &AppType::Claude,
-            &provider,
-            "https://api.example.com/v1/messages",
-            &header
+            &headers,
+            400,
+            Some("This model is not supported when using X-OpenAI-Internal-Codex-Responses-Lite.")
         ));
     }
 
-    // 验证过滤策略只移除已知 Codex 私有头，不影响普通自定义 header 透传。
+    // 验证 header 名识别只匹配已知 Codex Responses-Lite 私有头。
     #[test]
-    fn ordinary_headers_are_preserved_for_upstream() {
-        let header = http::HeaderName::from_static("x-custom-feature");
-        let provider = test_provider_with_type(None);
+    fn codex_responses_lite_header_name_is_detected_precisely() {
+        let lite_header = http::HeaderName::from_static("x-openai-internal-codex-responses-lite");
+        let custom_header = http::HeaderName::from_static("x-custom-feature");
 
-        assert!(!should_strip_codex_private_header_for_upstream(
-            &AppType::Codex,
-            &provider,
-            "https://chatgpt.com/backend-api/codex/responses",
-            &header
-        ));
+        assert!(is_codex_responses_lite_header(&lite_header));
+        assert!(!is_codex_responses_lite_header(&custom_header));
     }
 
     #[test]
