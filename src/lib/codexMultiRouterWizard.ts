@@ -1,0 +1,332 @@
+import type {
+  CodexApiFormat,
+  CodexCatalogModel,
+  CodexModelCatalogConfig,
+  CodexRoutingConfig,
+  CodexRoutingRoute,
+  Provider,
+} from "@/types";
+import type { FetchedModel } from "@/lib/api/model-fetch";
+
+export const CODEX_MULTI_ROUTER_WIZARD_DISMISSED_KEY =
+  "ccswitchmulti.codexMultiRouterWizard.dismissed";
+export const CODEX_MULTI_ROUTER_DEFAULT_ID = "codex-multirouter";
+export const CODEX_MULTI_ROUTER_DEFAULT_NAME = "Codex MultiRouter";
+export const CODEX_MULTI_ROUTER_PROXY_BASE_URL = "http://127.0.0.1:15721/v1";
+
+export interface WizardModelFetchConfig {
+  baseUrl: string;
+  apiKey: string;
+  isFullUrl?: boolean;
+  modelsUrl?: string;
+  customUserAgent?: string;
+}
+
+export interface WizardPlanBuildResult {
+  plan: Provider;
+  sourceProviders: Provider[];
+}
+
+const OPENAI_CODEX_FALLBACK_MODELS: CodexCatalogModel[] = [
+  { model: "gpt-5.5", upstreamModel: "gpt-5.5", contextWindow: 272000 },
+  { model: "gpt-5.4", upstreamModel: "gpt-5.4", contextWindow: 272000 },
+  {
+    model: "gpt-5.4-mini",
+    upstreamModel: "gpt-5.4-mini",
+    contextWindow: 128000,
+  },
+  {
+    model: "gpt-5.3-codex-spark",
+    upstreamModel: "gpt-5.3-codex-spark",
+    contextWindow: 128000,
+  },
+];
+
+// 判断模型源是否是官方/OAuth 路径；这些 provider 常常不能通过普通 /models 获取目录。
+function isOfficialCodexSource(provider: Provider): boolean {
+  const text = `${provider.id} ${provider.name} ${provider.category ?? ""} ${
+    provider.meta?.providerType ?? ""
+  }`.toLowerCase();
+  return (
+    provider.category === "official" ||
+    text.includes("official") ||
+    text.includes("openai") ||
+    text.includes("codex_oauth")
+  );
+}
+
+// 读取 Codex provider 的模型目录；旧数据缺失或结构异常时返回空目录，避免向导崩溃。
+export function readWizardModelCatalog(
+  provider: Provider,
+): CodexCatalogModel[] {
+  const models = provider.settingsConfig?.modelCatalog?.models;
+  if (!Array.isArray(models)) {
+    return isOfficialCodexSource(provider)
+      ? OPENAI_CODEX_FALLBACK_MODELS.map((model) => ({ ...model }))
+      : [];
+  }
+  const normalizedModels = models
+    .map((model) => model as CodexCatalogModel)
+    .filter((model) => typeof model.model === "string" && model.model.trim());
+  if (normalizedModels.length === 0 && isOfficialCodexSource(provider)) {
+    return OPENAI_CODEX_FALLBACK_MODELS.map((model) => ({ ...model }));
+  }
+  return normalizedModels;
+}
+
+// 判断 provider 是否是 MultiRouter 方案；向导只把普通 provider 当作上游模型源。
+export function isCodexMultiRouterPlan(provider: Provider): boolean {
+  const routing = provider.settingsConfig?.codexRouting;
+  return Boolean(
+    routing &&
+      typeof routing === "object" &&
+      (routing.enabled !== false || Array.isArray(routing.routes)),
+  );
+}
+
+// 从 provider 配置里提取可调用 /models 的参数；官方 OAuth provider 没有普通 Base URL 时会被跳过。
+export function getWizardModelFetchConfig(
+  provider: Provider,
+): WizardModelFetchConfig | null {
+  const config = provider.settingsConfig ?? {};
+  const auth = config.auth ?? {};
+  const baseUrl = String(
+    config.base_url ?? config.baseURL ?? config.baseUrl ?? "",
+  ).trim();
+  const apiKey = String(
+    auth.OPENAI_API_KEY ??
+      config.apiKey ??
+      config.api_key ??
+      config.experimental_bearer_token ??
+      "",
+  ).trim();
+  if (!baseUrl || !apiKey) return null;
+  return {
+    baseUrl,
+    apiKey,
+    isFullUrl: Boolean(provider.meta?.isFullUrl ?? config.isFullUrl),
+    modelsUrl:
+      typeof config.modelsUrl === "string" ? config.modelsUrl : undefined,
+    customUserAgent: provider.meta?.customUserAgent,
+  };
+}
+
+// 把 /models 返回值合并进 provider modelCatalog；保留已有用户手写字段和 upstreamModel。
+export function mergeFetchedModelsIntoWizardProvider(
+  provider: Provider,
+  fetchedModels: FetchedModel[],
+): Provider {
+  const existingModels = readWizardModelCatalog(provider);
+  const byModel = new Map<string, CodexCatalogModel>();
+  for (const model of existingModels) {
+    byModel.set(model.model, model);
+  }
+  for (const fetched of fetchedModels) {
+    const modelId = fetched.id.trim();
+    if (!modelId) continue;
+    const existing = byModel.get(modelId);
+    byModel.set(modelId, {
+      ...(existing ?? {}),
+      model: modelId,
+      upstreamModel:
+        existing?.upstreamModel ?? existing?.upstream_model ?? modelId,
+      displayName: existing?.displayName ?? modelId,
+      ...(fetched.contextWindow
+        ? { contextWindow: fetched.contextWindow }
+        : {}),
+    });
+  }
+  return {
+    ...provider,
+    settingsConfig: {
+      ...provider.settingsConfig,
+      modelCatalog: {
+        ...(provider.settingsConfig?.modelCatalog ?? {}),
+        models: Array.from(byModel.values()),
+      },
+    },
+  };
+}
+
+// 判断某个模型源是否应该优先保留原始可见模型名；官方/订阅源是重名冲突的 canonical 侧。
+function isCanonicalModelSource(provider: Provider): boolean {
+  return isOfficialCodexSource(provider);
+}
+
+// 为非官方重名模型生成稳定别名，保留 upstreamModel 指向真实上游模型名。
+function aliasModelName(provider: Provider, modelName: string): string {
+  const providerPrefix =
+    provider.id
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .split("-")
+      .filter(Boolean)[0] || "relay";
+  return `${providerPrefix}-${modelName}`;
+}
+
+// 检测多个 provider 暴露的同名模型；官方保留原名，第三方/中转站自动生成可见别名。
+export function resolveWizardModelNameCollisions(
+  providers: Provider[],
+): Provider[] {
+  const ownersByUpstream = new Map<string, Provider[]>();
+  for (const provider of providers) {
+    for (const model of readWizardModelCatalog(provider)) {
+      const upstream =
+        model.upstreamModel ?? model.upstream_model ?? model.model;
+      if (!upstream) continue;
+      const owners = ownersByUpstream.get(upstream) ?? [];
+      owners.push(provider);
+      ownersByUpstream.set(upstream, owners);
+    }
+  }
+
+  return providers.map((provider) => {
+    const nextModels = readWizardModelCatalog(provider).map((model) => {
+      const upstream =
+        model.upstreamModel ?? model.upstream_model ?? model.model;
+      const owners = ownersByUpstream.get(upstream) ?? [];
+      if (owners.length <= 1 || isCanonicalModelSource(provider)) {
+        return { ...model, upstreamModel: upstream };
+      }
+      return {
+        ...model,
+        model: aliasModelName(provider, upstream),
+        displayName: model.displayName ?? aliasModelName(provider, upstream),
+        upstreamModel: upstream,
+      };
+    });
+    return {
+      ...provider,
+      settingsConfig: {
+        ...provider.settingsConfig,
+        modelCatalog: {
+          ...(provider.settingsConfig?.modelCatalog ?? {}),
+          models: nextModels,
+        },
+      },
+    };
+  });
+}
+
+// 按 provider 名称和模型名推断默认前缀；这些前缀只作为向导初始规则，后续可在工作台细调。
+export function inferWizardRoutePrefixes(provider: Provider): string[] {
+  const text = `${provider.id} ${provider.name} ${provider.category ?? ""} ${
+    provider.meta?.providerType ?? ""
+  }`.toLowerCase();
+  const models = readWizardModelCatalog(provider).map((model) =>
+    model.model.toLowerCase(),
+  );
+  const has = (value: string) =>
+    text.includes(value) || models.some((model) => model.startsWith(value));
+  const prefixes = new Set<string>();
+  if (has("openai") || has("gpt")) prefixes.add("gpt");
+  if (has("openai") || models.some((model) => /^o\d/.test(model))) {
+    prefixes.add("o");
+  }
+  if (has("deepseek")) prefixes.add("deepseek");
+  if (has("qwen")) prefixes.add("qwen");
+  if (has("ollama") || has("vllm") || has("local")) prefixes.add("local");
+  return Array.from(prefixes);
+}
+
+// 推断 route 上游协议；显式 meta/apiFormat 优先，未知第三方默认走 Chat Completions。
+function inferWizardApiFormat(provider: Provider): CodexApiFormat {
+  const config = provider.settingsConfig ?? {};
+  return (
+    provider.meta?.apiFormat ??
+    config.apiFormat ??
+    config.api_format ??
+    "openai_chat"
+  );
+}
+
+// 为模型源生成 provider 分组 route；只引用 targetProviderId，不复制第三方 bearer 密钥。
+export function buildWizardRoutesFromSources(
+  providers: Provider[],
+): CodexRoutingRoute[] {
+  return providers.map((provider) => {
+    const models = readWizardModelCatalog(provider).map((model) => model.model);
+    return {
+      id: `router-${provider.id}`,
+      label: provider.name,
+      enabled: true,
+      targetProviderId: provider.id,
+      match: {
+        models,
+        prefixes: inferWizardRoutePrefixes(provider),
+      },
+      upstream: {
+        apiFormat: inferWizardApiFormat(provider),
+        auth: { source: "provider_config" },
+      },
+    };
+  });
+}
+
+// 从已处理重名的模型源生成 MultiRouter catalog；保留 upstreamModel 供运行时把别名映射回真实模型。
+export function buildWizardModelCatalog(
+  providers: Provider[],
+): CodexModelCatalogConfig {
+  const byModel = new Map<string, CodexCatalogModel>();
+  for (const provider of providers) {
+    for (const model of readWizardModelCatalog(provider)) {
+      if (!byModel.has(model.model)) {
+        byModel.set(model.model, model);
+      }
+    }
+  }
+  const models = Array.from(byModel.values());
+  return {
+    models,
+    spawnAgentModels: models.map((model) => model.model).slice(0, 5),
+  };
+}
+
+// 过滤出向导默认可用的普通 Codex provider；空目录 provider 仍保留，便于引导用户先刷新模型。
+export function defaultWizardModelSources(providers: Provider[]): Provider[] {
+  return providers.filter((provider) => !isCodexMultiRouterPlan(provider));
+}
+
+// 创建或更新 MultiRouter provider；草稿只在用户点击保存发布时写入数据库。
+export function buildCodexMultiRouterWizardPlan(
+  allProviders: Provider[],
+  sourceProviders: Provider[],
+  existingPlan?: Provider | null,
+): WizardPlanBuildResult {
+  const resolvedSources = resolveWizardModelNameCollisions(sourceProviders);
+  const routes = buildWizardRoutesFromSources(resolvedSources);
+  const routing: CodexRoutingConfig = {
+    enabled: true,
+    defaultRouteId: routes[0]?.id,
+    routes,
+  };
+  const existingIds = new Set(allProviders.map((provider) => provider.id));
+  const planId =
+    existingPlan?.id ??
+    (existingIds.has(CODEX_MULTI_ROUTER_DEFAULT_ID)
+      ? `${CODEX_MULTI_ROUTER_DEFAULT_ID}-${Date.now()}`
+      : CODEX_MULTI_ROUTER_DEFAULT_ID);
+  const plan: Provider = {
+    ...(existingPlan ?? {
+      id: planId,
+      name: CODEX_MULTI_ROUTER_DEFAULT_NAME,
+      category: "custom",
+      createdAt: Date.now(),
+    }),
+    id: planId,
+    name: existingPlan?.name ?? CODEX_MULTI_ROUTER_DEFAULT_NAME,
+    category: existingPlan?.category ?? "custom",
+    settingsConfig: {
+      ...(existingPlan?.settingsConfig ?? {}),
+      auth: existingPlan?.settingsConfig?.auth ?? {},
+      base_url: CODEX_MULTI_ROUTER_PROXY_BASE_URL,
+      baseUrl: CODEX_MULTI_ROUTER_PROXY_BASE_URL,
+      config: existingPlan?.settingsConfig?.config ?? null,
+      modelCatalog: buildWizardModelCatalog(resolvedSources),
+      codexRouting: routing,
+    },
+  };
+  return { plan, sourceProviders: resolvedSources };
+}

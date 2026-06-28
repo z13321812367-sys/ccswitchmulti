@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-06-28 Codex MultiRouter Wizard Implementation
+
+- 分支 `codex/multirouter-wizard` 新增 Codex 首页底部居中的 `配置多路模型` 入口，落点是 `ProviderList` 的 Codex 专属 CTA；空 Provider 列表也会显示该入口，右上角原有 MultiRouter 工作台图标入口保持不变。
+- 新增遮罩式 `CodexMultiRouterWizard`：Portal 到 `document.body`，黑色 fixed overlay，按教程顺序引导理解本地 `15721` MultiRouter、创建模型源、检查 API Key/Base URL/API 格式、自动获取 `/models`、处理重名模型、生成按 provider 分组的 route、保存发布、显式启用并打开工作台 `test` 页。
+- 新增 `src/lib/codexMultiRouterWizard.ts` 作为可单测数据层：普通 Codex provider 才作为模型源，MultiRouter provider 通过 `settingsConfig.codexRouting` 识别并排除；官方/OAuth 源没有普通 `/models` 时使用保守官方 catalog 兜底；第三方/中转站与官方同名模型会生成可见别名并保留 `upstreamModel` 指向真实上游模型。
+- 向导保存策略：草稿留在 React state；只有点击“保存并发布”才调用 `providersApi.add/update` 写入带 `codexRouting` 和 `modelCatalog` 的 MultiRouter provider；不会静默切换当前 Codex provider，完成页“启用这个多路路由”复用 App 里的 `switchProvider` 路径，让既有 Codex 本地接管、PROXY_MANAGED、OAuth 保留逻辑继续生效。
+- 路由生成策略：每个模型源一条 route，使用 `targetProviderId` + `auth.source="provider_config"`，不复制第三方 API Key/Base URL，不写 `requires_openai_auth`；默认按 provider/model 文本推断 `gpt`/`o`、`deepseek`、`qwen` 等前缀。
+- 验证：`pnpm vitest run tests/components/ProviderList.test.tsx src/components/codex/CodexRouterWorkspacePage.test.ts tests/components/CodexFormFields.test.tsx tests/components/ProviderForm.codexCatalog.test.ts tests/components/CodexMultiRouterWizard.test.tsx tests/lib/codexMultiRouterWizard.test.ts` 通过；`pnpm typecheck` 通过；`cargo fmt --manifest-path src-tauri/Cargo.toml --check` 通过；`cargo test --manifest-path src-tauri/Cargo.toml codex_model_catalog --lib`、`model_fetch --lib`、`switching_codex_router_provider_auto_enables_dedicated_local_takeover --lib` 均通过。`pnpm format:check` 当前失败在两个未参与本次改动的既有文件 `src/components/codex/CodexRouterWorkspacePage.tsx` 和 `src/components/providers/forms/CodexFormFields.tsx`，本次未扩大 diff 去格式化无关大文件。
+
 ## 2026-06-28 Mixed Relay Responses Capability Boundary
 
 - 当前 MultiRouter 对 Codex `/responses` 的上游协议选择是 route/effective-provider 级配置判定，不是模型级在线能力探测。运行时入口是 `src-tauri/src/proxy/providers/codex.rs::explain_codex_responses_upstream_protocol`，优先看 managed `codex_oauth`、`meta.apiFormat`、`settings_config.apiFormat/api_format`、已知 chat-only base_url、`config.toml wire_api`，最后默认原生 Responses。

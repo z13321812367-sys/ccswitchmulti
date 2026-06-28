@@ -102,6 +102,7 @@ import {
   isRoutingPlan,
   type WorkspaceTab,
 } from "@/components/codex/CodexRouterWorkspacePage";
+import { CodexMultiRouterWizard } from "@/components/codex/CodexMultiRouterWizard";
 
 type View =
   | "providers"
@@ -192,6 +193,8 @@ function App() {
     tab: WorkspaceTab;
   }>({ tab: "status" });
   const [isAddOpen, setIsAddOpen] = useState(false);
+  const [isCodexMultiRouterWizardOpen, setIsCodexMultiRouterWizardOpen] =
+    useState(false);
   const [isWindowMaximized, setIsWindowMaximized] = useState(false);
 
   useEffect(() => {
@@ -902,6 +905,13 @@ function App() {
     setCurrentView("codexRouter");
   };
 
+  // 从首页 CTA 进入 Codex MultiRouter 向导；入口负责切换上下文，向导内部只管理配置草稿。
+  const handleStartCodexMultiRouterWizard = () => {
+    setActiveApp("codex");
+    setCurrentView("providers");
+    setIsCodexMultiRouterWizardOpen(true);
+  };
+
   const notifyWindowControlError = (error: unknown) => {
     toast.error(
       t("notifications.windowControlFailed", {
@@ -1106,6 +1116,11 @@ function App() {
                         activeApp === "claude" ? handleOpenTerminal : undefined
                       }
                       onCreate={() => setIsAddOpen(true)}
+                      onStartCodexMultiRouterWizard={
+                        activeApp === "codex"
+                          ? handleStartCodexMultiRouterWizard
+                          : undefined
+                      }
                       onSetAsDefault={
                         activeApp === "openclaw"
                           ? setAsDefaultModel
@@ -1687,6 +1702,20 @@ function App() {
         onOpenChange={setIsAddOpen}
         appId={activeApp}
         onSubmit={addProvider}
+      />
+
+      <CodexMultiRouterWizard
+        open={isCodexMultiRouterWizardOpen}
+        providers={activeApp === "codex" ? Object.values(providers) : []}
+        onOpenChange={setIsCodexMultiRouterWizardOpen}
+        onCreateProvider={() => {
+          setActiveApp("codex");
+          setIsAddOpen(true);
+        }}
+        onOpenWorkspace={(provider, tab) =>
+          openCodexRouterWorkspace(provider, tab)
+        }
+        onEnablePlan={switchProvider}
       />
 
       <EditProviderDialog
