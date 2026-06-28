@@ -667,6 +667,42 @@ fn codex_desktop_reasoning_efforts_from_levels(levels: Option<&Value>) -> Value 
     Value::Array(efforts)
 }
 
+/// 为最新版 Codex `ModelInfo` 保留 snake_case reasoning levels。
+///
+/// `spawn_agent` 的 `model` 参数校验走 `ModelInfo.supported_reasoning_levels`；
+/// 只写 Desktop renderer 的 camelCase 别名会让工具说明可读但运行时元数据不完整。
+fn codex_model_info_reasoning_levels_from_efforts(efforts: &Value) -> Value {
+    let levels = efforts
+        .as_array()
+        .map(|efforts| {
+            efforts
+                .iter()
+                .filter_map(|effort| {
+                    let effort_name = effort
+                        .get("reasoningEffort")
+                        .or_else(|| effort.get("reasoning_effort"))
+                        .or_else(|| effort.get("effort"))
+                        .and_then(|value| value.as_str())
+                        .map(str::trim)
+                        .filter(|effort| !effort.is_empty())?;
+                    let description = effort
+                        .get("description")
+                        .and_then(|value| value.as_str())
+                        .map(str::trim)
+                        .filter(|description| !description.is_empty())
+                        .unwrap_or(effort_name);
+                    Some(json!({
+                        "effort": effort_name,
+                        "description": description,
+                    }))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Value::Array(levels)
+}
+
 /// 给 catalog 模型条目补齐 Codex Desktop app-server/renderer 使用的字段别名。
 ///
 /// 这些字段不参与路由决策，只用于候选菜单、reasoning effort 和速度档展示。
@@ -686,19 +722,32 @@ fn project_codex_desktop_model_fields(
         .to_string();
     let supported_reasoning_efforts =
         codex_desktop_reasoning_efforts_from_levels(entry_obj.get("supported_reasoning_levels"));
+    let supported_reasoning_levels =
+        codex_model_info_reasoning_levels_from_efforts(&supported_reasoning_efforts);
 
     entry_obj.insert("id".to_string(), json!(spec.model));
     entry_obj.insert("displayName".to_string(), json!(spec.display_name));
     entry_obj.insert("contextWindow".to_string(), json!(spec.context_window));
     entry_obj.insert("maxContextWindow".to_string(), json!(spec.context_window));
     entry_obj.insert(
+        "default_reasoning_level".to_string(),
+        json!(default_reasoning_effort.clone()),
+    );
+    entry_obj.insert(
         "defaultReasoningEffort".to_string(),
         json!(default_reasoning_effort),
+    );
+    entry_obj.insert(
+        "supported_reasoning_levels".to_string(),
+        supported_reasoning_levels,
     );
     entry_obj.insert(
         "supportedReasoningEfforts".to_string(),
         supported_reasoning_efforts,
     );
+    entry_obj.insert("visibility".to_string(), json!("list"));
+    entry_obj.insert("show_in_picker".to_string(), json!(true));
+    entry_obj.insert("supported_in_api".to_string(), json!(true));
     entry_obj.insert("hidden".to_string(), json!(false));
     entry_obj.insert("isDefault".to_string(), json!(spec.is_default));
 
@@ -1219,6 +1268,7 @@ fn codex_provider_models_toml_array(specs: &[CodexCatalogModelSpec]) -> Item {
     for spec in specs {
         let mut model = InlineTable::new();
         model.insert("model", spec.model.as_str().into());
+        model.insert("slug", spec.model.as_str().into());
         model.insert("id", spec.model.as_str().into());
         if let Some(upstream_model) = &spec.upstream_model {
             model.insert("upstreamModel", upstream_model.as_str().into());
@@ -1226,6 +1276,7 @@ fn codex_provider_models_toml_array(specs: &[CodexCatalogModelSpec]) -> Item {
         }
         model.insert("display_name", spec.display_name.as_str().into());
         model.insert("displayName", spec.display_name.as_str().into());
+        model.insert("description", spec.display_name.as_str().into());
         model.insert(
             "context_window",
             i64::try_from(spec.context_window)
@@ -1243,8 +1294,16 @@ fn codex_provider_models_toml_array(specs: &[CodexCatalogModelSpec]) -> Item {
             CODEX_DEFAULT_REASONING_EFFORT.into(),
         );
         model.insert(
+            "default_reasoning_level",
+            CODEX_DEFAULT_REASONING_EFFORT.into(),
+        );
+        model.insert(
             "defaultReasoningEffort",
             CODEX_DEFAULT_REASONING_EFFORT.into(),
+        );
+        model.insert(
+            "supported_reasoning_levels",
+            codex_provider_reasoning_efforts_toml_array("effort"),
         );
         model.insert(
             "supported_reasoning_efforts",
@@ -1254,6 +1313,9 @@ fn codex_provider_models_toml_array(specs: &[CodexCatalogModelSpec]) -> Item {
             "supportedReasoningEfforts",
             codex_provider_reasoning_efforts_toml_array("reasoningEffort"),
         );
+        model.insert("visibility", "list".into());
+        model.insert("show_in_picker", true.into());
+        model.insert("supported_in_api", true.into());
         model.insert("hidden", false.into());
         model.insert("isDefault", spec.is_default.into());
         array.push(toml_edit::Value::InlineTable(model));
@@ -1357,6 +1419,7 @@ fn set_codex_model_catalog_projection_fields(
             doc["model_catalog_json"] = toml_edit::value(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME);
             set_active_codex_provider_models(&mut doc, specs);
             ensure_codex_agents_defaults(&mut doc);
+            ensure_codex_multi_agent_model_overrides_visible(&mut doc);
         }
         _ => {
             let should_remove = doc
@@ -1372,6 +1435,43 @@ fn set_codex_model_catalog_projection_fields(
     }
 
     Ok(doc.to_string())
+}
+
+/// 让 Codex multi_agent_v2 的 `spawn_agent` 保留模型覆盖参数。
+///
+/// 新版 Codex 的 `MultiAgentV2Config::default()` 会把
+/// `hide_spawn_agent_metadata` 设为 `true`，工具 schema 因此删除
+/// `model` / `reasoning_effort` / `service_tier`。MultiRouter 的核心能力是
+/// 在子 Agent 创建时显式选择 Qwen、DeepSeek、Spark 等模型，所以接管时必须
+/// 写入表格形态的 `[features.multi_agent_v2]` 并关闭隐藏 metadata。
+fn ensure_codex_multi_agent_model_overrides_visible(doc: &mut DocumentMut) {
+    if doc.get("features").is_none() {
+        doc["features"] = toml_edit::table();
+    }
+    let Some(features) = doc.get_mut("features").and_then(|item| item.as_table_mut()) else {
+        return;
+    };
+
+    let existing_enabled = features
+        .get("multi_agent_v2")
+        .and_then(|item| item.as_bool())
+        .map(toml_edit::value);
+    if !features
+        .get("multi_agent_v2")
+        .and_then(|item| item.as_table())
+        .is_some()
+    {
+        features["multi_agent_v2"] = toml_edit::table();
+    }
+    if let Some(multi_agent_v2) = features
+        .get_mut("multi_agent_v2")
+        .and_then(|item| item.as_table_mut())
+    {
+        if let Some(enabled) = existing_enabled {
+            multi_agent_v2["enabled"] = enabled;
+        }
+        multi_agent_v2["hide_spawn_agent_metadata"] = toml_edit::value(false);
+    }
 }
 
 /// 补齐 Codex 官方 `[agents]` 运行上限。
@@ -4424,6 +4524,65 @@ openai_base_url = "http://127.0.0.1:15721/v1"
     }
 
     #[test]
+    /// 生成 catalog 时同时满足新版 Codex `ModelInfo` 和旧 renderer 的字段形态。
+    fn codex_model_catalog_projects_spawn_agent_model_info_fields() {
+        let template = json!({
+            "slug": "gpt-5.5",
+            "display_name": "GPT-5.5",
+            "description": "Template",
+            "context_window": 272000,
+            "supported_reasoning_levels": [
+                { "effort": "low", "description": "Fast" },
+                { "effort": "medium", "description": "Balanced" }
+            ],
+            "default_reasoning_level": "medium",
+            "visibility": "hide",
+            "supported_in_api": false
+        });
+        let spec = CodexCatalogModelSpec {
+            model: "qwen3.6".to_string(),
+            upstream_model: None,
+            display_name: "Qwen 3.6".to_string(),
+            context_window: 262_144,
+            text_only: false,
+            is_default: true,
+        };
+        let entry = codex_catalog_model_entry(&template, &spec, 0);
+
+        assert_eq!(entry.get("slug").and_then(|v| v.as_str()), Some("qwen3.6"));
+        assert_eq!(
+            entry.get("visibility").and_then(|v| v.as_str()),
+            Some("list"),
+            "Codex ModelInfo converts visibility=list into ModelPreset.show_in_picker=true"
+        );
+        assert_eq!(
+            entry.get("show_in_picker").and_then(|v| v.as_bool()),
+            Some(true),
+            "older direct ModelPreset readers should also see the model as picker-visible"
+        );
+        assert_eq!(
+            entry.get("supported_in_api").and_then(|v| v.as_bool()),
+            Some(true),
+            "non-ChatGPT auth filters must not remove MultiRouter models"
+        );
+        assert_eq!(
+            entry
+                .get("default_reasoning_level")
+                .and_then(|v| v.as_str()),
+            Some("medium")
+        );
+        assert!(
+            entry
+                .get("supported_reasoning_levels")
+                .and_then(|v| v.as_array())
+                .is_some_and(|levels| levels.iter().any(|level| {
+                    level.get("effort").and_then(|v| v.as_str()) == Some("medium")
+                })),
+            "spawn_agent runtime validation reads supported_reasoning_levels"
+        );
+    }
+
+    #[test]
     fn codex_agent_defaults_are_added_without_overwriting_user_limits() {
         let specs = vec![CodexCatalogModelSpec {
             model: "qwen3.6".to_string(),
@@ -4458,6 +4617,51 @@ base_url = "http://127.0.0.1:15721/v1"
         assert_eq!(
             agents.get("max_depth").and_then(|v| v.as_integer()),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn codex_multi_agent_v2_keeps_spawn_agent_model_override_visible() {
+        let specs = vec![CodexCatalogModelSpec {
+            model: "qwen3.6".to_string(),
+            upstream_model: None,
+            display_name: "Qwen 3.6".to_string(),
+            context_window: 262_144,
+            text_only: false,
+            is_default: false,
+        }];
+        let config = r#"model_provider = "codex_model_router_v2"
+
+[features]
+multi_agent_v2 = true
+
+[model_providers.codex_model_router_v2]
+base_url = "http://127.0.0.1:15721/v1"
+"#;
+
+        let projected = set_codex_model_catalog_projection_fields(
+            config,
+            Some(Path::new("catalog")),
+            Some(&specs),
+        )
+        .expect("project catalog fields");
+        let parsed: toml::Value = toml::from_str(&projected).expect("parse projected config");
+        let multi_agent_v2 = parsed
+            .get("features")
+            .and_then(|features| features.get("multi_agent_v2"))
+            .expect("multi_agent_v2 table should exist");
+
+        assert_eq!(
+            multi_agent_v2.get("enabled").and_then(|v| v.as_bool()),
+            Some(true),
+            "boolean feature state should survive conversion to table config"
+        );
+        assert_eq!(
+            multi_agent_v2
+                .get("hide_spawn_agent_metadata")
+                .and_then(|v| v.as_bool()),
+            Some(false),
+            "Codex v2 removes the spawn_agent model field when this remains true"
         );
     }
 

@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-06-28 MultiRouter spawn_agent Model Override Visibility Fix
+
+- 用户截图里 `spawn_agent` 工具提示“没有显式 model 选择字段”的根因不是提示词没写模型名，也不是单纯 catalog 前五候选排序问题；对照 `openai/codex` 最新源码确认，`multi_agent_v2` 的 `create_spawn_agent_tool_v2()` 在 `hide_spawn_agent_metadata=true` 时会调用 `hide_spawn_agent_metadata_options()`，直接从工具 schema 删除 `agent_type`、`model`、`reasoning_effort`、`service_tier`。新版 Codex 的 `MultiAgentV2Config::default()` 默认 `hide_spawn_agent_metadata=true`，所以只把 `qwen3.6` 写进 message 会继承父模型。
+- CCSwitchMulti 的修复边界在 `src-tauri/src/codex_config.rs` 的 MultiRouter Codex config 投影：接管写入 `model_catalog_json` 和 provider inline models 时，同时确保 `[features.multi_agent_v2] hide_spawn_agent_metadata = false`。如果用户已有 `multi_agent_v2 = true`，转换成 table 并保留 `enabled = true`；如果已有 table，只覆盖隐藏 metadata 开关；不要无条件强行启用 v2，避免和旧 `[agents].max_threads` 语义制造新冲突。
+- Codex 源码还确认 `spawn_agent_models_description()` 只展示 `ModelPreset.show_in_picker` 的前 5 个，而 `ModelPreset.show_in_picker` 来自 `ModelInfo.visibility == list`。因此 catalog 条目必须同时保留新版 `ModelInfo` snake_case 字段（`slug`、`visibility=list`、`supported_in_api=true`、`default_reasoning_level`、`supported_reasoning_levels`）和旧 renderer / 旧 direct preset 路径字段（`id`、`show_in_picker=true`、`hidden=false`、`defaultReasoningEffort`、`supportedReasoningEfforts`）。
+- Provider inline `models` 也要同步补齐 `slug`、`description`、`visibility=list`、`show_in_picker=true`、`supported_in_api=true`、`default_reasoning_level`、`supported_reasoning_levels`，避免只写顶层 `model_catalog_json` 时某些 Desktop 热切路径看到不完整模型元数据。
+- 回归测试落点：`cargo test --manifest-path src-tauri/Cargo.toml codex_model_catalog_projects_spawn_agent_model_info_fields --lib`、`cargo test --manifest-path src-tauri/Cargo.toml codex_multi_agent_v2_keeps_spawn_agent_model_override_visible --lib`、`cargo test --manifest-path src-tauri/Cargo.toml codex_model_catalog_ --lib`，并配合 `cargo fmt --manifest-path src-tauri/Cargo.toml --check`、`git diff --check`。
+
 ## 2026-06-28 MultiRouter Subagent Usage Model Aggregation Fix
 
 - “今日子 Agent 会话流量”全 0 的根因不是前端数值格式化，而是 Codex 子 Agent JSONL 的 `session_meta.payload.session_id` 在当前 Codex Desktop 中指向父线程 ID；子 Agent 自己的线程 ID 在 `state_5.sqlite.threads.id` 和 rollout 文件名后缀里。旧 `session_usage_codex.rs` 同步时把 `proxy_request_logs.session_id` 写成父线程，导致 `build_codex_subagent_usage_stats_from_history()` 用子 Agent id 做 `data_source='codex_session' AND session_id IN (...)` 时查不到当天用量。
