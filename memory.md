@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-06-28 CCSwitchMulti v3.16.4-2 Formal Release
+
+- `v3.16.4-2` 已作为 BigStrongSun/ccswitchmulti 的 GitHub 正式 release 发布：`https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.16.4-2`。Release 为非 draft、`prerelease=false`，发布时间为 `2026-06-28T05:00:55Z`。本地 tag `v3.16.4-2` 为 annotated tag，tag 对象为 `cf874abd37e10f767971deea69e0178edfd0aa71`，解引用到版本提交 `d81abacdccb6915e31ebf829e50155ae95f64a37`（`chore(release): prepare CCSwitchMulti v3.16.4-2`）。
+- 本次正式版覆盖 `v3.16.4-1` 之后的两个用户可见修复：`fa32a34c` 新增异常退出 / panic / 正常退出结构化日志与“打开日志目录”入口；`7ebd7354` 修复 Codex Desktop `x-openai-internal-codex-responses-lite` 内部 header 被转发到真实上游导致 gpt-5.5 等模型 HTTP 400 的问题。版本面统一更新为 `3.16.4-2`，并新增中文 release note `docs/release-notes/v3.16.4-2-zh.md`。
+- Windows 本地 release pipeline 由 post-commit hook 启动并成功完成，导出目录为 `C:\Users\sunda\Documents\LLMservice\最新版ccswitchmulti`，完成时间 `2026-06-28 12:57:52 +08:00`。raw exe `CCSwitchMulti_3.16.4-2_x64.exe` 的 FileVersion/ProductVersion 均验证为 `3.16.4-2`，下载后的 `latest.json` 也验证为 `version=3.16.4-2` 且指向 `https://github.com/BigStrongSun/ccswitchmulti/releases/download/v3.16.4-2/CCSwitchMulti_3.16.4-2_x64-setup.exe`。
+- 本次 release 上传 9 个平铺资产：`CCSwitchMulti_3.16.4-2_x64-setup.exe`、安装包 `.sig`、`CCSwitchMulti_3.16.4-2_x64-portable.zip`、`CCSwitchMulti_3.16.4-2_x64.exe`、`latest.json`、`SHA256SUMS.txt`、`linux-build-note.md`、`macos-build-note.md`、`v3.16.4-2-zh.md`。`SHA256SUMS.txt` 是从平铺 staging 目录 `C:\Users\sunda\Documents\LLMservice\ccswitchmulti-release-v3.16.4-2-assets` 重新生成的，GitHub asset digest 与本地 checksum 对应。Linux/macOS 正式二进制未在 Windows 本地构建，本次仍上传平台构建说明。
+- 发布前验证通过：`pnpm typecheck`；`cargo fmt --manifest-path src-tauri\Cargo.toml --check`；`cargo test --manifest-path src-tauri\Cargo.toml codex_responses_lite_header --lib`；`cargo test --manifest-path src-tauri\Cargo.toml ordinary_headers_are_preserved_for_upstream --lib`；`cargo test --manifest-path src-tauri\Cargo.toml app_exit_monitor --lib`；`git diff --check`。发布后验证：`gh release view v3.16.4-2 --repo BigStrongSun/ccswitchmulti --json tagName,isDraft,isPrerelease,publishedAt,url,assets`、`gh api repos/BigStrongSun/ccswitchmulti/releases/latest`、`git show-ref --tags v3.16.4-2`、下载并解析 release `latest.json`。
+
 ## 2026-06-28 Codex Responses-Lite Header Upstream Strip
 
 - `This model is not supported when using X-OpenAI-Internal-Codex-Responses-Lite` 的根因不是 MultiRouter 自身路由错误，而是 Codex Desktop 发给本地后端的内部协商头 `x-openai-internal-codex-responses-lite` 被 CC Switch / CCSwitchMulti 的 `forwarder.rs` 默认透传到了真实上游。OpenAI 在 2026-06-26 左右收紧 Lite 路径后，`gpt-5.5` 等模型会因此在 official ChatGPT Codex upstream 或第三方代理 upstream 返回 HTTP 400。
