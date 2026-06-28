@@ -3,6 +3,8 @@ import type { Provider } from "@/types";
 import {
   buildCodexMultiRouterWizardPlan,
   buildWizardRoutesFromSources,
+  canContinueAfterConnectivity,
+  classifyWizardConnectivityResult,
   collectWizardModelNameCollisions,
   getWizardConfigIssues,
   resolveWizardModelNameCollisions,
@@ -185,5 +187,43 @@ describe("codexMultiRouterWizard helpers", () => {
         canonicalProviderIds: ["openai-official"],
       },
     ]);
+  });
+
+  it("treats failed direct Responses probes as blocking for native Responses providers", () => {
+    const responsesProvider = provider({
+      id: "responses",
+      name: "Responses Provider",
+      meta: { apiFormat: "openai_responses" },
+    });
+
+    const result = classifyWizardConnectivityResult({
+      provider: responsesProvider,
+      model: "gpt-5.5",
+      ok: false,
+      detail: "HTTP 404",
+    });
+
+    expect(result.status).toBe("fail");
+    expect(result.canContinue).toBe(false);
+    expect(canContinueAfterConnectivity([result])).toBe(false);
+  });
+
+  it("allows failed direct Responses probes as warnings for Chat Completions providers", () => {
+    const chatProvider = provider({
+      id: "chat",
+      name: "Chat Provider",
+      meta: { apiFormat: "openai_chat" },
+    });
+
+    const result = classifyWizardConnectivityResult({
+      provider: chatProvider,
+      model: "deepseek-chat",
+      ok: false,
+      detail: "HTTP 404",
+    });
+
+    expect(result.status).toBe("warn");
+    expect(result.canContinue).toBe(true);
+    expect(canContinueAfterConnectivity([result])).toBe(true);
   });
 });

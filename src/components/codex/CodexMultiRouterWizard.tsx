@@ -21,18 +21,26 @@ import type { CodexCatalogModel, CodexRoutingRoute } from "@/types";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { providersApi } from "@/lib/api/providers";
-import { fetchModelsForConfig } from "@/lib/api/model-fetch";
+import {
+  fetchModelsForConfig,
+  probeCodexResponsesForConfig,
+} from "@/lib/api/model-fetch";
 import {
   CODEX_MULTI_ROUTER_WIZARD_DISMISSED_KEY,
   buildCodexMultiRouterWizardPlan,
+  canContinueAfterConnectivity,
+  classifyWizardConnectivityResult,
   collectWizardModelNameCollisions,
   defaultWizardModelSources,
+  getWizardConnectivityProbeModels,
   getWizardConfigIssues,
   getWizardModelFetchConfig,
   mergeFetchedModelsIntoWizardProvider,
   isCodexMultiRouterPlan,
   readWizardModelCatalog,
   resolveWizardModelNameCollisions,
+  skippedWizardConnectivityResult,
+  type WizardConnectivityResult,
   type WizardModelFetchConfig,
 } from "@/lib/codexMultiRouterWizard";
 import type { WorkspaceTab } from "@/components/codex/CodexRouterWorkspacePage";
@@ -61,6 +69,11 @@ interface WizardStep {
   title: string;
   description: string;
   icon: typeof Wand2;
+}
+
+interface WizardStepRule {
+  errors: string[];
+  canContinue: string;
 }
 
 const STEPS: WizardStep[] = [
@@ -120,6 +133,55 @@ const STEPS: WizardStep[] = [
   },
 ];
 
+const STEP_RULES: Record<WizardStepKey, WizardStepRule> = {
+  intro: {
+    errors: ["本地代理未运行或 15721 被其它进程占用时，后续启用会失败。"],
+    canContinue: "这是说明步骤，总是可以继续。",
+  },
+  sources: {
+    errors: ["没有普通 Codex provider 时，不能生成任何路由。"],
+    canContinue: "至少识别到一个普通 Codex provider 后可以继续。",
+  },
+  providerConfig: {
+    errors: [
+      "缺少 Base URL/API Key 时无法自动获取模型，也无法做真实连通性测试。",
+      "apiFormat 未设置时按 Chat Completions 保守处理。",
+    ],
+    canContinue:
+      "有可用 modelCatalog 时可继续；没有 modelCatalog 且缺配置会停在配置缺口状态。",
+  },
+  fetchModels: {
+    errors: [
+      "/models 失败会保留已有目录，不会清空用户配置。",
+      "Responses 直连 provider 的 /v1/responses 探测失败是阻塞项。",
+      "Chat Completions provider 的 /v1/responses 探测失败是可继续警告。",
+    ],
+    canContinue:
+      "无阻塞连通性失败即可继续；未测试时允许继续但状态条会提示风险。",
+  },
+  collisions: {
+    errors: [
+      "多个 provider 暴露同一 upstreamModel 时，后面的同名模型会被路由顺序遮蔽。",
+    ],
+    canContinue: "接受自动别名策略后可以继续，upstreamModel 会保留真实模型名。",
+  },
+  routes: {
+    errors: ["没有 match.models/prefixes 的 route 不会稳定命中模型请求。"],
+    canContinue: "至少生成一条 route 且没有连通性阻塞项时可以继续保存。",
+  },
+  publish: {
+    errors: ["数据库写入失败或 provider id 冲突会进入 saveFailed。"],
+    canContinue: "点击保存并发布成功后进入完成页；保存失败必须重试或返回修改。",
+  },
+  finish: {
+    errors: [
+      "本地代理未运行、端口冲突或切换 provider 失败会进入 enableFailed。",
+    ],
+    canContinue:
+      "显式启用成功后，建议完整重启或新开 Codex 会话再测试模型命中。",
+  },
+};
+
 type WizardFlowStatus =
   | "opened"
   | "needSources"
@@ -129,6 +191,10 @@ type WizardFlowStatus =
   | "fetchingModels"
   | "modelFetchPartial"
   | "modelsFetched"
+  | "probingConnectivity"
+  | "connectivityPassed"
+  | "connectivityPartial"
+  | "connectivityFailed"
   | "collisionReviewRequired"
   | "routePreview"
   | "savingPlan"
@@ -150,6 +216,12 @@ interface WizardFlowState {
     skippedCount: number;
     failedCount: number;
   };
+  connectivitySummary?: {
+    passCount: number;
+    warnCount: number;
+    skippedCount: number;
+    failCount: number;
+  };
 }
 
 type WizardFlowEvent =
@@ -161,6 +233,13 @@ type WizardFlowEvent =
       type: "FETCH_DONE";
       partial: boolean;
       summary: WizardFlowState["fetchSummary"];
+    }
+  | { type: "PROBE_START" }
+  | {
+      type: "PROBE_DONE";
+      canContinue: boolean;
+      hasWarnings: boolean;
+      summary: WizardFlowState["connectivitySummary"];
     }
   | { type: "SAVE_START" }
   | { type: "SAVE_SUCCESS" }
@@ -233,6 +312,24 @@ function wizardFlowReducer(
         stepKey: event.partial ? "fetchModels" : "collisions",
         fetchSummary: event.summary,
       };
+    case "PROBE_START":
+      return {
+        ...state,
+        status: "probingConnectivity",
+        stepKey: "fetchModels",
+        lastError: undefined,
+      };
+    case "PROBE_DONE":
+      return {
+        ...state,
+        status: event.canContinue
+          ? event.hasWarnings
+            ? "connectivityPartial"
+            : "connectivityPassed"
+          : "connectivityFailed",
+        stepKey: event.canContinue ? "collisions" : "fetchModels",
+        connectivitySummary: event.summary,
+      };
     case "SAVE_START":
       return { ...state, status: "savingPlan", lastError: undefined };
     case "SAVE_SUCCESS":
@@ -292,6 +389,14 @@ function wizardStatusText(state: WizardFlowState): string {
       return "模型列表部分成功，请检查失败或跳过的 provider。";
     case "modelsFetched":
       return "模型列表已刷新，下一步处理重名模型。";
+    case "probingConnectivity":
+      return "正在对每个 provider/model 发起最小 /v1/responses 探测。";
+    case "connectivityPassed":
+      return "所有已测试模型都能直接响应 /v1/responses。";
+    case "connectivityPartial":
+      return "连通性测试存在可继续警告，请确认 Chat-only 或跳过项符合预期。";
+    case "connectivityFailed":
+      return "连通性测试存在阻塞项，请修复 provider 或模型后再保存发布。";
     case "collisionReviewRequired":
       return "检测到重名模型，需要确认别名策略。";
     case "routePreview":
@@ -339,6 +444,9 @@ export function CodexMultiRouterWizard({
   );
   const [draftSources, setDraftSources] = useState<Provider[]>([]);
   const [savedPlan, setSavedPlan] = useState<Provider | null>(null);
+  const [connectivityResults, setConnectivityResults] = useState<
+    WizardConnectivityResult[]
+  >([]);
 
   const existingPlan = useMemo(
     () => providers.find((provider) => isCodexMultiRouterPlan(provider)),
@@ -356,6 +464,7 @@ export function CodexMultiRouterWizard({
     [draftSources],
   );
   const isRefreshingModels = flowState.status === "fetchingModels";
+  const isProbingConnectivity = flowState.status === "probingConnectivity";
   const isSavingPlan = flowState.status === "savingPlan";
   const isEnablingPlan = flowState.status === "enabling";
 
@@ -365,6 +474,7 @@ export function CodexMultiRouterWizard({
     setSavedPlan(existingPlan ?? null);
     const nextSources = defaultWizardModelSources(providers);
     setDraftSources(nextSources);
+    setConnectivityResults([]);
     dispatchFlow({ type: "INIT", hasSources: nextSources.length > 0 });
   }, [existingPlan, open, providers]);
 
@@ -426,6 +536,23 @@ export function CodexMultiRouterWizard({
         }
         return;
       case "fetchModels":
+        if (
+          connectivityResults.length > 0 &&
+          !canContinueAfterConnectivity(connectivityResults)
+        ) {
+          dispatchFlow({
+            type: "NEXT",
+            nextStatus: "connectivityFailed",
+            nextStepKey: "fetchModels",
+          });
+          toast.error(
+            "连通性测试仍有阻塞项，请先修复失败的 Responses provider。",
+            {
+              closeButton: true,
+            },
+          );
+          return;
+        }
         dispatchFlow({
           type: "NEXT",
           nextStatus:
@@ -506,6 +633,7 @@ export function CodexMultiRouterWizard({
         }
       }
       setDraftSources(resolveWizardModelNameCollisions(nextSources));
+      setConnectivityResults([]);
       await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
       dispatchFlow({
         type: "FETCH_DONE",
@@ -526,6 +654,83 @@ export function CodexMultiRouterWizard({
         closeButton: true,
       });
     }
+  };
+
+  // 对每个 provider 的每个可见模型发起最小 `/v1/responses` 探测；这是用户显式点击的真实上游请求。
+  const probeResponsesConnectivity = async () => {
+    dispatchFlow({ type: "PROBE_START" });
+    const results: WizardConnectivityResult[] = [];
+    for (const provider of draftSources) {
+      const config = getWizardModelFetchConfig(provider);
+      const models = getWizardConnectivityProbeModels(provider);
+      if (!config) {
+        results.push(
+          skippedWizardConnectivityResult(
+            provider,
+            "缺少 Base URL 或 API Key，跳过 /v1/responses 探测",
+          ),
+        );
+        continue;
+      }
+      if (models.length === 0) {
+        results.push(
+          skippedWizardConnectivityResult(
+            provider,
+            "没有可探测模型，跳过 /v1/responses 探测",
+          ),
+        );
+        continue;
+      }
+      for (const model of models) {
+        try {
+          const probe = await probeCodexResponsesForConfig(
+            config.baseUrl,
+            config.apiKey,
+            model,
+            config.isFullUrl,
+            config.customUserAgent,
+          );
+          results.push(
+            classifyWizardConnectivityResult({
+              provider,
+              model,
+              ok: probe.ok,
+              detail: probe.detail,
+              url: probe.url,
+              httpStatus: probe.status,
+            }),
+          );
+        } catch (error) {
+          results.push(
+            classifyWizardConnectivityResult({
+              provider,
+              model,
+              ok: false,
+              detail: formatWizardError(error),
+            }),
+          );
+        }
+      }
+    }
+
+    const summary = {
+      passCount: results.filter((result) => result.status === "pass").length,
+      warnCount: results.filter((result) => result.status === "warn").length,
+      skippedCount: results.filter((result) => result.status === "skipped")
+        .length,
+      failCount: results.filter((result) => result.status === "fail").length,
+    };
+    setConnectivityResults(results);
+    dispatchFlow({
+      type: "PROBE_DONE",
+      canContinue: canContinueAfterConnectivity(results),
+      hasWarnings: summary.warnCount > 0 || summary.skippedCount > 0,
+      summary,
+    });
+    toast.success(
+      `连通性测试完成：通过 ${summary.passCount}，警告 ${summary.warnCount}，跳过 ${summary.skippedCount}，失败 ${summary.failCount}。`,
+      { closeButton: true },
+    );
   };
 
   // 保存 MultiRouter provider；这里才真正写入 DB，不会静默切换当前 Codex provider。
@@ -654,11 +859,31 @@ export function CodexMultiRouterWizard({
                   {flowState.fetchSummary.failedCount}
                 </div>
               )}
+              {flowState.connectivitySummary && (
+                <div className="mt-2 text-xs text-muted-foreground">
+                  最近一次 Responses 连通性测试：通过{" "}
+                  {flowState.connectivitySummary.passCount}，警告{" "}
+                  {flowState.connectivitySummary.warnCount}，跳过{" "}
+                  {flowState.connectivitySummary.skippedCount}，失败{" "}
+                  {flowState.connectivitySummary.failCount}
+                </div>
+              )}
               {flowState.lastError && (
                 <div className="mt-2 text-xs text-destructive">
                   {flowState.lastError}
                 </div>
               )}
+            </div>
+            <div className="mb-4 rounded-lg border p-3 text-sm">
+              <div className="font-medium">本步骤异常与继续条件</div>
+              <ul className="mt-2 space-y-1 text-xs text-muted-foreground">
+                {STEP_RULES[currentStep.key].errors.map((error) => (
+                  <li key={error}>{error}</li>
+                ))}
+              </ul>
+              <div className="mt-2 text-xs text-muted-foreground">
+                可继续判断：{STEP_RULES[currentStep.key].canContinue}
+              </div>
             </div>
 
             {currentStep.key === "intro" && (
@@ -756,17 +981,45 @@ export function CodexMultiRouterWizard({
 
             {currentStep.key === "fetchModels" && (
               <div className="space-y-4">
-                <Button
-                  onClick={refreshModelSources}
-                  disabled={isRefreshingModels || draftSources.length === 0}
-                >
-                  <RefreshCw
-                    className={`mr-2 h-4 w-4 ${
-                      isRefreshingModels ? "animate-spin" : ""
-                    }`}
-                  />
-                  自动获取并写入模型列表
-                </Button>
+                <div className="flex flex-wrap gap-3">
+                  <Button
+                    onClick={refreshModelSources}
+                    disabled={
+                      isRefreshingModels ||
+                      isProbingConnectivity ||
+                      draftSources.length === 0
+                    }
+                  >
+                    <RefreshCw
+                      className={`mr-2 h-4 w-4 ${
+                        isRefreshingModels ? "animate-spin" : ""
+                      }`}
+                    />
+                    自动获取并写入模型列表
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={probeResponsesConnectivity}
+                    disabled={
+                      isRefreshingModels ||
+                      isProbingConnectivity ||
+                      draftSources.length === 0
+                    }
+                  >
+                    <Route
+                      className={`mr-2 h-4 w-4 ${
+                        isProbingConnectivity ? "animate-pulse" : ""
+                      }`}
+                    />
+                    测试 /v1/responses 连通性
+                  </Button>
+                </div>
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-900 dark:text-amber-200">
+                  连通性测试会对每个 provider 的每个可见模型发送一次最小
+                  /v1/responses 请求，可能产生极少量额度消耗。Chat Completions
+                  provider 的直接 Responses
+                  失败会标为“可继续警告”，因为运行时会由 MultiRouter 转换协议。
+                </div>
                 <div className="grid gap-3 md:grid-cols-2">
                   {draftSources.map((provider) => (
                     <div key={provider.id} className="rounded-lg border p-3">
@@ -777,6 +1030,33 @@ export function CodexMultiRouterWizard({
                     </div>
                   ))}
                 </div>
+                {connectivityResults.length > 0 && (
+                  <div className="max-h-80 overflow-auto rounded-lg border">
+                    {connectivityResults.map((result, index) => (
+                      <div
+                        key={`${result.providerId}:${result.model}:${index}`}
+                        className="grid grid-cols-[7rem_1fr] gap-3 border-b px-3 py-2 text-sm last:border-b-0"
+                      >
+                        <Badge
+                          variant={
+                            result.status === "fail" ? "destructive" : "outline"
+                          }
+                          className="h-fit justify-center"
+                        >
+                          {result.status}
+                        </Badge>
+                        <div>
+                          <div className="font-medium">
+                            {result.providerName} / {result.model}
+                          </div>
+                          <div className="mt-1 text-xs text-muted-foreground">
+                            {result.detail}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 
@@ -851,7 +1131,12 @@ export function CodexMultiRouterWizard({
                 </div>
                 <Button
                   onClick={saveMultiRouterPlan}
-                  disabled={isSavingPlan || draftSources.length === 0}
+                  disabled={
+                    isSavingPlan ||
+                    draftSources.length === 0 ||
+                    (connectivityResults.length > 0 &&
+                      !canContinueAfterConnectivity(connectivityResults))
+                  }
                 >
                   <Database className="mr-2 h-4 w-4" />
                   {isSavingPlan ? "正在保存..." : "保存并发布"}

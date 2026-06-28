@@ -6,6 +6,7 @@ import type { Provider } from "@/types";
 import { CodexMultiRouterWizard } from "@/components/codex/CodexMultiRouterWizard";
 import { CODEX_MULTI_ROUTER_WIZARD_DISMISSED_KEY } from "@/lib/codexMultiRouterWizard";
 import { providersApi } from "@/lib/api/providers";
+import { probeCodexResponsesForConfig } from "@/lib/api/model-fetch";
 
 vi.mock("@/lib/api/providers", () => ({
   providersApi: {
@@ -16,6 +17,7 @@ vi.mock("@/lib/api/providers", () => ({
 
 vi.mock("@/lib/api/model-fetch", () => ({
   fetchModelsForConfig: vi.fn(),
+  probeCodexResponsesForConfig: vi.fn(),
 }));
 
 // 构造最小 Codex provider，避免 UI 测试依赖真实数据库返回结构。
@@ -114,5 +116,42 @@ describe("CodexMultiRouterWizard", () => {
 
     expect(await screen.findByText("状态机：saveFailed")).toBeInTheDocument();
     expect(screen.getByText("db locked")).toBeInTheDocument();
+  });
+
+  it("probes /v1/responses connectivity and records pass state", async () => {
+    vi.mocked(probeCodexResponsesForConfig).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      url: "https://api.deepseek.com/v1/responses",
+      model: "deepseek-chat",
+      detail: "ok",
+    });
+
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[provider()]}
+        onOpenChange={vi.fn()}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "测试 /v1/responses 连通性" }),
+    );
+
+    expect(
+      await screen.findByText("状态机：connectivityPassed"),
+    ).toBeInTheDocument();
+    expect(probeCodexResponsesForConfig).toHaveBeenCalledWith(
+      "https://api.deepseek.com/v1",
+      "sk-test",
+      "deepseek-chat",
+      false,
+      undefined,
+    );
   });
 });

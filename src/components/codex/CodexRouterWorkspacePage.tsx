@@ -5318,7 +5318,8 @@ function StatusTab({
 
             <div className="mt-3 rounded-lg border border-border bg-background/70 px-3 py-2 text-xs leading-6 text-muted-foreground dark:border-slate-700 dark:bg-slate-950/20 dark:text-slate-300">
               已读取 {subagentUsage?.totalAgents ?? 0} 个本地子 Agent 会话，
-              归并为 {subagentUsage?.modelStats.length ?? 0} 个模型分组。状态库：
+              归并为 {subagentUsage?.modelStats.length ?? 0}{" "}
+              个模型分组。状态库：
               {subagentUsage?.stateDbPath ?? "未定位"}。
             </div>
           </section>

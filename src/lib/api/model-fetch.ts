@@ -8,6 +8,14 @@ export interface FetchedModel {
   contextWindow?: number | null;
 }
 
+export interface CodexResponsesProbeResult {
+  ok: boolean;
+  status?: number | null;
+  url: string;
+  model: string;
+  detail: string;
+}
+
 /**
  * 从供应商获取可用模型列表
  *
@@ -26,6 +34,27 @@ export async function fetchModelsForConfig(
     apiKey,
     isFullUrl,
     modelsUrl,
+    customUserAgent,
+  });
+}
+
+/**
+ * 对指定 Codex 模型执行最小 `/v1/responses` 连通性探测。
+ *
+ * 这个探测会真实请求上游，可能产生极少量额度消耗；调用方应只在用户显式点击时触发。
+ */
+export async function probeCodexResponsesForConfig(
+  baseUrl: string,
+  apiKey: string,
+  model: string,
+  isFullUrl?: boolean,
+  customUserAgent?: string,
+): Promise<CodexResponsesProbeResult> {
+  return invoke("probe_codex_responses_for_config", {
+    baseUrl,
+    apiKey,
+    model,
+    isFullUrl,
     customUserAgent,
   });
 }

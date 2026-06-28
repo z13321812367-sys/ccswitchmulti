@@ -39,6 +39,19 @@ export interface WizardModelNameCollision {
   canonicalProviderIds: string[];
 }
 
+export type WizardConnectivityStatus = "pass" | "warn" | "fail" | "skipped";
+
+export interface WizardConnectivityResult {
+  providerId: string;
+  providerName: string;
+  model: string;
+  status: WizardConnectivityStatus;
+  canContinue: boolean;
+  detail: string;
+  url?: string;
+  httpStatus?: number | null;
+}
+
 const OPENAI_CODEX_FALLBACK_MODELS: CodexCatalogModel[] = [
   { model: "gpt-5.5", upstreamModel: "gpt-5.5", contextWindow: 272000 },
   { model: "gpt-5.4", upstreamModel: "gpt-5.4", contextWindow: 272000 },
@@ -292,7 +305,7 @@ export function inferWizardRoutePrefixes(provider: Provider): string[] {
 }
 
 // 推断 route 上游协议；显式 meta/apiFormat 优先，未知第三方默认走 Chat Completions。
-function inferWizardApiFormat(provider: Provider): CodexApiFormat {
+export function inferWizardApiFormat(provider: Provider): CodexApiFormat {
   const config = provider.settingsConfig ?? {};
   return (
     provider.meta?.apiFormat ??
@@ -300,6 +313,80 @@ function inferWizardApiFormat(provider: Provider): CodexApiFormat {
     config.api_format ??
     "openai_chat"
   );
+}
+
+// 每个 provider 默认探测其 modelCatalog 暴露的全部可见模型；这是用户显式点击的真实请求，不在向导自动执行。
+export function getWizardConnectivityProbeModels(provider: Provider): string[] {
+  return Array.from(
+    new Set(
+      readWizardModelCatalog(provider)
+        .map((model) => model.model?.trim())
+        .filter((model): model is string => Boolean(model)),
+    ),
+  );
+}
+
+// 将真实 `/v1/responses` 探测结果归类为“可继续/阻塞”；Chat-only provider 的 Responses 失败不是阻塞。
+export function classifyWizardConnectivityResult(args: {
+  provider: Provider;
+  model: string;
+  ok: boolean;
+  detail: string;
+  url?: string;
+  httpStatus?: number | null;
+}): WizardConnectivityResult {
+  const apiFormat = inferWizardApiFormat(args.provider);
+  if (args.ok) {
+    return {
+      providerId: args.provider.id,
+      providerName: args.provider.name,
+      model: args.model,
+      status: "pass",
+      canContinue: true,
+      detail: "直接 /v1/responses 探测通过。",
+      url: args.url,
+      httpStatus: args.httpStatus,
+    };
+  }
+
+  const chatOnlyCanContinue = apiFormat === "openai_chat";
+  return {
+    providerId: args.provider.id,
+    providerName: args.provider.name,
+    model: args.model,
+    status: chatOnlyCanContinue ? "warn" : "fail",
+    canContinue: chatOnlyCanContinue,
+    detail: chatOnlyCanContinue
+      ? `直接 /v1/responses 失败，但该 provider 配置为 Chat Completions；运行时会由 MultiRouter 转换到 /chat/completions。上游返回：${args.detail}`
+      : `该 provider 配置为 Responses 直连，/v1/responses 失败会阻塞真实 Codex 请求。上游返回：${args.detail}`,
+    url: args.url,
+    httpStatus: args.httpStatus,
+  };
+}
+
+// 没有可探测配置时生成跳过结果；有模型目录则可继续但有风险，没有目录则阻塞。
+export function skippedWizardConnectivityResult(
+  provider: Provider,
+  reason: string,
+): WizardConnectivityResult {
+  const hasCatalog = hasWizardModelCatalog(provider);
+  return {
+    providerId: provider.id,
+    providerName: provider.name,
+    model: "*",
+    status: hasCatalog ? "skipped" : "fail",
+    canContinue: hasCatalog,
+    detail: hasCatalog
+      ? `${reason}；已有 modelCatalog，允许继续但未验证真实响应。`
+      : `${reason}；且没有 modelCatalog，不能确认路由可用。`,
+  };
+}
+
+// 聚合连通性结果：只要存在阻塞项，状态机就不应自动进入保存发布。
+export function canContinueAfterConnectivity(
+  results: WizardConnectivityResult[],
+): boolean {
+  return results.length > 0 && results.every((result) => result.canContinue);
 }
 
 // 为模型源生成 provider 分组 route；只引用 targetProviderId，不复制第三方 bearer 密钥。
