@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-06-29 CCSwitchMulti v3.16.4-3 Formal Release
+
+- `v3.16.4-3` 已作为 BigStrongSun/ccswitchmulti 的 GitHub formal release 发布：`https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.16.4-3`。Release 为非 draft、`prerelease=false`，发布时间为 `2026-06-29T02:02:35Z`，annotated tag `v3.16.4-3` 的 peeled commit 为 `1534a0e45dc17acd4b792de484f1c6b724cb7e18`（`chore(release): prepare CCSwitchMulti v3.16.4-3`）。
+- 本地 Windows release pipeline 成功，导出目录为 `C:\Users\sunda\Documents\LLMservice\最新版ccswitchmulti`，完成时间 `2026-06-29 09:56:35 +08:00`。`latest.json` 版本为 `3.16.4-3`，updater URL 指向 `https://github.com/BigStrongSun/ccswitchmulti/releases/download/v3.16.4-3/CCSwitchMulti_3.16.4-3_x64-setup.exe`；raw exe `CCSwitchMulti_3.16.4-3_x64.exe` 的 FileVersion/ProductVersion 均验证为 `3.16.4-3`。
+- 本次 release 上传 9 个资产：`CCSwitchMulti_3.16.4-3_x64-setup.exe`、安装包 `.sig`、`CCSwitchMulti_3.16.4-3_x64-portable.zip`、`CCSwitchMulti_3.16.4-3_x64.exe`、`latest.json`、`SHA256SUMS.txt`、`linux-build-note.md`、`macos-build-note.md`、中文 release note `v3.16.4-3-zh.md`。Linux/macOS 正式二进制仍未在 Windows 本地生成，只提供平台构建说明。
+- 发布前验证覆盖：`pnpm typecheck`；`pnpm vitest run tests/components/CodexFormFields.test.tsx tests/components/AddProviderDialog.test.tsx tests/components/ProviderList.test.tsx tests/components/CodexMultiRouterWizard.test.tsx tests/lib/codexMultiRouterWizard.test.ts`；`cargo fmt --manifest-path src-tauri\Cargo.toml --check`；`cargo test --manifest-path src-tauri\Cargo.toml codex_model_catalog --lib`；`cargo test --manifest-path src-tauri\Cargo.toml codex_subagent_usage_stats --lib`；`cargo test --manifest-path src-tauri\Cargo.toml responses_lite --lib`；`git diff --check`。
+- 发布过程中曾有一次手动 pipeline 与 post-commit pipeline 重叠，导致 Tauri artifact lock 等待；最终采用 post-commit pipeline 导出的 `3.16.4-3` 资产发布，并停止了冗余 `tmpC017` Tauri build 进程。以后 release 前如果已经触发 post-commit pipeline，先等 `scripts/logs/post-commit-release.log` 完成，避免再手动启动第二条 `tauri build`。
+
 ## 2026-06-28 Codex MultiRouter Wizard Implementation
 
 - 2026-06-29 修复 MultiRouter 向导试用反馈的三处 UI/流程问题：遮罩窗口从 `max-w-5xl` 放宽为接近 1280px 的 `96vw` 宽度，内容区高度提高到 `82vh`，左侧步骤列加宽，避免默认窗口下 provider/路由组件挤压；第一页文案改为先说明“接入模型源、读取模型并处理重名、生成分流规则、启用并修复历史记录”四件用户任务，`127.0.0.1:15721` 等技术细节降级为备注。
