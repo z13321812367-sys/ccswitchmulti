@@ -20,6 +20,7 @@
 - 2026-06-29 完整引导交接细化：`CodexMultiRouterWizard` 启用成功后必须自动关闭遮罩，让用户看到 App 已打开的 MultiRouter `status` 页；toast 明确要求去 Codex 发送一次请求，等待当前链路、监听、Codex 接管、路由入口和最近转发都成功。向导里的“打开工作台”也改为打开 `status` 页，不再跳 `test` 页，避免绕开五项状态验证。
 - 2026-06-29 入口选择规则：Codex 首页底部 `配置多路模型` 不再直接打开向导，而是每次先弹出入口选择面板；用户可以随时关闭退出，也可以选择“开始引导配置”进入遮罩式向导，或选择“直接打开工作台”进入 MultiRouter `status` 页。这个选择不受 dismissed localStorage 影响，确保用户再次点击入口仍可决定是否开启引导。
 - 历史修复页新增向导收尾入口：`SessionManagerPage` 通过一次性 `initialCodexHistoryRepair` 自动打开 `CodexHistoryRepairPanel` 并消费标记；自动跳转进入时面板顶部会显示历史修复点击顺序：加载历史、预览修复、确认写入、完整重启 Codex、打开 GitHub 仓库点 Star。真实应用历史修复成功后回调 App，提示用户完整重启 Codex，然后先请求用户给 CCSwitchMulti GitHub 仓库点 Star，再用默认浏览器打开 `https://github.com/BigStrongSun/ccswitchmulti`。如果后续引导回调失败，只报“历史修复已完成，但后续引导失败”，不能把修复本身标记为失败。
+- 2026-06-29 已为 MultiRouter 向导试用打本地 Windows 包：运行 `scripts/local-release-pipeline.ps1 -Reason manual-multirouter-wizard-test` 成功，导出目录 `C:\Users\sunda\Documents\LLMservice\最新版ccswitchmulti`，metadata 指向分支 `codex/multirouter-wizard`、提交 `214bc5b4650e20d3de7cc13a3ff113cda63b00c4`、版本 `3.16.4-2`。可试用文件包括 `windows/installer/CCSwitchMulti_3.16.4-2_x64-setup.exe`、`windows/portable/CCSwitchMulti_3.16.4-2_x64-portable.zip`、`windows/raw-exe/CCSwitchMulti_3.16.4-2_x64.exe`；这是本地试用包，不是正式 release bump。
 
 ## 2026-06-28 Mixed Relay Responses Capability Boundary
 
