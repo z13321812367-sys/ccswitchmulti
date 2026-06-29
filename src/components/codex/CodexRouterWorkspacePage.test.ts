@@ -614,6 +614,71 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("opens the Codex add-source flow when route picker has no model sources", async () => {
+    const onCreateProvider = vi.fn();
+    const plan = createDraftRoutingPlan([], []);
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "routes",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider,
+      }),
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "编辑匹配规则" }));
+    await user.click(screen.getByRole("button", { name: "添加模型源" }));
+
+    expect(onCreateProvider).toHaveBeenCalledTimes(1);
+  });
+
+  it("scrolls to the inline route picker after opening route editing", async () => {
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+    const provider: Provider = {
+      id: "codex-qwen-scroll",
+      name: "Qwen Scroll Source",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "qwen3.6" }] },
+      },
+    };
+    const plan = createDraftRoutingPlan([provider], [provider]);
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [provider, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "routes",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "编辑匹配规则" }));
+
+    await waitFor(() =>
+      expect(scrollIntoView).toHaveBeenCalledWith({
+        behavior: "smooth",
+        block: "nearest",
+      }),
+    );
+  });
+
   it("keeps a visible alias when route page refreshes provider models from upstream ids", async () => {
     vi.mocked(fetchModelsForConfig).mockResolvedValueOnce([
       { id: "gpt-5.5", ownedBy: null, contextWindow: 272000 },

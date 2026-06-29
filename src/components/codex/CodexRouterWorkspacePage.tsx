@@ -1976,7 +1976,7 @@ export function CodexRouterWorkspacePage({
   initialTab = "status",
   onEditProvider,
   onDeletePlan,
-  onCreateProvider: _onCreateProvider,
+  onCreateProvider,
   onRuntimeReady,
 }: {
   providers: Provider[];
@@ -2615,6 +2615,7 @@ export function CodexRouterWorkspacePage({
               modelSources={modelSources}
               routingPlans={routingPlans}
               onCreatePlan={handleCreatePlan}
+              onCreateProvider={onCreateProvider}
               onEditPlan={handleEditPlan}
               onSelectPlan={handleSelectPlan}
             />
@@ -2628,6 +2629,7 @@ export function CodexRouterWorkspacePage({
               selectedRoute={selectedRoute}
               modelSources={modelSources}
               onCreatePlan={handleCreatePlan}
+              onCreateProvider={onCreateProvider}
               onOpenRoutePicker={handleOpenRoutePicker}
               onSaveRoutes={handleSaveRoutingRoutes}
               onSelectPlan={handleSelectPlan}
@@ -2924,12 +2926,14 @@ function SourcesTab({
   modelSources,
   routingPlans,
   onCreatePlan,
+  onCreateProvider,
   onEditPlan,
   onSelectPlan,
 }: {
   modelSources: Provider[];
   routingPlans: Provider[];
   onCreatePlan: () => void;
+  onCreateProvider: () => void;
   onEditPlan: (provider: Provider, detail?: string) => void;
   onSelectPlan: (provider: Provider) => void;
 }) {
@@ -2999,6 +3003,17 @@ function SourcesTab({
           icon={Server}
           title="选择模型源"
           detail="这里选择要接入多路路由的上游模型源；点卡片进入模型源配置。"
+          action={
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={onCreateProvider}
+              className="gap-2"
+            >
+              <Plus className="h-4 w-4" />
+              添加模型源
+            </Button>
+          }
         />
         <div className="mt-3 grid gap-3 md:grid-cols-2">
           {modelSources.map((provider) => (
@@ -3034,6 +3049,15 @@ function SourcesTab({
               </div>
             </button>
           ))}
+          {modelSources.length === 0 && (
+            <EmptyState
+              icon={Server}
+              title="还没有模型源"
+              detail="先添加一个普通 Codex 模型源，再把它接入多路路由。"
+              actionLabel="添加模型源"
+              onAction={onCreateProvider}
+            />
+          )}
         </div>
       </section>
     </div>
@@ -3049,6 +3073,7 @@ function RoutesTab({
   modelSources,
   providersById,
   onCreatePlan,
+  onCreateProvider,
   onOpenRoutePicker,
   onSaveRoutes,
   onSelectPlan,
@@ -3078,6 +3103,7 @@ function RoutesTab({
   modelSources: Provider[];
   providersById: Map<string, Provider>;
   onCreatePlan: () => void;
+  onCreateProvider: () => void;
   onOpenRoutePicker: (provider?: Provider | null) => void;
   onSaveRoutes: (plan: Provider, routes: CodexRoute[]) => Promise<void>;
   onSelectPlan: (provider: Provider) => void;
@@ -3103,6 +3129,7 @@ function RoutesTab({
   routePickerError: string | null;
   onRoutePickerOpenChange: (open: boolean) => void;
 }) {
+  const actionPanelRef = useRef<HTMLDivElement | null>(null);
   const selectedPlanRoutes = selectedPlan
     ? routeEntries.filter(({ provider }) => provider.id === selectedPlan.id)
     : routeEntries;
@@ -3127,6 +3154,19 @@ function RoutesTab({
     isCodexTakeoverActive,
     activeProviderId: effectiveActiveProviderId,
   });
+
+  // 候选 router 选择器和设置面板都是行内展开；打开后主动定位到面板，避免用户停在上方规则区误以为没有响应。
+  useEffect(() => {
+    if (!isRoutePickerOpen && !isPlanSettingsOpen) return;
+    window.setTimeout(() => {
+      const scrollIntoView = actionPanelRef.current?.scrollIntoView;
+      if (typeof scrollIntoView !== "function") return;
+      scrollIntoView.call(actionPanelRef.current, {
+        behavior: "smooth",
+        block: "nearest",
+      });
+    }, 0);
+  }, [isPlanSettingsOpen, isRoutePickerOpen, selectedPlan?.id]);
 
   return (
     <div className="space-y-3">
@@ -3270,27 +3310,30 @@ function RoutesTab({
         </section>
       </div>
 
-      {selectedPlan && isRoutePickerOpen ? (
-        <RouteCandidatePicker
-          selectedPlan={selectedPlan}
-          modelSources={modelSources}
-          providerModelRefreshStates={providerModelRefreshStates}
-          onSaveRoutes={onSaveRoutes}
-          onClose={() => onRoutePickerOpenChange(false)}
-          isSaving={isSavingRoutes}
-          selectAllByDefault={routePickerSelectAll}
-        />
-      ) : null}
+      <div ref={actionPanelRef}>
+        {selectedPlan && isRoutePickerOpen ? (
+          <RouteCandidatePicker
+            selectedPlan={selectedPlan}
+            modelSources={modelSources}
+            providerModelRefreshStates={providerModelRefreshStates}
+            onSaveRoutes={onSaveRoutes}
+            onCreateProvider={onCreateProvider}
+            onClose={() => onRoutePickerOpenChange(false)}
+            isSaving={isSavingRoutes}
+            selectAllByDefault={routePickerSelectAll}
+          />
+        ) : null}
 
-      {selectedPlan && isPlanSettingsOpen ? (
-        <MultiRouterSettingsPanel
-          selectedPlan={selectedPlan}
-          selectedRoutes={selectedPlanRoutes}
-          onSave={onSavePlanSettings}
-          onClose={() => onPlanSettingsOpenChange(false)}
-          isSaving={isSavingPlanSettings}
-        />
-      ) : null}
+        {selectedPlan && isPlanSettingsOpen ? (
+          <MultiRouterSettingsPanel
+            selectedPlan={selectedPlan}
+            selectedRoutes={selectedPlanRoutes}
+            onSave={onSavePlanSettings}
+            onClose={() => onPlanSettingsOpenChange(false)}
+            isSaving={isSavingPlanSettings}
+          />
+        ) : null}
+      </div>
 
       {(routePickerMessage || routePickerError) && (
         <div
@@ -3820,6 +3863,7 @@ function RouteCandidatePicker({
   modelSources,
   providerModelRefreshStates,
   onSaveRoutes,
+  onCreateProvider,
   onClose,
   isSaving,
   selectAllByDefault,
@@ -3828,6 +3872,7 @@ function RouteCandidatePicker({
   modelSources: Provider[];
   providerModelRefreshStates: Record<string, ProviderModelRefreshState>;
   onSaveRoutes: (plan: Provider, routes: CodexRoute[]) => Promise<void>;
+  onCreateProvider: () => void;
   onClose: () => void;
   isSaving: boolean;
   selectAllByDefault?: boolean;
@@ -4123,9 +4168,9 @@ function RouteCandidatePicker({
           <EmptyState
             icon={Server}
             title="没有可选 router"
-            detail="先添加至少一个 Codex 模型源，再回到这里选择候选 router。"
-            actionLabel="关闭"
-            onAction={onClose}
+            detail="先添加至少一个 Codex 模型源，添加完成后会回到这里继续选择候选 router。"
+            actionLabel="添加模型源"
+            onAction={onCreateProvider}
           />
         ) : null}
       </div>

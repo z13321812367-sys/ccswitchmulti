@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-06-30 Codex MultiRouter Configuration Guide Navigation Audit
+
+- 用户明确收窄排查范围：只处理 Codex 分支配置和 Codex 多路路由配置指南，不泛化到 Claude Desktop、Gemini、OpenCode、OpenClaw 或 Hermes。上一轮误扩展改动已撤回，当前只沿 `CodexRouterWorkspacePage` / `CodexMultiRouterWizard` / Codex provider 表单查同类“点击后状态已变但用户看不到下一步”的问题。
+- 新发现的真实 Codex-only 缺口：`CodexRouterWorkspacePage` 已从 `App` 接收 `onCreateProvider`，但参数被命名为 `_onCreateProvider` 后没有使用；在工作台没有普通 Codex 模型源、RouteCandidatePicker 为空时，只提示“先添加至少一个 Codex 模型源”并提供“关闭”，用户无法从配置指南链路直接打开 Codex 模型源添加面板。
+- 修复边界：只在 Codex MultiRouter 工作台接入已有 `onCreateProvider` 回调，给“模型源”页和“没有可选 router”空状态提供“添加模型源”；同时给行内展开的候选 router 选择器 / MultiRouter 设置面板加 `scrollIntoView({ behavior: "smooth", block: "nearest" })`，避免点击“编辑匹配规则/创建多路路由”后面板在视口下方导致再次误判为卡死。不改 route 保存、provider 协议、modelCatalog、wizard 状态机或非 Codex app。
+- 回归测试落点：`src/components/codex/CodexRouterWorkspacePage.test.ts` 覆盖无模型源时点击“添加模型源”会触发父级回调，以及打开“编辑匹配规则”后滚到行内 RouteCandidatePicker。
+
 ## 2026-06-30 MultiRouter Provider Preset Click Perceived Freeze Fix
 
 - 用户截图里“创建多路路由 -> 单独接入模型源”点击 `Zhipu GLM` 后并不是走 `UniversalProviderPanel`，而是 `ProviderForm(appId="codex") -> ProviderPresetSelector -> handlePresetChange("codex-<index>")`。`Zhipu GLM` 来自 `src/config/codexProviderPresets.ts`，不在 `universalProviderPresets`。
