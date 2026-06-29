@@ -53,6 +53,25 @@ beforeEach(() => {
 });
 
 describe("CodexMultiRouterWizard", () => {
+  it("explains the first step with user-facing guidance before technical details", () => {
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[provider()]}
+        onOpenChange={vi.fn()}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("这套向导会帮你完成 4 件事")).toBeInTheDocument();
+    expect(screen.getByText(/你不用手动改配置文件/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/技术备注：Codex 最后仍只连接本机/),
+    ).toBeInTheDocument();
+  });
+
   it("opens, navigates steps, and stores dismissed flag when skipped", () => {
     const onOpenChange = vi.fn();
 
@@ -77,6 +96,51 @@ describe("CodexMultiRouterWizard", () => {
       "true",
     );
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("does not reset to the intro step when parent rerenders with a new providers array", () => {
+    const deepseekProvider = provider();
+    const { rerender } = renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[deepseekProvider]}
+        onOpenChange={vi.fn()}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "下一步" }));
+    expect(
+      screen.getByText(/当前识别到 1 个普通 Codex provider/),
+    ).toBeInTheDocument();
+
+    rerender(
+      <QueryClientProvider
+        client={
+          new QueryClient({
+            defaultOptions: { queries: { retry: false } },
+          })
+        }
+      >
+        <CodexMultiRouterWizard
+          open
+          providers={[{ ...deepseekProvider }]}
+          onOpenChange={vi.fn()}
+          onCreateProvider={vi.fn()}
+          onOpenWorkspace={vi.fn()}
+          onEnablePlan={vi.fn()}
+        />
+      </QueryClientProvider>,
+    );
+
+    expect(
+      screen.getByText(/当前识别到 1 个普通 Codex provider/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("这套向导会帮你完成 4 件事"),
+    ).not.toBeInTheDocument();
   });
 
   it("stays in needSources state when advancing without model sources", () => {

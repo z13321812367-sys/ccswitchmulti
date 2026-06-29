@@ -321,6 +321,10 @@ function App() {
     isProxyRunning,
   });
   const providers = useMemo(() => data?.providers ?? {}, [data]);
+  const codexWizardProviders = useMemo(
+    () => (activeApp === "codex" ? Object.values(providers) : []),
+    [activeApp, providers],
+  );
   const currentProviderId = data?.currentProviderId ?? "";
   const isOpenClawView =
     activeApp === "openclaw" &&
@@ -1877,7 +1881,7 @@ function App() {
 
       <CodexMultiRouterWizard
         open={isCodexMultiRouterWizardOpen}
-        providers={activeApp === "codex" ? Object.values(providers) : []}
+        providers={codexWizardProviders}
         onOpenChange={setIsCodexMultiRouterWizardOpen}
         onCreateProvider={() => {
           setActiveApp("codex");

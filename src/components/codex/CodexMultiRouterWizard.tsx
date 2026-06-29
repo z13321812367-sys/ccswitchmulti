@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useReducer, useState } from "react";
+import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -465,9 +465,14 @@ export function CodexMultiRouterWizard({
     WizardConnectivityResult[]
   >([]);
   const [wizardIssues, setWizardIssues] = useState<WizardIssue[]>([]);
+  const initializedOpenRef = useRef(false);
 
   const existingPlan = useMemo(
     () => providers.find((provider) => isCodexMultiRouterPlan(provider)),
+    [providers],
+  );
+  const providerModelSources = useMemo(
+    () => defaultWizardModelSources(providers),
     [providers],
   );
   const stepIndex = STEPS.findIndex((step) => step.key === flowState.stepKey);
@@ -486,16 +491,51 @@ export function CodexMultiRouterWizard({
   const isSavingPlan = flowState.status === "savingPlan";
   const isEnablingPlan = flowState.status === "enabling";
 
-  // 每次打开向导都用当前 provider 列表重建草稿，保证用户刚添加的模型源能立即出现。
+  // 每次打开向导只初始化一次。父组件 rerender 会传入新的 providers 数组，不能因此把用户从第 2 步重置回第 1 步。
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      initializedOpenRef.current = false;
+      return;
+    }
+    if (initializedOpenRef.current) return;
+
+    initializedOpenRef.current = true;
     setSavedPlan(existingPlan ?? null);
-    const nextSources = defaultWizardModelSources(providers);
-    setDraftSources(nextSources);
+    setDraftSources(providerModelSources);
     setConnectivityResults([]);
     setWizardIssues([]);
-    dispatchFlow({ type: "INIT", hasSources: nextSources.length > 0 });
-  }, [existingPlan, open, providers]);
+    dispatchFlow({
+      type: "INIT",
+      hasSources: providerModelSources.length > 0,
+    });
+  }, [existingPlan, open, providerModelSources]);
+
+  // 向导打开后仍要吸收用户新建/删除的普通 Codex provider，但不能重新派发 INIT。
+  useEffect(() => {
+    if (!open || !initializedOpenRef.current) return;
+    setSavedPlan(existingPlan ?? null);
+    setDraftSources((currentSources) => {
+      const nextSourceById = new Map(
+        providerModelSources.map((provider) => [provider.id, provider]),
+      );
+      const retainedSources = currentSources.filter((provider) =>
+        nextSourceById.has(provider.id),
+      );
+      const retainedIds = new Set(
+        retainedSources.map((provider) => provider.id),
+      );
+      const appendedSources = providerModelSources.filter(
+        (provider) => !retainedIds.has(provider.id),
+      );
+      if (
+        retainedSources.length === currentSources.length &&
+        appendedSources.length === 0
+      ) {
+        return currentSources;
+      }
+      return [...retainedSources, ...appendedSources];
+    });
+  }, [existingPlan, open, providerModelSources]);
 
   // 所有异步 catch 都进入同一个问题列表，让 toast 之外的 UI 也能长期展示异常和继续策略。
   const recordWizardIssue = (issue: Omit<WizardIssue, "id">) => {
@@ -883,7 +923,7 @@ export function CodexMultiRouterWizard({
 
   return createPortal(
     <div className="fixed inset-0 z-[120] bg-black/70 text-foreground backdrop-blur-sm">
-      <div className="absolute inset-x-4 top-6 mx-auto max-w-5xl rounded-lg border border-white/15 bg-background shadow-2xl">
+      <div className="absolute inset-x-3 top-4 mx-auto w-[min(96vw,1280px)] rounded-lg border border-white/15 bg-background shadow-2xl">
         <div className="flex items-start justify-between border-b px-5 py-4">
           <div className="flex items-start gap-3">
             <div className="rounded-md bg-primary/10 p-2 text-primary">
@@ -909,7 +949,7 @@ export function CodexMultiRouterWizard({
           </Button>
         </div>
 
-        <div className="grid max-h-[72vh] grid-cols-[14rem_1fr] overflow-hidden">
+        <div className="grid max-h-[82vh] grid-cols-[15rem_minmax(0,1fr)] overflow-hidden">
           <div className="space-y-1 border-r bg-muted/30 p-3">
             {STEPS.map((step, index) => {
               const StepIcon = step.icon;
@@ -1018,19 +1058,35 @@ export function CodexMultiRouterWizard({
               <div className="space-y-4">
                 <div className="rounded-lg border p-4">
                   <div className="flex items-center gap-2 font-medium">
-                    <Route className="h-4 w-4" />
-                    本地 15721 继续作为 Codex 唯一入口
+                    <Wand2 className="h-4 w-4" />
+                    这套向导会帮你完成 4 件事
                   </div>
-                  <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                    向导会生成一个本地 MultiRouter provider。Codex 请求仍发到
-                    127.0.0.1:15721，CCSwitchMulti 根据请求体里的 model
-                    匹配路由，再把请求交给 OpenAI/中转站、DeepSeek、Qwen
-                    或本地模型。
-                  </p>
+                  <div className="mt-4 grid gap-3 md:grid-cols-2">
+                    {[
+                      "把 OpenAI、中转站、DeepSeek、Qwen、本地模型接进来",
+                      "自动读取模型列表，并处理官方模型和中转模型重名",
+                      "按模型名称生成分流规则，让 Codex 自动选上游",
+                      "启用后等待真实请求成功，再带你修复历史记录",
+                    ].map((item, index) => (
+                      <div
+                        key={item}
+                        className="flex gap-3 rounded-md border bg-muted/30 p-3 text-sm"
+                      >
+                        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary text-xs font-medium text-primary-foreground">
+                          {index + 1}
+                        </span>
+                        <span className="leading-6">{item}</span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
-                <div className="rounded-lg border p-4 text-sm text-muted-foreground">
-                  自动化只会在你点击“保存并发布”后写入 providers
-                  数据库；启用当前 Codex provider 需要最后一步显式点击。
+                <div className="rounded-lg border p-4 text-sm leading-6 text-muted-foreground">
+                  你不用手动改配置文件。向导会先预览模型源、连通性和路由规则，只有点击“保存并发布”后才写入本地
+                  providers 数据库；点击“启用这个多路路由”后才会接管当前 Codex。
+                </div>
+                <div className="rounded-lg border bg-muted/30 p-4 text-xs leading-6 text-muted-foreground">
+                  技术备注：Codex 最后仍只连接本机 127.0.0.1:15721，
+                  CCSwitchMulti 会根据请求里的 model 把流量发到对应上游。
                 </div>
               </div>
             )}

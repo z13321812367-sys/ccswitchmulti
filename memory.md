@@ -2,6 +2,8 @@
 
 ## 2026-06-28 Codex MultiRouter Wizard Implementation
 
+- 2026-06-29 修复 MultiRouter 向导试用反馈的三处 UI/流程问题：遮罩窗口从 `max-w-5xl` 放宽为接近 1280px 的 `96vw` 宽度，内容区高度提高到 `82vh`，左侧步骤列加宽，避免默认窗口下 provider/路由组件挤压；第一页文案改为先说明“接入模型源、读取模型并处理重名、生成分流规则、启用并修复历史记录”四件用户任务，`127.0.0.1:15721` 等技术细节降级为备注。
+- 这次“点到第 2 步又跳回第 1 步”的真实根因是 `CodexMultiRouterWizard` 在 `open/providers/existingPlan` effect 中每次 props identity 变化都会重新 `dispatchFlow({ type: "INIT" })`。`App.tsx` 原来 inline 传 `Object.values(providers)`，任意父级 rerender 都可能生成新数组，导致向导被重置。修复方式是向导内用 `initializedOpenRef` 保证每次打开只初始化一次，另设 provider 同步 effect 只追加/移除打开期间新建或删除的普通 Codex provider，不再派发 `INIT`；`App.tsx` 同时 memoize `codexWizardProviders` 降低无意义 props 变化。
 - 分支 `codex/multirouter-wizard` 新增 Codex 首页底部居中的 `配置多路模型` 入口，落点是 `ProviderList` 的 Codex 专属 CTA；空 Provider 列表也会显示该入口，右上角原有 MultiRouter 工作台图标入口保持不变。
 - 新增遮罩式 `CodexMultiRouterWizard`：Portal 到 `document.body`，黑色 fixed overlay，按教程顺序引导理解本地 `15721` MultiRouter、创建模型源、检查 API Key/Base URL/API 格式、自动获取 `/models`、处理重名模型、生成按 provider 分组的 route、保存发布、显式启用并打开工作台 `test` 页。
 - 2026-06-28 追加状态机改造：`CodexMultiRouterWizard` 不再只是 `stepIndex` 线性向导，而是由 `wizardFlowReducer` 显式维护 `opened/needSources/reviewProviderConfig/configIncomplete/readyToFetchModels/fetchingModels/modelFetchPartial/modelsFetched/collisionReviewRequired/routePreview/savingPlan/saveFailed/published/enablePrompt/enabling/enableFailed/enabled/completed/dismissed` 等状态。左侧步骤点击会映射到对应业务状态；下一步按钮会做 gate，例如无模型源停在 `needSources`，配置缺口进入 `configIncomplete`，保存失败进入 `saveFailed` 并展示错误。
