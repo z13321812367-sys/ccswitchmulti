@@ -5,6 +5,7 @@
 - 用户追问“配置完返回的校验和刷新流程”，排查范围仍只限 Codex MultiRouter。现有成功判定已经正确：`StatusTab` 只在本地代理运行、Codex 接管、当前 provider 是选中 MultiRouter、入口/规则启用，并且当前方案 route 有真实成功转发证据时才触发 `onRuntimeReady`，不会因为其它 Codex 请求 200 就提前进入历史修复。
 - 新发现的刷新体验缺口：向导 finish 页启用 MultiRouter 后，父级只 `invalidateQueries` proxyStatus/proxyTakeoverStatus/providers，状态页要等轮询或后台 refetch 才显示最新监听/接管/current provider/日志；用户配置完返回后可能短时间看到旧校验状态。修复为启用后显式 `refetchQueries` proxyStatus、proxyTakeoverStatus、providers/codex 和 usage/logs。
 - 状态页新增“刷新校验”手动入口：刷新同一组校验源并显示完成/失败提示，便于用户从 Codex 发出一次请求后立即重新检查链路卡片、最近转发和历史修复触发条件。不改变成功判定、route 归因、诊断探测或模型源刷新逻辑。
+- 继续排查其它 Codex 跳转入口后发现：工具栏直接打开 Codex MultiRouter 时如果只 `setCurrentView("codexRouter")`，会沿用上一次 `codexRouterWorkspaceTarget` 的 provider/tab。修复为统一走 `openCodexRouterWorkspace(null, "status")`；工作台内部 tab 跳转新增滚动容器 `scrollTo({ top: 0 })`，避免从长页面切到状态/模型源/测试页时停留旧滚动位置。历史修复跳转已有 `SessionManagerPage` 测试覆盖一次性消费，不需要改。
 
 ## 2026-06-30 Codex MultiRouter Configuration Guide Navigation Audit
 

@@ -2014,6 +2014,7 @@ export function CodexRouterWorkspacePage({
     Record<string, ProviderModelRefreshState>
   >({});
   const appliedInitialNavigationRef = useRef<string | null>(null);
+  const workspaceScrollRef = useRef<HTMLDivElement | null>(null);
   const modelRefreshAttemptedKeysRef = useRef<Set<string>>(new Set());
   // 记录每个 provider 当前最新的 /models 刷新 attempt；普通 rerender 会触发 effect cleanup，不能因此吞掉同批并发请求的终态。
   const modelRefreshActiveAttemptKeysRef = useRef<Record<string, string>>({});
@@ -2277,6 +2278,13 @@ export function CodexRouterWorkspacePage({
     setActiveTab(initialTab);
     appliedInitialNavigationRef.current = navigationKey;
   }, [initialProviderId, initialTab, routingPlanIdSet]);
+
+  // 工作台不同页签内容高度差异很大；切换页签时回到顶部，避免沿用上一页滚动位置导致目标页像没有跳转。
+  useEffect(() => {
+    const scrollTo = workspaceScrollRef.current?.scrollTo;
+    if (typeof scrollTo !== "function") return;
+    scrollTo.call(workspaceScrollRef.current, 0, 0);
+  }, [activeTab]);
 
   useEffect(() => {
     const persistedPlan = optimisticRoutingPlan
@@ -2559,7 +2567,10 @@ export function CodexRouterWorkspacePage({
 
   return (
     <div className="flex h-full flex-col overflow-hidden px-6 py-4">
-      <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-2">
+      <div
+        ref={workspaceScrollRef}
+        className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-2"
+      >
         <HeaderPanel
           onCreatePlan={handleCreatePlan}
           onJump={(tab) => setActiveTab(tab)}

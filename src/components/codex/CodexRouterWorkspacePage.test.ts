@@ -679,6 +679,45 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     );
   });
 
+  it("resets the workspace scroll position when jumping between multirouter tabs", async () => {
+    const scrollTo = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollTo", {
+      configurable: true,
+      value: scrollTo,
+    });
+    const provider: Provider = {
+      id: "codex-scroll-tab-source",
+      name: "Scroll Tab Source",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "qwen3.6" }] },
+      },
+    };
+    const plan = createDraftRoutingPlan([provider], [provider]);
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [provider, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "overview",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    scrollTo.mockClear();
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "查看链路状态" }));
+
+    await waitFor(() =>
+      expect(scrollTo).toHaveBeenCalledWith(0, 0),
+    );
+  });
+
   it("keeps a visible alias when route page refreshes provider models from upstream ids", async () => {
     vi.mocked(fetchModelsForConfig).mockResolvedValueOnce([
       { id: "gpt-5.5", ownedBy: null, contextWindow: 272000 },
