@@ -7,6 +7,12 @@
 - `/models` 获取能力和可路由模型目录是两回事：没有 Base URL/API Key 只代表不能在线刷新模型列表，不代表不能生成路由。已有 `modelCatalog` 的 provider 应显示“已有 modelCatalog，可跳过 /models 在线读取；如需刷新再补 Base URL/API Key”，不要再写“未配置在线获取参数”这种像错误的提示。
 - 回归测试：`tests/components/CodexMultiRouterWizard.test.tsx` 覆盖 catalog-only provider 不显示旧提示，以及 `OpenAI Official Backup` 带旧 `openai_chat` metadata 时配置页展示 `Responses API` 并提示覆盖旧配置；数据层已有 `inferWizardApiFormat` 测试覆盖最终 route 保存为 `openai_responses`。
 
+## 2026-06-29 CCSwitchMulti v3.16.4-4wizard Iconfix Release Refresh
+
+- 按用户要求将既有 GitHub prerelease `v3.16.4-4wizard` 更新到任务栏图标根修复后的最新提交。先推送 `codex/multirouter-wizard`，再强制移动 annotated tag `v3.16.4-4wizard`，确保 peeled tag 指向最新提交而不是旧 `ea455656...`。
+- Windows 资产使用 `C:\Users\sunda\Documents\LLMservice\ccswitchmulti-release-v3.16.4-4wizard-iconfix-assets` 覆盖上传：setup、setup.sig、portable zip、raw exe、`latest.json`、`README.md`、`RELEASE-METADATA.md`、Linux/macOS build notes 和合并版 `SHA256SUMS.txt`。既有 macOS `.dmg/.app.zip` 资产保留，因为 Windows 主机未重建 macOS 包。
+- 上传后验证：远端 `refs/tags/v3.16.4-4wizard^{}` 指向任务栏图标修复提交；关键 Windows asset digest 为 setup `4a1b3edc...`、portable `10c7eaa5...`、raw exe `248cb88b...`、latest.json `15f54d63...`。`SHA256SUMS.txt` 同时包含新 Windows 资产和保留的 macOS 资产 digest。
+
 ## 2026-06-29 Windows Taskbar Icon Embedded Resource Root Fix
 
 - 用户再次截图反馈任务栏图标仍像白色圆团后，重新沿真实链路排查：`src-tauri/icons/icon.ico` 已更新且小帧仍是 DIB，但 `src-tauri/target/release/cc-switch.exe` 与 `%LOCALAPPDATA%\CCSwitchMulti\cc-switch.exe` 的 `ExtractAssociatedIcon()` hash 仍是旧值。根因不是安装覆盖失败，而是 Cargo/Tauri 构建复用了旧 `resource.lib`，`build.rs` 没有声明 `icons/icon.ico`/相关 PNG 为 `rerun-if-changed`。
