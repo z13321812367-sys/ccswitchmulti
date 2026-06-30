@@ -356,7 +356,14 @@ wire_api = "responses"`,
     endpointCandidates: ["https://open.bigmodel.cn/api/coding/paas/v4"],
     apiFormat: "openai_chat",
     modelCatalog: modelCatalog([
-      { model: "glm-5.2", displayName: "GLM-5.2", contextWindow: 200000 },
+      {
+        model: "glm-5.2",
+        displayName: "GLM-5.2",
+        contextWindow: 200000,
+        inputModalities: ["text"],
+        textOnly: true,
+        supportsImage: false,
+      },
     ]),
     codexChatReasoning: {
       supportsThinking: true,
@@ -383,7 +390,14 @@ wire_api = "responses"`,
     endpointCandidates: ["https://api.z.ai/api/coding/paas/v4"],
     apiFormat: "openai_chat",
     modelCatalog: modelCatalog([
-      { model: "glm-5.2", displayName: "GLM-5.2", contextWindow: 200000 },
+      {
+        model: "glm-5.2",
+        displayName: "GLM-5.2",
+        contextWindow: 200000,
+        inputModalities: ["text"],
+        textOnly: true,
+        supportsImage: false,
+      },
     ]),
     codexChatReasoning: {
       supportsThinking: true,

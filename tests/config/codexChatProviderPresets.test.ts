@@ -194,6 +194,16 @@ describe("Codex Chat provider presets", () => {
     for (const name of ["Zhipu GLM", "Zhipu GLM en"]) {
       const preset = codexProviderPresets.find((item) => item.name === name);
 
+      expect(preset?.modelCatalog).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            model: "glm-5.2",
+            inputModalities: ["text"],
+            textOnly: true,
+            supportsImage: false,
+          }),
+        ]),
+      );
       expect(preset?.codexChatReasoning).toMatchObject({
         supportsThinking: true,
         supportsEffort: true,

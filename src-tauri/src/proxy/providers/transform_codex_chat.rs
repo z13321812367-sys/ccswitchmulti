@@ -1099,7 +1099,9 @@ fn codex_chat_model_is_text_only(model: &str) -> bool {
         .flat_map(|ch| ch.to_lowercase())
         .collect::<String>();
 
-    normalized == "gpt53codexspark" || normalized.starts_with("deepseekv4")
+    normalized == "gpt53codexspark"
+        || normalized.starts_with("deepseekv4")
+        || normalized.starts_with("glm5")
 }
 
 fn responses_reasoning_item_text(item: &Value) -> Option<String> {
@@ -2288,6 +2290,30 @@ mod tests {
             Some(false),
         )
         .unwrap();
+        let content = result["messages"][0]["content"].as_str().unwrap();
+
+        assert!(content.contains("Describe this."));
+        assert!(content.contains("text-only"));
+        assert!(!content.contains("image_url"));
+    }
+
+    #[test]
+    fn responses_request_to_chat_downgrades_images_for_glm_5_text_models() {
+        // 智谱 GLM coding endpoint 的 Chat content part 只接受 text。
+        // 即使旧配置没有 route capability，也必须按模型名降级图片块，避免
+        // `messages.content.type 参数非法，取值范围 ['text']`。
+        let input = json!({
+            "model": "glm-5.2",
+            "input": [{
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "Describe this."},
+                    {"type": "input_image", "image_url": "data:image/png;base64,abc"}
+                ]
+            }]
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
         let content = result["messages"][0]["content"].as_str().unwrap();
 
         assert!(content.contains("Describe this."));
