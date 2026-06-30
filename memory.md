@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-06-30 Codex MultiRouter Duplicate Upstream Model Alias Routing
+
+- 普通 Codex provider 表单里的“同名模型重命名”本质不是只改 `displayName`：能让 Codex Desktop 和后端路由区分两个同上游模型的是 `model` 可见 alias，`displayName` 只是菜单展示文本。`upstreamModel` 才保存真实上游模型名；后续排查不要把 displayName 当作可路由 key。
+- 根因分两层：前端手动 MultiRouter 工作台仍按 visible `model` 聚合并去重，没有像向导一样先对重复 `upstreamModel` 生成稳定 alias；后端 `targetProviderId` 物化路径还会从目标 provider 复制 settings，丢掉 MultiRouter plan 上的 `modelCatalog`，导致 alias -> upstreamModel 查找失效。
+- 修复边界：`CodexRouterWorkspacePage` 在创建 routing plan、打开候选 route、保存 route、刷新模型后重建 plan catalog 时复用向导的 `resolveWizardModelNameCollisions`，对第三方/中转同上游模型生成 `模型名-provider名` alias；工作台聚合 catalog 只在 alias 与上游名不同时写 `upstreamModel`，保持非 alias 条目紧凑。
+- route 保存必须写入 route 级 `upstream.modelMap`，例如 `{"gpt-5.5-relay-gpt":"gpt-5.5"}`。这是因为运行时会物化 target provider，不能只依赖普通 provider 自己的原始 catalog；向导 `buildWizardRoutesFromSources` 也同步写 modelMap，避免 UI 显示 alias 但请求把 alias 发到上游。
+- 后端修复点：`src-tauri/src/proxy/providers/codex.rs::materialize_codex_routed_provider_from_target` 必须保留 route provider 的 `modelCatalog`，让 `apply_codex_request_upstream_model` 能通过 visible alias 查回真实上游模型。回归测试：`test_materialize_routed_provider_preserves_model_catalog`。
+- 前端回归测试：`src/components/codex/CodexRouterWorkspacePage.test.ts` 覆盖官方 `gpt-5.5` 和第三方 `gpt-5.5` 同时进入手动 MultiRouter 后，第三方变为 `gpt-5.5-relay-gpt`、plan catalog 保留 `upstreamModel: gpt-5.5`、route match 使用 alias 且 `upstream.modelMap` 指回真实模型。
+
 ## 2026-06-30 Codex GLM 5.2 Responses-To-Chat 400 Diagnostics
 
 - 用户截图分析 Codex 26.623.61825 子 agent 经 CCSwitchMulti `/responses` 转 Zhipu GLM `/chat/completions` 后返回 HTTP 400，且日志里 `header_count=16` 失败较多。排查确认当前 `codex_router_log` 的 `header_count` 来自 `ordered_headers.len()`，是 HTTP 请求头数量，不是转换后 Chat body 顶层字段数量，不能直接按“body 字段数 16”归因。

@@ -3766,12 +3766,10 @@ wire_api = "chat"
         let routed = resolve_codex_model_routed_provider(
             &router,
             &json!({ "model": "deepseek-v4-flash-provider-b" }),
-        ).expect("route-b should match");
+        )
+        .expect("route-b should match");
 
-        assert_eq!(
-            codex_route_target_provider_id(&routed),
-            Some("provider-b")
-        );
+        assert_eq!(codex_route_target_provider_id(&routed), Some("provider-b"));
 
         // 【关键验证】物料化前，route provider 仍有 modelCatalog
         let catalog_before = routed
@@ -3779,7 +3777,10 @@ wire_api = "chat"
             .get("modelCatalog")
             .and_then(|c| c.get("models"))
             .and_then(|m| m.as_array());
-        assert!(catalog_before.is_some(), "route provider must have modelCatalog");
+        assert!(
+            catalog_before.is_some(),
+            "route provider must have modelCatalog"
+        );
 
         // 【关键验证】物料化后，materialized provider 保留 modelCatalog
         let materialized = materialize_codex_routed_provider_from_target(&routed, &target_b);
@@ -3800,13 +3801,15 @@ wire_api = "chat"
         // 验证 apply_codex_request_upstream_model 能通过 catalog 映射可见名→上游模型名
         let mut body_a = json!({ "model": "deepseek-v4-flash", "input": "test" });
         let result_a = apply_codex_request_upstream_model(&materialized, &mut body_a);
-        assert_eq!(result_a.as_deref(), Some("deepseek-v4-flash"),
-            "visible name 'deepseek-v4-flash' should map to upstream 'deepseek-v4-flash'");
+        assert_eq!(
+            result_a.as_deref(),
+            Some("deepseek-v4-flash"),
+            "visible name 'deepseek-v4-flash' should map to upstream 'deepseek-v4-flash'"
+        );
 
         let mut body_b = json!({ "model": "deepseek-v4-flash-provider-b", "input": "test" });
         let result_b = apply_codex_request_upstream_model(&materialized, &mut body_b);
         assert_eq!(result_b.as_deref(), Some("deepseek-v4-flash"),
             "aliased visible name 'deepseek-v4-flash-provider-b' should map to upstream 'deepseek-v4-flash'");
     }
-
 }

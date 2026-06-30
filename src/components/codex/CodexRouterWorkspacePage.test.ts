@@ -713,9 +713,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       .setup()
       .click(screen.getByRole("button", { name: "查看链路状态" }));
 
-    await waitFor(() =>
-      expect(scrollTo).toHaveBeenCalledWith(0, 0),
-    );
+    await waitFor(() => expect(scrollTo).toHaveBeenCalledWith(0, 0));
   });
 
   it("keeps a visible alias when route page refreshes provider models from upstream ids", async () => {
@@ -977,6 +975,96 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         contextWindow: 272000,
       },
     ]);
+  });
+
+  it("aliases duplicate provider models when saving manual multirouter routes", async () => {
+    const official: Provider = {
+      id: "codex-official",
+      name: "OpenAI Official",
+      category: "official",
+      settingsConfig: {
+        modelCatalog: { models: [{ model: "gpt-5.5" }] },
+      },
+      meta: { apiFormat: "openai_responses" },
+    };
+    const relay: Provider = {
+      id: "codex-relay-gpt",
+      name: "Relay GPT",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: {
+          models: [
+            {
+              model: "gpt-5.5",
+              displayName: "Relay GPT 5.5",
+              upstreamModel: "gpt-5.5",
+            },
+          ],
+        },
+      },
+      meta: { apiFormat: "openai_chat" },
+    };
+    const plan = createDraftRoutingPlan([official, relay], [official, relay]);
+    const officialRoute = normalizeCodexRouteForSave(
+      {
+        label: official.name,
+        targetProviderId: official.id,
+        match: { models: ["gpt-5.5"], prefixes: ["gpt"] },
+        upstream: { apiFormat: "openai_responses" },
+      },
+      0,
+      new Set<string>(),
+    );
+    const routedPlan: Provider = {
+      ...plan,
+      settingsConfig: {
+        ...plan.settingsConfig,
+        codexRouting: {
+          enabled: true,
+          routes: [officialRoute],
+        },
+      },
+    };
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [official, relay, routedPlan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: routedPlan.id,
+        initialProviderId: routedPlan.id,
+        initialTab: "routes",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "编辑匹配规则" }));
+    await user.click(screen.getByRole("button", { name: "启用" }));
+    await user.click(screen.getByRole("button", { name: "保存规则" }));
+
+    await waitFor(() => expect(providersApi.update).toHaveBeenCalled());
+    const updateCalls = vi.mocked(providersApi.update).mock.calls;
+    const savedPlan = updateCalls[updateCalls.length - 1]?.[0] as Provider;
+    const savedRoutes = readCodexRouting(savedPlan)?.routes ?? [];
+    const relayRoute = savedRoutes.find(
+      (route) => route.targetProviderId === relay.id,
+    );
+
+    expect(savedPlan.settingsConfig.modelCatalog.models).toEqual([
+      { model: "gpt-5.5" },
+      {
+        model: "gpt-5.5-relay-gpt",
+        displayName: "Relay GPT 5.5",
+        upstreamModel: "gpt-5.5",
+      },
+    ]);
+    expect(relayRoute?.match?.models).toEqual(["gpt-5.5-relay-gpt"]);
+    expect(relayRoute?.upstream?.modelMap).toEqual({
+      "gpt-5.5-relay-gpt": "gpt-5.5",
+    });
   });
 
   it("reads legacy array codexRouting without clearing routes", () => {

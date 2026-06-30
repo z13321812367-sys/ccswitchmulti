@@ -56,6 +56,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { providersApi } from "@/lib/api";
 import { fetchModelsForConfig, type FetchedModel } from "@/lib/api/model-fetch";
 import { proxyApi } from "@/lib/api/proxy";
+import { resolveWizardModelNameCollisions } from "@/lib/codexMultiRouterWizard";
 import { usageApi } from "@/lib/api/usage";
 import {
   usageKeys,
@@ -896,6 +897,28 @@ function collectProviderModelIds(provider: Provider): string[] {
   );
 }
 
+/// 从 provider 的 catalog 生成 route 级别模型映射；MultiRouter 后端只物化目标 provider，
+/// 因此可见别名必须随 route 保存，不能依赖未改写的源 provider catalog。
+function buildRouteModelMapFromProvider(
+  provider: Provider,
+): Record<string, string> | undefined {
+  const entries = readCodexModelCatalog(provider)
+    .models.map((model) => {
+      const visibleModel = model.model?.trim();
+      const upstreamModel = (
+        model.upstreamModel ??
+        model.upstream_model ??
+        model.model ??
+        ""
+      ).trim();
+      return visibleModel && upstreamModel && visibleModel !== upstreamModel
+        ? [visibleModel, upstreamModel]
+        : null;
+    })
+    .filter((entry): entry is [string, string] => Boolean(entry));
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
 /// 官方/OAuth provider 经常没有可读 /models catalog；这里提供带上下文窗口的兜底目录，
 /// 避免 MultiRouter 只保存裸模型名后让 Codex Desktop 回退到 128k 级默认窗口。
 function fallbackCatalogDraftForProvider(
@@ -1060,7 +1083,7 @@ function catalogDraftFromSourceModel(
   );
   return {
     model: id,
-    ...(upstreamModel ? { upstreamModel } : {}),
+    ...(upstreamModel && upstreamModel !== id ? { upstreamModel } : {}),
     ...(displayName ? { displayName } : {}),
     ...(contextWindow ? { contextWindow } : {}),
     ...(source?.inputModalities
@@ -1176,6 +1199,7 @@ function createRouteFromProvider(
   const modelIds = collectProviderModelIds(provider);
   const prefixes = inferProviderPrefixes(provider, modelIds);
   const capabilities = inferRouteCapabilitiesFromProvider(provider, modelIds);
+  const modelMap = buildRouteModelMapFromProvider(provider);
   return {
     id: uniqueRouteId(`router-${provider.id}`, usedIds),
     label: provider.name,
@@ -1188,6 +1212,7 @@ function createRouteFromProvider(
     upstream: {
       apiFormat: provider.meta?.apiFormat ?? "openai_chat",
       auth: { source: "provider_config" },
+      ...(modelMap ? { modelMap } : {}),
     },
     ...(capabilities ? { capabilities } : {}),
   };
@@ -1198,12 +1223,13 @@ function buildRouteCandidates(
   selectedPlan: Provider | null,
   modelSources: Provider[],
 ): RouteCandidate[] {
+  const routableModelSources = resolveWizardModelNameCollisions(modelSources);
   const usedIds = new Set<string>();
   const candidates: RouteCandidate[] = [];
   const existingRoutes = selectedPlan
     ? dedupeCodexRoutesBySemanticProvider(
         readCodexRouting(selectedPlan)?.routes ?? [],
-        modelSources,
+        routableModelSources,
       )
     : [];
 
@@ -1216,9 +1242,9 @@ function buildRouteCandidates(
     const normalizedRoute: CodexRoute = { ...route, id };
     const provider =
       (targetProviderId
-        ? modelSources.find((source) => source.id === targetProviderId)
+        ? routableModelSources.find((source) => source.id === targetProviderId)
         : undefined) ??
-      findSemanticRouteProvider(normalizedRoute, modelSources);
+      findSemanticRouteProvider(normalizedRoute, routableModelSources);
     const routeWithInferredMatch = enrichRouteMatchFromProvider(
       normalizedRoute,
       provider,
@@ -1243,7 +1269,7 @@ function buildRouteCandidates(
       )
       .filter((id): id is string => Boolean(id)),
   );
-  for (const provider of modelSources) {
+  for (const provider of routableModelSources) {
     if (existingProviderIds.has(provider.id)) continue;
     const route = createRouteFromProvider(provider, usedIds);
     candidates.push({
@@ -1430,9 +1456,10 @@ export function createDraftRoutingPlan(
   providers: Provider[],
   modelSources: Provider[],
 ): Provider {
+  const routableModelSources = resolveWizardModelNameCollisions(modelSources);
   const existingIds = new Set(providers.map((provider) => provider.id));
   const id = uniqueRouteId("codex-multirouter", existingIds);
-  const catalogModels = buildModelCatalogDraftFromSources(modelSources);
+  const catalogModels = buildModelCatalogDraftFromSources(routableModelSources);
   const sourceModels = catalogModels.map((model) => model.model);
   const modelCatalog: CodexModelCatalogDraft = {
     models: catalogModels,
@@ -2052,11 +2079,24 @@ export function CodexRouterWorkspacePage({
     () => effectiveProviders.filter((provider) => !isRoutingPlan(provider)),
     [effectiveProviders],
   );
+  const routableModelSources = useMemo(
+    () => resolveWizardModelNameCollisions(modelSources),
+    [modelSources],
+  );
   const providersById = useMemo(
     () =>
       new Map(effectiveProviders.map((provider) => [provider.id, provider])),
     [effectiveProviders],
   );
+  const routableProvidersById = useMemo(() => {
+    const byId = new Map(
+      effectiveProviders.map((provider) => [provider.id, provider]),
+    );
+    for (const source of routableModelSources) {
+      byId.set(source.id, source);
+    }
+    return byId;
+  }, [effectiveProviders, routableModelSources]);
 
   // 进入 MultiRouter 路由规则页时自动刷新所有候选普通 provider 的 /models 目录。
   useEffect(() => {
@@ -2131,6 +2171,15 @@ export function CodexRouterWorkspacePage({
 
         const updatedProvidersById = new Map(providersById);
         updatedProvidersById.set(nextProvider.id, nextProvider);
+        const updatedRoutableSources = resolveWizardModelNameCollisions(
+          modelSources.map((source) =>
+            source.id === nextProvider.id ? nextProvider : source,
+          ),
+        );
+        const updatedRoutableProvidersById = new Map(updatedProvidersById);
+        for (const source of updatedRoutableSources) {
+          updatedRoutableProvidersById.set(source.id, source);
+        }
         const affectedPlans: Provider[] = [];
         for (const plan of routingPlans) {
           const routes = readCodexRouting(plan)?.routes ?? [];
@@ -2148,7 +2197,7 @@ export function CodexRouterWorkspacePage({
               modelCatalog: buildModelCatalogForRoutes(
                 plan,
                 routes,
-                updatedProvidersById,
+                updatedRoutableProvidersById,
               ),
             },
           };
@@ -2435,7 +2484,7 @@ export function CodexRouterWorkspacePage({
       routes.map((route, index) =>
         normalizeCodexRouteForSave(route, index, usedRouteIds),
       ),
-      modelSources,
+      routableModelSources,
     );
     const enabledRouteIds = normalizedRoutes
       .filter((route) => route.enabled !== false)
@@ -2463,7 +2512,7 @@ export function CodexRouterWorkspacePage({
         modelCatalog: buildModelCatalogForRoutes(
           plan,
           normalizedRoutes,
-          providersById,
+          routableProvidersById,
         ),
         codexRouting: nextRouting,
       },
@@ -4875,7 +4924,9 @@ function StatusTab({
         }),
         queryClient.refetchQueries({ queryKey: usageKeys.all, type: "active" }),
       ]);
-      setValidationRefreshMessage("已刷新校验状态，请查看链路卡片和最近转发表。");
+      setValidationRefreshMessage(
+        "已刷新校验状态，请查看链路卡片和最近转发表。",
+      );
     } catch (error) {
       setValidationRefreshMessage(
         `刷新校验失败：${error instanceof Error ? error.message : String(error)}`,

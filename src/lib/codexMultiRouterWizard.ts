@@ -260,6 +260,27 @@ function aliasModelName(provider: Provider, modelName: string): string {
   return `${modelName}-${providerNameSuffix(provider)}`;
 }
 
+// 从已处理别名的模型目录生成 route 级模型映射；后端物化 targetProviderId
+// 时只读取原 provider 配置，必须靠这里把可见别名改回真实上游模型名。
+function buildWizardRouteModelMap(
+  provider: Provider,
+): Record<string, string> | undefined {
+  const entries = readWizardModelCatalog(provider)
+    .map((model) => {
+      const visibleModel = model.model?.trim();
+      const upstreamModel = (
+        model.upstreamModel ??
+        model.upstream_model ??
+        model.model
+      )?.trim();
+      return visibleModel && upstreamModel && visibleModel !== upstreamModel
+        ? [visibleModel, upstreamModel]
+        : null;
+    })
+    .filter((entry): entry is [string, string] => Boolean(entry));
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
 // 判断模型目录是否主要是 OpenAI 官方 GPT/O 系列；这些模型应优先保持 Responses 原生链路。
 function hasOpenAiResponsesNativeModels(provider: Provider): boolean {
   if (!isOfficialCodexSource(provider)) return false;
@@ -604,6 +625,7 @@ export function buildWizardRoutesFromSources(
 ): CodexRoutingRoute[] {
   return providers.map((provider) => {
     const models = readWizardModelCatalog(provider).map((model) => model.model);
+    const modelMap = buildWizardRouteModelMap(provider);
     return {
       id: `router-${provider.id}`,
       label: provider.name,
@@ -616,6 +638,7 @@ export function buildWizardRoutesFromSources(
       upstream: {
         apiFormat: inferWizardApiFormat(provider),
         auth: { source: "provider_config" },
+        ...(modelMap ? { modelMap } : {}),
       },
       capabilities: {
         codexCache: inferWizardCacheConfig(provider),
