@@ -420,7 +420,7 @@ describe("CodexFormFields local model routing", () => {
     expect(
       screen.getByText("已打开测试确认框；如果没有看到弹窗，请按 Esc 后重试。"),
     ).toBeInTheDocument();
-    expect(screen.getByRole("dialog")).toHaveClass("z-[110]");
+    expect(screen.getByRole("dialog")).toHaveClass("z-[200]");
     expect(screen.getByText("确认测试 Chat / Responses")).toBeInTheDocument();
   });
 

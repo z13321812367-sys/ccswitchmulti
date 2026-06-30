@@ -1,5 +1,10 @@
 # CC Switch Repository Memory
 
+## 2026-06-30 Dialog Top Layer Above Codex Wizard Provider Panel
+
+- 用户截图显示 Codex provider 表单里点击“测试 Chat / Responses”后按钮旁出现“已打开测试确认框”，但确认 Dialog 仍不可见。根因不是 click/state 没触发，而是层级定义错误：MultiRouter 向导打开时 `AddProviderDialog` 的 `FullScreenPanel` 会提升到 `z-[140]`，而通用 Dialog 的 `zIndex="top"` 只有 `z-[110]`，仍在全屏 provider 面板下面。
+- 修复边界：把 `src/components/ui/dialog.tsx` 的 `top` 层级统一提高到 `z-[200]`，同时 overlay 和 content 都使用同一 top 层级；不要只给单个 `CodexFormFields` content 加 class，否则 overlay/portal 层仍可能被面板遮住。回归测试：`tests/components/CodexFormFields.test.tsx` 断言协议测试确认框使用 `z-[200]`。
+
 ## 2026-06-30 Codex MultiRouter Single Source Entry Scroll Fix
 
 - 用户反馈在“创建多路路由”里点击“单独接入模型源”后会立刻滚到 API Key / 高级选项区域，必须再滚回顶部选择模型源。根因是 `ProviderForm` 新建 Codex provider 时默认 `selectedPresetId="codex-0"`，挂载后的自动 `handlePresetChange("codex-0")` 也调用了此前为“手动选择预设后滚到配置字段”新增的 `scrollCodexProviderDetailsIntoView()`。
