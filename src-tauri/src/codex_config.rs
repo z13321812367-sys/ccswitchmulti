@@ -322,14 +322,33 @@ pub fn codex_auth_has_oauth_login_material(auth: &Value) -> bool {
     })
 }
 
-/// 判断当前 live `auth.json` 是否已有真实 ChatGPT/Codex OAuth 登录材料。
+/// 读取 Codex OAuth auth.json 里的账号 id，用于区分同账号保留和跨账号切换。
+fn codex_oauth_account_id(auth: &Value) -> Option<&str> {
+    auth.pointer("/tokens/account_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+/// 判断 official provider 切换时是否应该保留当前 live OAuth 登录态。
 ///
-/// official provider 的 DB 快照可能是旧 OAuth token；当 live auth 已经有当前登录态时，
-/// 切回 official 只应刷新 `config.toml`，不能用 DB 快照覆盖 `auth.json`。
-fn live_codex_auth_has_oauth_login_material() -> bool {
-    read_json_file(&get_codex_auth_path())
-        .ok()
-        .is_some_and(|auth| codex_auth_has_oauth_login_material(&auth))
+/// 同一个账号的 DB 快照可能是旧 token，此时应保留 live auth；如果能确认目标
+/// provider 是另一个 OAuth 账号，则必须写入目标 auth，支持用户在多个官方账号间切换。
+fn should_preserve_live_codex_oauth_for_official_switch(target_auth: &Value) -> bool {
+    let Ok(live_auth) = read_json_file(&get_codex_auth_path()) else {
+        return false;
+    };
+    if !codex_auth_has_oauth_login_material(&live_auth) {
+        return false;
+    }
+
+    match (
+        codex_oauth_account_id(&live_auth),
+        codex_oauth_account_id(target_auth),
+    ) {
+        (Some(live_account), Some(target_account)) => live_account == target_account,
+        _ => codex_auth_has_oauth_login_material(target_auth),
+    }
 }
 
 pub fn should_restore_codex_provider_token_for_backfill(
@@ -1456,10 +1475,10 @@ fn ensure_codex_multi_agent_model_overrides_visible(doc: &mut DocumentMut) {
         .get("multi_agent_v2")
         .and_then(|item| item.as_bool())
         .map(toml_edit::value);
-    if !features
+    if features
         .get("multi_agent_v2")
         .and_then(|item| item.as_table())
-        .is_some()
+        .is_none()
     {
         features["multi_agent_v2"] = toml_edit::table();
     }
@@ -2605,7 +2624,7 @@ pub fn write_codex_live_for_provider(
 
     let should_write_auth = category == Some("official")
         && codex_auth_has_login_material(auth)
-        && !live_codex_auth_has_oauth_login_material();
+        && !should_preserve_live_codex_oauth_for_official_switch(auth);
     let merged_config = config_text
         .map(merge_codex_provider_config_with_live)
         .transpose()?;

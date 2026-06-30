@@ -236,9 +236,9 @@ impl RequestForwarder {
     ///
     /// 参数:
     /// - `key`: 已按 provider、上游 URL 与模型归一化后的缓存 key。
-    /// 返回:
+    ///   返回:
     /// - `true` 表示本次请求应直接去掉 Lite 头；`false` 表示应带头重新探测。
-    /// 副作用:
+    ///   副作用:
     /// - 如果缓存条目已经过期，会顺手删除，避免内存里长期保留无效能力结果。
     async fn codex_responses_lite_fallback_active(&self, key: &str) -> bool {
         let mut fallbacks = self.codex_responses_lite_fallbacks.write().await;
@@ -2290,7 +2290,7 @@ impl RequestForwarder {
 
         let mut response = send_upstream_request(ordered_headers.clone(), body_bytes.clone())
             .await
-            .map_err(|err| {
+            .inspect_err(|err| {
                 if let Some(trace_id) = codex_trace_id.as_deref() {
                     let transport = if is_socks_proxy || !preserve_exact_header_case {
                         "reqwest"
@@ -2313,7 +2313,6 @@ impl RequestForwarder {
                         ],
                     );
                 }
-                err
             })?;
 
         // 检查响应状态
@@ -2385,7 +2384,7 @@ impl RequestForwarder {
                 }
                 response = send_upstream_request(retry_headers, body_bytes.clone())
                     .await
-                    .map_err(|err| {
+                    .inspect_err(|err| {
                         if let Some(trace_id) = codex_trace_id.as_deref() {
                             let transport = if is_socks_proxy || !preserve_exact_header_case {
                                 "reqwest"
@@ -2408,7 +2407,6 @@ impl RequestForwarder {
                                 ],
                             );
                         }
-                        err
                     })?;
                 status = response.status();
                 if let Some(trace_id) = codex_trace_id.as_deref() {
@@ -3129,7 +3127,7 @@ fn should_retry_without_codex_responses_lite_header(
 /// - `provider_id`: 已解析后的 effective provider id，避免不同上游互相污染。
 /// - `url`: 实际请求 URL，只保留 scheme/host/port/path，忽略 query 中可能出现的敏感参数。
 /// - `model`: 实际请求模型；Lite 支持通常是模型维度能力，不能只按 provider 缓存。
-/// 返回:
+///   返回:
 /// - 稳定字符串 key，用于短期负缓存。
 fn codex_responses_lite_fallback_key(provider_id: &str, url: &str, model: &str) -> String {
     let upstream_scope = url
@@ -3176,6 +3174,7 @@ fn codex_responses_lite_fallback_active_at(
 ///
 /// 调用方负责决定是否根据错误体重放请求；这里只封装 reqwest/hyper 两条传输路径，
 /// 避免 Responses-Lite fallback 和常规发送逻辑出现分叉。
+#[allow(clippy::too_many_arguments)]
 async fn send_forwarder_upstream_request(
     method: http::Method,
     url: String,
@@ -3287,6 +3286,7 @@ fn append_upstream_error_event(
 }
 
 /// 识别会触发上游 Responses-Lite 分支的 Codex 内部请求头。
+#[allow(dead_code)]
 fn is_codex_responses_lite_header(name: &http::HeaderName) -> bool {
     name.as_str()
         .eq_ignore_ascii_case("x-openai-internal-codex-responses-lite")

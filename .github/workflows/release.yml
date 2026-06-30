@@ -132,7 +132,10 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $llvmRoot = 'C:\Program Files\LLVM'
           if (-not (Test-Path $llvmRoot)) {
-            throw "LLVM not found at $llvmRoot"
+            choco install llvm -y --no-progress
+          }
+          if (-not (Test-Path $llvmRoot)) {
+            throw "LLVM not found at $llvmRoot after Chocolatey install"
           }
           $llvmBin = Join-Path $llvmRoot 'bin'
           "LIBCLANG_PATH=$llvmBin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
@@ -267,6 +270,10 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
+          if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            unset APPLE_SIGNING_IDENTITY
+            echo "⚠️ APPLE_SIGNING_IDENTITY is missing; building unsigned macOS bundles"
+          fi
           max_attempts=3
           for attempt in $(seq 1 "$max_attempts"); do
             echo "=== macOS build/notarization attempt ${attempt}/${max_attempts} ==="
@@ -295,8 +302,15 @@ jobs:
           if ($env:WINDOWS_RELEASE_ARCH -eq 'arm64') {
             pnpm tauri build --target aarch64-pc-windows-msvc --bundles msi
           } else {
-            pnpm tauri build
+            pnpm tauri build --bundles nsis
           }
+
+      - name: Build Linux history repair sidecar
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo build --manifest-path src-tauri/Cargo.toml --bin codex-history-repairer --features history-repairer --release
 
       - name: Build Tauri App (Linux)
         if: runner.os == 'Linux'
@@ -496,7 +510,7 @@ jobs:
           $targetRoot = if ($isArm64) { 'src-tauri/target/aarch64-pc-windows-msvc/release' } else { 'src-tauri/target/release' }
           $assetSuffix = if ($isArm64) { '-arm64' } else { '' }
 
-          # 仅打包 MSI 安装器 + .sig（用于 Updater）
+          # 仅 ARM64 继续使用 MSI；x64 使用 NSIS，避免 GitHub Windows runner 上 WiX light.exe 间歇失败。
           $msi = Get-ChildItem -Path (Join-Path $targetRoot 'bundle/msi') -Recurse -Include *.msi -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($null -eq $msi) {
             # 兜底：全局搜索 .msi
@@ -519,6 +533,22 @@ jobs:
             throw 'No Windows ARM64 MSI installer found'
           } else {
             Write-Warning 'No Windows MSI installer found'
+          }
+
+          $nsis = Get-ChildItem -Path (Join-Path $targetRoot 'bundle/nsis') -Recurse -Include *.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -ne $nsis) {
+            $dest = "CC-Switch-$VERSION-Windows$assetSuffix-Setup.exe"
+            Copy-Item $nsis.FullName (Join-Path release-assets $dest)
+            Write-Host "NSIS installer copied: $dest"
+            $sigPath = "$($nsis.FullName).sig"
+            if (Test-Path $sigPath) {
+              Copy-Item $sigPath (Join-Path release-assets ("$dest.sig"))
+              Write-Host "Signature copied: $dest.sig"
+            } elseif (-not $isArm64) {
+              Write-Warning "Signature not found for $($nsis.Name)"
+            }
+          } elseif (-not $isArm64) {
+            throw 'No Windows x64 NSIS installer found'
           }
 
           # 绿色版（portable）：仅可执行文件打 zip（不参与 Updater）
@@ -667,7 +697,7 @@ jobs:
             ### 下载
 
             - **macOS**: `CC-Switch-${{ github.ref_name }}-macOS.dmg`（推荐）或 `CC-Switch-${{ github.ref_name }}-macOS.zip`（解压即用）
-            - **Windows (x86_64)**: `CC-Switch-${{ github.ref_name }}-Windows.msi`（安装版）或 `CC-Switch-${{ github.ref_name }}-Windows-Portable.zip`（绿色版）
+            - **Windows (x86_64)**: `CC-Switch-${{ github.ref_name }}-Windows-Setup.exe`（安装版）或 `CC-Switch-${{ github.ref_name }}-Windows-Portable.zip`（绿色版）
             - **Windows (ARM64)**: `CC-Switch-${{ github.ref_name }}-Windows-arm64.msi`（安装版）或 `CC-Switch-${{ github.ref_name }}-Windows-arm64-Portable.zip`（绿色版）
             - **Linux (x86_64)**: `CC-Switch-${{ github.ref_name }}-Linux-x86_64.AppImage` / `.deb` / `.rpm`
             - **Linux (ARM64)**: `CC-Switch-${{ github.ref_name }}-Linux-arm64.AppImage` / `.deb` / `.rpm`
@@ -675,7 +705,7 @@ jobs:
             > `.tar.gz` 为 Tauri updater 自动更新专用，无需手动下载。
 
             ---
-            macOS 版本已通过 Apple 代码签名和公证，可直接安装使用。
+            macOS DMG 仅在仓库配置 Apple 签名和公证密钥时生成；未配置时发布 updater tarball 和 app zip。
           files: release-assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -728,7 +758,11 @@ jobs:
                 mac_url="$url"; mac_sig="$sig_content";;
               *-Windows-arm64.msi)
                 win_arm64_url="$url"; win_arm64_sig="$sig_content";;
+              *-Windows-arm64-Setup.exe)
+                win_arm64_url="$url"; win_arm64_sig="$sig_content";;
               *-Windows.msi)
+                win_x64_url="$url"; win_x64_sig="$sig_content";;
+              *-Windows-Setup.exe)
                 win_x64_url="$url"; win_x64_sig="$sig_content";;
               *-Linux-arm64.AppImage|*-Linux-arm64.appimage)
                 linux_arm64_url="$url"; linux_arm64_sig="$sig_content";;

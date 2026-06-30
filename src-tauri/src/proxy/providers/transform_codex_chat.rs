@@ -265,6 +265,7 @@ pub fn responses_to_chat_completions_with_reasoning(
 
 /// Convert an OpenAI Responses request into Chat Completions with an optional
 /// route capability override for text-only upstreams.
+#[allow(dead_code)]
 pub fn responses_to_chat_completions_with_reasoning_and_text_only(
     body: Value,
     reasoning_config: Option<&CodexChatReasoningConfig>,

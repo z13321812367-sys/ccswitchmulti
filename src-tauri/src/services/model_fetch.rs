@@ -586,8 +586,7 @@ fn parse_context_tokens(value: &str) -> Option<u64> {
     let compact = value
         .trim()
         .trim_matches('`')
-        .replace(',', "")
-        .replace(' ', "")
+        .replace([',', ' '], "")
         .to_ascii_lowercase();
     if compact.is_empty() || compact.contains('：') || compact.contains("≤") {
         return None;

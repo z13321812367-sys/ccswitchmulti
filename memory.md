@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-07-01 GitHub CI and Release Workflow Failure Boundaries
+
+- GitHub CI 的 backend job 比本地常用验证更严格：`cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings` 和 `cargo test --manifest-path src-tauri/Cargo.toml` 都会跑。发布前不能只跑前端 `typecheck/vitest/prettier`，Rust warning 在 stable toolchain 升级后会直接卡 CI。
+- `tests/provider_service.rs::codex_official_to_deepseek_then_takeover_enters_and_restores_proxy_managed_live_config` 使用 proxy ephemeral port；断言不能写死 `15721`。正确判断是 live `config.toml` 指向 `http://127.0.0.1:<port>/v1` 且包含 `PROXY_MANAGED`，否则本地 Windows 和 GitHub cargo test 会误判失败。
+- Release workflow 的 Linux 矩阵需要在 `pnpm tauri build --bundles appimage,deb,rpm` 前先构建 `codex-history-repairer`：`cargo build --manifest-path src-tauri/Cargo.toml --bin codex-history-repairer --features history-repairer --release`。该 bin 有 `required-features = ["history-repairer"]`，Tauri bundler 会寻找 sidecar，没预构建会报 `codex-history-repairer does not exist`。
+- Release workflow 里 Windows x64 的失败点是 WiX `light.exe` 打包 MSI；主自动 release 已改成 x64 只构建/收集 NSIS `*-Windows-Setup.exe`，避免 WiX 阻塞整条 release。Windows ARM64 仍走 MSI，但 GitHub `windows-11-arm` runner 可能缺 `C:\Program Files\LLVM`，workflow 需要在缺失时 `choco install llvm -y --no-progress` 再写 `LIBCLANG_PATH`/`CLANG_PATH`。
+- Release workflow 里 macOS 的失败点不是编译，而是 Apple signing secrets 缺失后仍把空 `APPLE_SIGNING_IDENTITY` 传给 Tauri，导致 codesign 报 `The specified item could not be found in the keychain`。正确降级是 build 阶段 unset 空的 `APPLE_SIGNING_IDENTITY`，后续只在 signing identity 存在时生成/公证 DMG；否则只发布 updater tarball 和 `.app.zip`。
+
 ## 2026-07-01 Codex MultiRouter Wizard Catalog Curation Flow
 
 - Codex 单 provider 表单 `CodexFormFields` 的模型映射表第一列语义是“保留这个模型进入该 provider 的 modelCatalog”，不是子 Agent 候选。取消勾选会删除该模型行；上下箭头移动的是 catalog 行顺序。不要再在单 provider 获取 `/models` 后自动写 `spawnAgentModels` 前 5 个。

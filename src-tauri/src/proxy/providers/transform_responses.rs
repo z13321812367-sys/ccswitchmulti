@@ -49,6 +49,7 @@ pub(crate) fn sanitize_anthropic_tool_use_input_json(name: &str, raw: &str) -> S
 /// 以便在无服务端状态下保持多轮 reasoning 上下文。
 /// `codex_fast_mode`: 仅在 `is_codex_oauth` 为 true 时生效，控制是否注入
 /// `service_tier = "priority"`。
+#[allow(dead_code)]
 pub fn anthropic_to_responses(
     body: Value,
     cache_key: Option<&str>,

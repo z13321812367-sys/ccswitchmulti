@@ -618,8 +618,9 @@ wire_api = "responses"
     let config_after_switch =
         std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config");
     assert!(
-        config_after_switch.contains("http://127.0.0.1:15721/v1"),
-        "switching to a Codex custom provider should enter the local proxy facade immediately"
+        config_after_switch.contains("base_url = \"http://127.0.0.1:")
+            && config_after_switch.contains("/v1\""),
+        "switching to a Codex custom provider should enter the local proxy facade immediately, got:\n{config_after_switch}"
     );
     assert!(
         config_after_switch.contains("PROXY_MANAGED"),
@@ -710,13 +711,11 @@ wire_api = "responses"
 }
 
 #[test]
-fn provider_service_switch_codex_default_overwrites_official_auth_when_preservation_off() {
+fn provider_service_switch_codex_keeps_official_auth_and_moves_key_to_config() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
-    // Intentionally do NOT enable preservation: this locks the default opt-out
-    // behavior where switching to a third-party provider rewrites auth.json,
-    // discarding the user's ChatGPT OAuth login. It is the dual of
-    // `provider_service_switch_codex_preserves_oauth_and_backfills_api_key_from_live_token`.
+    // Codex 第三方 provider 的 key 应落在 config.toml 的 provider-scoped bearer token，
+    // auth.json 继续保留 ChatGPT OAuth 登录缓存，避免切换 provider 破坏官方登录态。
     let _home = ensure_test_home();
 
     let live_auth = json!({
@@ -788,12 +787,21 @@ requires_openai_auth = true
         read_json_file(&cc_switch_lib::get_codex_auth_path()).expect("read auth.json");
     assert_eq!(
         auth_value.get("OPENAI_API_KEY").and_then(|v| v.as_str()),
-        Some("third-party-key"),
-        "default (preservation off) should overwrite auth.json with the third-party API key"
+        None,
+        "third-party key should not be written into auth.json"
+    );
+    let config_after_switch =
+        std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config");
+    assert!(
+        config_after_switch.contains("experimental_bearer_token = \"third-party-key\""),
+        "third-party key should move into provider-scoped config.toml token, got:\n{config_after_switch}"
     );
     assert!(
-        auth_value.pointer("/tokens/access_token").is_none(),
-        "default switch must clear the official ChatGPT OAuth token from live auth.json"
+        auth_value
+            .pointer("/tokens/access_token")
+            .and_then(|value| value.as_str())
+            == Some("official-oauth-token"),
+        "switch should preserve the official ChatGPT OAuth token in live auth.json"
     );
 }
 
