@@ -226,12 +226,10 @@ async fn enrich_zhipu_context_windows(
     let mut contexts = fetch_zhipu_model_overview_contexts(client).await;
     enrich_missing_zhipu_detail_contexts(client, models, &mut contexts).await;
 
-    for model in models.iter_mut() {
-        if model.context_window.is_none() {
-            let key = normalize_zhipu_model_id(&model.id);
-            model.context_window = contexts.get(&key).copied();
-        }
-    }
+    apply_missing_context_windows(models, |model_id| {
+        let key = normalize_zhipu_model_id(model_id);
+        contexts.get(&key).copied()
+    });
 }
 
 /// 通过 models.dev 的 `limit.context` 补齐上下文窗口。
@@ -254,9 +252,22 @@ async fn enrich_models_dev_context_windows(
         return;
     };
 
+    apply_missing_context_windows(models, |model_id| {
+        lookup_models_dev_context(provider_models, model_id)
+    });
+}
+
+/// 将外部来源查到的上下文窗口应用到模型列表。
+///
+/// 这是所有补齐来源共享的不变量：只填充 `/models` 未返回上下文的条目，永远不覆盖
+/// 上游已经明确给出的真实 metadata。
+fn apply_missing_context_windows<F>(models: &mut [FetchedModel], mut lookup: F)
+where
+    F: FnMut(&str) -> Option<u64>,
+{
     for model in models.iter_mut() {
         if model.context_window.is_none() {
-            model.context_window = lookup_models_dev_context(provider_models, &model.id);
+            model.context_window = lookup(&model.id);
         }
     }
 }
@@ -995,6 +1006,26 @@ Coding 能力开源 SOTA，从代码生成走向工程交付 | 1M | 128K |
     }
 
     #[test]
+    fn test_parse_zhipu_model_overview_contexts_skips_unparseable_rows() {
+        let markdown = r#"
+| 模型 | 特点 | 上下文 | 最大输出 |
+| :--- | :--- | :--- | :--- |
+| [GLM-4.6（即将下线）](/cn/guide/models/text/glm-4.6) | 老版本 | 200K | 128K |
+| [GLM-OCR](/cn/guide/models/vlm/glm-ocr) | 文档理解 | 输入：单图 ≤ 10 MB | |
+| [GLM-Pending](/cn/guide/models/text/glm-pending) | 待发布 | 即将上线 | |
+"#;
+        let contexts = parse_zhipu_model_overview_contexts(markdown);
+
+        assert_eq!(contexts.get("glm-4.6"), Some(&200_000));
+        assert!(!contexts.contains_key("glm-ocr"));
+        assert!(!contexts.contains_key("glm-pending"));
+        assert!(parse_zhipu_model_overview_contexts("").is_empty());
+        assert!(
+            parse_zhipu_model_overview_contexts("| 模型 | 特点 | 上下文 | 最大输出 |").is_empty()
+        );
+    }
+
+    #[test]
     fn test_parse_zhipu_detail_context() {
         let markdown = r#"
 <Card title="上下文窗口" icon={<svg />}>
@@ -1003,6 +1034,24 @@ Coding 能力开源 SOTA，从代码生成走向工程交付 | 1M | 128K |
 "#;
 
         assert_eq!(parse_zhipu_detail_context(markdown), Some(128_000));
+    }
+
+    #[test]
+    fn test_parse_zhipu_detail_context_ignores_other_cards() {
+        let markdown = r#"
+<Card title="最大输出" icon={<svg />}>
+  128K
+</Card>
+<Card title="上下文窗口" icon={<svg />}>
+  1M
+</Card>
+"#;
+
+        assert_eq!(parse_zhipu_detail_context(markdown), Some(1_000_000));
+        assert_eq!(
+            parse_zhipu_detail_context("<Card title=\"最大输出\">128K</Card>"),
+            None
+        );
     }
 
     #[test]
@@ -1096,6 +1145,52 @@ Coding 能力开源 SOTA，从代码生成走向工程交付 | 1M | 128K |
             lookup_models_dev_context(models, "xai/grok-4-fast"),
             Some(2_000_000)
         );
+    }
+
+    #[test]
+    fn test_apply_missing_context_windows_preserves_explicit_model_metadata() {
+        let mut models = vec![
+            FetchedModel {
+                id: "glm-5.2".to_string(),
+                owned_by: Some("zhipu".to_string()),
+                context_window: Some(123_456),
+            },
+            FetchedModel {
+                id: "glm-5.1".to_string(),
+                owned_by: Some("zhipu".to_string()),
+                context_window: None,
+            },
+        ];
+
+        apply_missing_context_windows(&mut models, |model_id| match model_id {
+            "glm-5.2" => Some(1_000_000),
+            "glm-5.1" => Some(200_000),
+            _ => None,
+        });
+
+        assert_eq!(models[0].context_window, Some(123_456));
+        assert_eq!(models[1].context_window, Some(200_000));
+    }
+
+    #[test]
+    fn test_zhipu_endpoint_and_glm_model_detection_boundaries() {
+        assert!(is_zhipu_models_endpoint(
+            "https://open.bigmodel.cn/api/coding/paas/v4/models"
+        ));
+        assert!(is_zhipu_models_endpoint(
+            "https://OPEN.BIGMODEL.CN/api/coding/paas/v4/models"
+        ));
+        assert!(is_zhipu_models_endpoint("https://api.z.ai/api/v1/models"));
+        assert!(!is_zhipu_models_endpoint(
+            "https://api.deepseek.com/v1/models"
+        ));
+        assert!(!is_zhipu_models_endpoint(""));
+
+        assert!(is_glm_model_id("glm-5.2"));
+        assert!(is_glm_model_id("GLM-5.2"));
+        assert!(is_glm_model_id("ZhipuAI/glm-5.2[1m]"));
+        assert!(!is_glm_model_id("deepseek-chat"));
+        assert!(!is_glm_model_id(""));
     }
 
     #[test]
