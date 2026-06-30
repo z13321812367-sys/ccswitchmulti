@@ -388,6 +388,18 @@ mod tests {
     }
 
     #[test]
+    fn probe_urls_respect_volcengine_v3_base_urls() {
+        assert_eq!(
+            build_chat_probe_url("https://ark.cn-beijing.volces.com/api/coding/v3", false).unwrap(),
+            "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions"
+        );
+        assert_eq!(
+            build_responses_probe_url("https://ark.cn-beijing.volces.com/api/v3", false).unwrap(),
+            "https://ark.cn-beijing.volces.com/api/v3/responses"
+        );
+    }
+
+    #[test]
     fn probe_urls_preserve_non_v1_full_endpoints() {
         assert_eq!(
             build_responses_probe_url(
