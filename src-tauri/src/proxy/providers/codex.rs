@@ -283,6 +283,16 @@ pub fn materialize_codex_routed_provider_from_target(
         }
     }
 
+    // 保留 route provider 的 modelCatalog，使 apply_codex_request_upstream_model
+    // 能通过 catalog 把可见模型名映射回真实上游模型名。MultiRouter 的 modelCatalog
+    // 只存在于 parent plan 中，target provider 通常不携带。
+    if let Some(catalog) = route_settings
+        .and_then(|settings| settings.get("modelCatalog"))
+        .cloned()
+    {
+        settings.insert("modelCatalog".to_string(), catalog);
+    }
+
     if let Some(model_override) = route_settings
         .and_then(|settings| settings.get(CODEX_RESOLVED_UPSTREAM_MODEL_OVERRIDE))
         .cloned()
@@ -3694,4 +3704,109 @@ wire_api = "chat"
         assert_eq!(config.supports_effort, Some(false));
         assert_eq!(config.output_format.as_deref(), Some("reasoning_content"));
     }
+    /// 验证 MultiRouter 的 modelCatalog 在路由物料化后仍可访问。
+    ///
+    /// 场景：两个 provider 暴露同名上游模型 "deepseek-v4-flash"，但分别使用不同可见名
+    /// "deepseek-v4-flash" 和 "deepseek-v4-flash-provider-b"。route 不设 modelMap，
+    /// 依赖 catalog 查找做 visible_name → upstream_model 映射。
+    ///
+    /// 验证点：
+    /// - 物料化后 materialized provider 保留 modelCatalog（回归 #fix: materialize丢失catalog）
+    /// - catalog 中两个不同可见名的条目都保留（不被 seen Set 去重）
+    /// - apply_codex_request_upstream_model 能通过 catalog 把可见名映射回上游模型名
+    #[test]
+    fn test_materialize_routed_provider_preserves_model_catalog() {
+        let router = create_provider(json!({
+            "codexRouting": {
+                "enabled": true,
+                "routes": [
+                    {
+                        "id": "route-a",
+                        "label": "Provider A",
+                        "targetProviderId": "provider-a",
+                        "match": { "models": ["deepseek-v4-flash"] },
+                        "upstream": {
+                            "apiFormat": "openai_chat",
+                            "auth": { "source": "provider_config" }
+                        }
+                    },
+                    {
+                        "id": "route-b",
+                        "label": "Provider B",
+                        "targetProviderId": "provider-b",
+                        "match": { "models": ["deepseek-v4-flash-provider-b"] },
+                        "upstream": {
+                            "apiFormat": "openai_chat",
+                            "auth": { "source": "provider_config" }
+                        }
+                    }
+                ]
+            },
+            "modelCatalog": {
+                "models": [
+                    { "model": "deepseek-v4-flash", "upstreamModel": "deepseek-v4-flash" },
+                    { "model": "deepseek-v4-flash-provider-b", "upstreamModel": "deepseek-v4-flash" }
+                ]
+            }
+        }));
+
+        // 目标 provider B：有自己的模型配置，但没有 modelCatalog
+        let target_b = Provider::with_id(
+            "provider-b".to_string(),
+            "Provider B".to_string(),
+            json!({
+                "base_url": "https://api.provider-b.example",
+                "auth": { "OPENAI_API_KEY": "sk-test" },
+                "model": "deepseek-v4-flash"
+            }),
+            None,
+        );
+
+        // 路线 B 匹配可见名 "deepseek-v4-flash-provider-b"
+        let routed = resolve_codex_model_routed_provider(
+            &router,
+            &json!({ "model": "deepseek-v4-flash-provider-b" }),
+        ).expect("route-b should match");
+
+        assert_eq!(
+            codex_route_target_provider_id(&routed),
+            Some("provider-b")
+        );
+
+        // 【关键验证】物料化前，route provider 仍有 modelCatalog
+        let catalog_before = routed
+            .settings_config
+            .get("modelCatalog")
+            .and_then(|c| c.get("models"))
+            .and_then(|m| m.as_array());
+        assert!(catalog_before.is_some(), "route provider must have modelCatalog");
+
+        // 【关键验证】物料化后，materialized provider 保留 modelCatalog
+        let materialized = materialize_codex_routed_provider_from_target(&routed, &target_b);
+        let catalog_after = materialized
+            .settings_config
+            .get("modelCatalog")
+            .and_then(|c| c.get("models"))
+            .and_then(|m| m.as_array());
+        assert!(
+            catalog_after.is_some(),
+            "materialized provider must preserve modelCatalog from route (fix: materialize丢失catalog)"
+        );
+
+        // 验证 catalog 中有两个条目（不同可见名不被去重）
+        let models = catalog_after.unwrap();
+        assert_eq!(models.len(), 2, "both aliased models must survive");
+
+        // 验证 apply_codex_request_upstream_model 能通过 catalog 映射可见名→上游模型名
+        let mut body_a = json!({ "model": "deepseek-v4-flash", "input": "test" });
+        let result_a = apply_codex_request_upstream_model(&materialized, &mut body_a);
+        assert_eq!(result_a.as_deref(), Some("deepseek-v4-flash"),
+            "visible name 'deepseek-v4-flash' should map to upstream 'deepseek-v4-flash'");
+
+        let mut body_b = json!({ "model": "deepseek-v4-flash-provider-b", "input": "test" });
+        let result_b = apply_codex_request_upstream_model(&materialized, &mut body_b);
+        assert_eq!(result_b.as_deref(), Some("deepseek-v4-flash"),
+            "aliased visible name 'deepseek-v4-flash-provider-b' should map to upstream 'deepseek-v4-flash'");
+    }
+
 }
