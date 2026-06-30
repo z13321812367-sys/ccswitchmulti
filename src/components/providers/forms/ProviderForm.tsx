@@ -1724,7 +1724,11 @@ function ProviderFormFull({
     }, 0);
   }, [appId, initialData]);
 
-  const handlePresetChange = (value: string) => {
+  const handlePresetChange = (
+    value: string,
+    options: { scrollDetails?: boolean } = {},
+  ) => {
+    const shouldScrollDetails = options.scrollDetails !== false;
     setSelectedPresetId(value);
     if (value === "custom") {
       setActivePreset(null);
@@ -1742,7 +1746,9 @@ function ProviderFormFull({
         // 自定义模板无模型映射，路由默认关闭
         setCodexTakeoverEnabled(false);
       }
-      scrollCodexProviderDetailsIntoView();
+      if (shouldScrollDetails) {
+        scrollCodexProviderDetailsIntoView();
+      }
       if (appId === "gemini") {
         resetGeminiConfig({}, {});
       }
@@ -1795,7 +1801,9 @@ function ProviderFormFull({
         icon: preset.icon ?? "",
         iconColor: preset.iconColor ?? "",
       });
-      scrollCodexProviderDetailsIntoView();
+      if (shouldScrollDetails) {
+        scrollCodexProviderDetailsIntoView();
+      }
       return;
     }
 
@@ -1921,7 +1929,7 @@ function ProviderFormFull({
       selectedPresetId === "codex-0" &&
       !form.getValues("name")
     ) {
-      handlePresetChange("codex-0");
+      handlePresetChange("codex-0", { scrollDetails: false });
     }
   }, [appId, initialData, selectedPresetId]);
 

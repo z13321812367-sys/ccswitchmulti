@@ -108,6 +108,23 @@ function renderProviderForm() {
 }
 
 describe("ProviderForm Codex preset selection", () => {
+  it("does not scroll when applying the default Codex source preset on mount", async () => {
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+
+    renderProviderForm();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("codex-api-key")).toBeInTheDocument();
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(scrollIntoView).not.toHaveBeenCalled();
+  });
+
   it("scrolls to Codex provider details after selecting any Codex source preset", async () => {
     const scrollIntoView = vi.fn();
     Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {

@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-06-30 Codex MultiRouter Single Source Entry Scroll Fix
+
+- 用户反馈在“创建多路路由”里点击“单独接入模型源”后会立刻滚到 API Key / 高级选项区域，必须再滚回顶部选择模型源。根因是 `ProviderForm` 新建 Codex provider 时默认 `selectedPresetId="codex-0"`，挂载后的自动 `handlePresetChange("codex-0")` 也调用了此前为“手动选择预设后滚到配置字段”新增的 `scrollCodexProviderDetailsIntoView()`。
+- 正确边界：打开单独接入模型源表单时，自动应用默认 OpenAI/Codex 预设只是为了给表单一个可编辑初始状态，不应改变滚动位置；用户手动点击具体模型源预设（如 DeepSeek、Zhipu GLM）后仍应滚到 API Key/Base URL 字段，避免停留在高预设网格误判无响应。
+- 修复点：`handlePresetChange(value, { scrollDetails?: false })` 支持禁止滚动；仅 `useEffect` 的默认 `codex-0` 自动应用传 `scrollDetails:false`。回归测试在 `tests/components/ProviderForm.codexPreset.test.tsx` 同时覆盖初次挂载不滚、手动选择预设仍滚。
+
 ## 2026-06-30 Codex MultiRouter Duplicate Upstream Model Alias Routing
 
 - 普通 Codex provider 表单里的“同名模型重命名”本质不是只改 `displayName`：能让 Codex Desktop 和后端路由区分两个同上游模型的是 `model` 可见 alias，`displayName` 只是菜单展示文本。`upstreamModel` 才保存真实上游模型名；后续排查不要把 displayName 当作可路由 key。
