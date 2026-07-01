@@ -126,6 +126,8 @@ function renderCatalogHarness(
   options: {
     shouldShowSpeedTest?: boolean;
     providerName?: string;
+    partnerPromotionKey?: string;
+    baseUrl?: string;
     onProviderSplitSuggestionChange?: ReturnType<typeof vi.fn>;
   } = {},
 ) {
@@ -152,8 +154,9 @@ function renderCatalogHarness(
         category="custom"
         shouldShowApiKeyLink={false}
         websiteUrl=""
+        partnerPromotionKey={options.partnerPromotionKey}
         shouldShowSpeedTest={options.shouldShowSpeedTest ?? false}
-        codexBaseUrl="https://api.thirdparty.example/v1"
+        codexBaseUrl={options.baseUrl ?? "https://api.thirdparty.example/v1"}
         onBaseUrlChange={vi.fn()}
         isFullUrl={false}
         onFullUrlChange={vi.fn()}
@@ -679,6 +682,26 @@ describe("CodexFormFields local model routing", () => {
         },
       ]);
     });
+  });
+
+  it("keeps catalog-only AgentPlan models without calling /models", () => {
+    const { latestCatalog } = renderCatalogHarness(
+      [{ model: "ark-code-latest", upstreamModel: "ark-code-latest" }],
+      {
+        providerName: "火山Agentplan",
+        partnerPromotionKey: "volcengine_agentplan",
+        baseUrl: "https://ark.cn-beijing.volces.com/api/coding/v3",
+      },
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "providerForm.fetchModels" }),
+    );
+
+    expect(fetchModelsForConfig).not.toHaveBeenCalled();
+    expect(latestCatalog()).toEqual([
+      { model: "ark-code-latest", upstreamModel: "ark-code-latest" },
+    ]);
   });
 
   it("uses model mapping checkboxes and arrows for catalog retention and order", async () => {

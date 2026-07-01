@@ -222,6 +222,46 @@ describe("CodexMultiRouterWizard", () => {
     expect(providersApi.update).toHaveBeenCalledTimes(1);
   });
 
+  it("skips catalog-only AgentPlan model fetch and keeps its built-in catalog", async () => {
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[
+          provider({
+            id: "ark-agentplan",
+            name: "火山Agentplan",
+            settingsConfig: {
+              base_url: "https://ark.cn-beijing.volces.com/api/coding/v3",
+              auth: { OPENAI_API_KEY: "sk-volc" },
+              modelCatalog: {
+                models: [{ model: "ark-code-latest" }],
+              },
+            },
+            meta: { partnerPromotionKey: "volcengine_agentplan" },
+          }),
+        ]}
+        onOpenChange={vi.fn()}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "配置核心参数" }));
+    expect(screen.getByText("使用内置模型目录")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "自动获取并写入模型列表" }),
+    );
+
+    expect(
+      await screen.findByText(/不开放 OpenAI \/models/),
+    ).toBeInTheDocument();
+    expect(fetchModelsForConfig).not.toHaveBeenCalled();
+    expect(providersApi.update).not.toHaveBeenCalled();
+  });
+
   it("keeps previous model selections while appending newly fetched models", async () => {
     vi.mocked(fetchModelsForConfig).mockResolvedValueOnce([
       { id: "model-a", ownedBy: null },

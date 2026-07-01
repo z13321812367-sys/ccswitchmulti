@@ -8,6 +8,8 @@ import type {
   Provider,
 } from "@/types";
 import type { FetchedModel } from "@/lib/api/model-fetch";
+import { extractCodexBaseUrl } from "@/utils/providerConfigUtils";
+import { isCodexCatalogOnlyPlanModelFetch } from "@/utils/codexPlanModelFetch";
 
 export const CODEX_MULTI_ROUTER_WIZARD_DISMISSED_KEY =
   "ccswitchmulti.codexMultiRouterWizard.dismissed";
@@ -133,9 +135,7 @@ export function getWizardModelFetchConfig(
 ): WizardModelFetchConfig | null {
   const config = provider.settingsConfig ?? {};
   const auth = config.auth ?? {};
-  const baseUrl = String(
-    config.base_url ?? config.baseURL ?? config.baseUrl ?? "",
-  ).trim();
+  const baseUrl = readWizardProviderBaseUrl(provider);
   const apiKey = String(
     auth.OPENAI_API_KEY ??
       config.apiKey ??
@@ -159,20 +159,43 @@ export function hasWizardModelCatalog(provider: Provider): boolean {
   return readWizardModelCatalog(provider).length > 0;
 }
 
+// 从 Codex provider 配置中读取 Base URL，兼容已扁平化字段和原始 config.toml 字符串。
+export function readWizardProviderBaseUrl(provider: Provider): string {
+  const config = provider.settingsConfig ?? {};
+  const direct = String(
+    config.base_url ?? config.baseURL ?? config.baseUrl ?? "",
+  ).trim();
+  if (direct) return direct;
+  return typeof config.config === "string"
+    ? (extractCodexBaseUrl(config.config) ?? "").trim()
+    : "";
+}
+
+// 判断向导中的模型源是否属于只能使用内置目录的 Plan provider。
+export function isWizardCatalogOnlyModelSource(provider: Provider): boolean {
+  return isCodexCatalogOnlyPlanModelFetch({
+    baseUrl: readWizardProviderBaseUrl(provider),
+    partnerPromotionKey: provider.meta?.partnerPromotionKey,
+    providerName: provider.name,
+  });
+}
+
 // 给状态机提供配置缺口列表；已有模型目录的 provider 可以继续进入路由预览，不强制要求 /models 可抓。
 export function getWizardConfigIssues(
   providers: Provider[],
 ): WizardConfigIssue[] {
   return providers
-    .filter(
-      (provider) =>
-        !getWizardModelFetchConfig(provider) &&
-        !hasWizardModelCatalog(provider),
-    )
+    .filter((provider) => {
+      const hasCatalog = hasWizardModelCatalog(provider);
+      if (isWizardCatalogOnlyModelSource(provider)) return !hasCatalog;
+      return !getWizardModelFetchConfig(provider) && !hasCatalog;
+    })
     .map((provider) => ({
       providerId: provider.id,
       providerName: provider.name,
-      reason: "缺少 Base URL/API Key，且当前没有可用 modelCatalog。",
+      reason: isWizardCatalogOnlyModelSource(provider)
+        ? "当前 Plan 不开放 OpenAI /models，且没有可用 modelCatalog。"
+        : "缺少 Base URL/API Key，且当前没有可用 modelCatalog。",
     }));
 }
 

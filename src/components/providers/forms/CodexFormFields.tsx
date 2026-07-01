@@ -51,6 +51,10 @@ import { CustomUserAgentField } from "./CustomUserAgentField";
 import { LocalProxyRequestOverridesField } from "./LocalProxyRequestOverridesField";
 import { cn } from "@/lib/utils";
 import { resolveFetchedCodexModelContextWindow } from "@/utils/codexModelContext";
+import {
+  codexCatalogOnlyPlanModelFetchMessage,
+  isCodexCatalogOnlyPlanModelFetch,
+} from "@/utils/codexPlanModelFetch";
 import type {
   CodexApiFormat,
   CodexCatalogModel,
@@ -747,6 +751,24 @@ export function CodexFormFields({
   );
 
   const handleFetchModels = useCallback(() => {
+    const isCatalogOnlyPlan = isCodexCatalogOnlyPlanModelFetch({
+      baseUrl: codexBaseUrl,
+      partnerPromotionKey,
+      providerName,
+    });
+    if (isCatalogOnlyPlan) {
+      const hasModelCatalog = catalogRowsRef.current.some((row) =>
+        row.model.trim(),
+      );
+      const message = codexCatalogOnlyPlanModelFetchMessage(hasModelCatalog);
+      if (hasModelCatalog) {
+        toast.info(message);
+      } else {
+        toast.warning(message);
+      }
+      return;
+    }
+
     if (!codexBaseUrl || !codexApiKey) {
       showFetchModelsError(null, t, {
         hasApiKey: !!codexApiKey,
@@ -812,6 +834,7 @@ export function CodexFormFields({
     customUserAgent,
     providerId,
     providerName,
+    partnerPromotionKey,
     websiteUrl,
     onCatalogModelsChange,
     onProviderSplitSuggestionChange,

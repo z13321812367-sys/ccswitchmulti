@@ -58,9 +58,10 @@ import {
   getWizardConfigIssues,
   getWizardModelFetchConfig,
   hasWizardModelCatalog,
+  isWizardCatalogOnlyModelSource,
   inferWizardApiFormat,
-  mergeFetchedModelsIntoWizardProvider,
   isCodexMultiRouterPlan,
+  mergeFetchedModelsIntoWizardProvider,
   readWizardModelCatalog,
   resolveWizardModelNameCollisions,
   skippedWizardConnectivityResult,
@@ -68,6 +69,7 @@ import {
   type WizardModelFetchConfig,
 } from "@/lib/codexMultiRouterWizard";
 import type { WorkspaceTab } from "@/components/codex/CodexRouterWorkspacePage";
+import { codexCatalogOnlyPlanModelFetchMessage } from "@/utils/codexPlanModelFetch";
 
 interface CodexMultiRouterWizardProps {
   open: boolean;
@@ -635,6 +637,15 @@ function providerConfigStatus(provider: Provider): {
   summary: string;
 } {
   const config = getWizardModelFetchConfig(provider);
+  const isCatalogOnlyPlan = isWizardCatalogOnlyModelSource(provider);
+  if (isCatalogOnlyPlan && hasWizardModelCatalog(provider)) {
+    return {
+      badge: "使用内置模型目录",
+      badgeVariant: "secondary",
+      summary:
+        "当前 Plan 的模型枚举不走 OpenAI /models，向导会保留已有 modelCatalog 继续生成路由。",
+    };
+  }
   if (config) {
     return {
       badge: "可自动获取模型",
@@ -653,7 +664,9 @@ function providerConfigStatus(provider: Provider): {
   return {
     badge: "需补全配置",
     badgeVariant: "destructive",
-    summary: "缺少 Base URL/API Key，且没有可用 modelCatalog",
+    summary: isCatalogOnlyPlan
+      ? "当前 Plan 不开放 OpenAI /models，且没有可用 modelCatalog"
+      : "缺少 Base URL/API Key，且没有可用 modelCatalog",
   };
 }
 
@@ -1154,9 +1167,10 @@ export function CodexMultiRouterWizard({
         draftSources.map((provider) => {
           const config = getWizardModelFetchConfig(provider);
           const existingCount = readWizardModelCatalog(provider).length;
+          const isCatalogOnlyPlan = isWizardCatalogOnlyModelSource(provider);
           return [
             provider.id,
-            config
+            config && !isCatalogOnlyPlan
               ? {
                   status: "loading",
                   message: "正在读取 /models 并准备写回 modelCatalog",
@@ -1164,8 +1178,9 @@ export function CodexMultiRouterWizard({
                 }
               : {
                   status: "skipped",
-                  message:
-                    "缺少 Base URL 或 API Key，无法在线读取；已保留现有模型目录。",
+                  message: isCatalogOnlyPlan
+                    ? codexCatalogOnlyPlanModelFetchMessage(existingCount > 0)
+                    : "缺少 Base URL 或 API Key，无法在线读取；已保留现有模型目录。",
                   modelCount: existingCount,
                 },
           ];
@@ -1177,9 +1192,34 @@ export function CodexMultiRouterWizard({
       for (const provider of draftSources) {
         const config = getWizardModelFetchConfig(provider);
         const beforeModels = readWizardModelCatalog(provider);
+        const isCatalogOnlyPlan = isWizardCatalogOnlyModelSource(provider);
+        if (isCatalogOnlyPlan) {
+          skippedCount += 1;
+          nextSources.push(provider);
+          setModelFetchCards((current) => ({
+            ...current,
+            [provider.id]: {
+              status: "skipped",
+              message: codexCatalogOnlyPlanModelFetchMessage(
+                beforeModels.length > 0,
+              ),
+              modelCount: beforeModels.length,
+            },
+          }));
+          continue;
+        }
         if (!config) {
           skippedCount += 1;
           nextSources.push(provider);
+          setModelFetchCards((current) => ({
+            ...current,
+            [provider.id]: {
+              status: "skipped",
+              message:
+                "缺少 Base URL 或 API Key，无法在线读取；已保留现有模型目录。",
+              modelCount: beforeModels.length,
+            },
+          }));
           continue;
         }
         setModelFetchCards((current) => ({

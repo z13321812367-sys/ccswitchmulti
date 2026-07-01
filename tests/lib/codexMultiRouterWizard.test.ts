@@ -8,8 +8,10 @@ import {
   classifyWizardConnectivityResult,
   collectWizardModelNameCollisions,
   getWizardConfigIssues,
+  getWizardModelFetchConfig,
   inferWizardApiFormat,
   inferWizardCacheConfig,
+  isWizardCatalogOnlyModelSource,
   resolveWizardModelNameCollisions,
 } from "@/lib/codexMultiRouterWizard";
 
@@ -381,6 +383,47 @@ describe("codexMultiRouterWizard helpers", () => {
         providerId: "empty-relay",
         providerName: "Empty Relay",
         reason: "缺少 Base URL/API Key，且当前没有可用 modelCatalog。",
+      },
+    ]);
+  });
+
+  it("detects AgentPlan catalog-only sources but still keeps call config for probes", () => {
+    const agentPlan = provider({
+      id: "ark-agentplan",
+      name: "火山Agentplan",
+      settingsConfig: {
+        auth: { OPENAI_API_KEY: "sk-volc" },
+        config:
+          'model_provider = "custom"\n[model_providers.custom]\nbase_url = "https://ark.cn-beijing.volces.com/api/coding/v3"\n',
+        modelCatalog: { models: [{ model: "ark-code-latest" }] },
+      },
+      meta: { partnerPromotionKey: "volcengine_agentplan" },
+    });
+
+    expect(isWizardCatalogOnlyModelSource(agentPlan)).toBe(true);
+    expect(getWizardModelFetchConfig(agentPlan)).toMatchObject({
+      baseUrl: "https://ark.cn-beijing.volces.com/api/coding/v3",
+      apiKey: "sk-volc",
+    });
+    expect(getWizardConfigIssues([agentPlan])).toEqual([]);
+  });
+
+  it("requires a model catalog for AgentPlan sources because /models is unavailable", () => {
+    const agentPlan = provider({
+      id: "ark-agentplan",
+      name: "火山Agentplan",
+      settingsConfig: {
+        base_url: "https://ark.cn-beijing.volces.com/api/coding/v3",
+        auth: { OPENAI_API_KEY: "sk-volc" },
+      },
+      meta: { partnerPromotionKey: "volcengine_agentplan" },
+    });
+
+    expect(getWizardConfigIssues([agentPlan])).toEqual([
+      {
+        providerId: "ark-agentplan",
+        providerName: "火山Agentplan",
+        reason: "当前 Plan 不开放 OpenAI /models，且没有可用 modelCatalog。",
       },
     ]);
   });
