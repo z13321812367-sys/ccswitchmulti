@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-07-01 Local Branch Merge Audit
+
+- 本地 `main` 已吸收三个此前未合入的修复/功能分支：`codex/upstream-preserve-codex-live-settings`、`upstream/codex-history-repair-session-ui`、`upstream/codex-history-repair-session-manager`。
+- `codex/upstream-preserve-codex-live-settings` 合并时冲突在 `src-tauri/src/codex_config.rs` 与 `src-tauri/src/services/proxy.rs`。正确处理是保留当前 main 的 MultiRouter、OAuth 登录态保护、CCSwitch 自有 catalog 指针清理、`PROXY_MANAGED` 陈旧 provider 表清理，同时补入旧分支的递归 TOML provider 优先合并逻辑。验证：`cargo fmt --manifest-path src-tauri\Cargo.toml --check`；`cargo test --manifest-path src-tauri\Cargo.toml codex_restore_ --lib -- --nocapture`。
+- `upstream/codex-history-repair-session-ui` 是旧 upstream PR 形态；当前 main 已有更新的 CCSwitchMulti 历史修复实现。合并时不要用旧 UI 覆盖当前 `CodexHistoryRepairPanel`、`SessionManagerPage`、API types 或 MultiRouter repair command。最终只吸收 `.gitignore` 历史工具构建产物规则、`history:tool:check`、`scripts/codex-history-tool/build-windows-exe.ps1` 和 i18n key。验证：`pnpm history:tool:check`；`pnpm typecheck`；`cargo fmt --manifest-path src-tauri\Cargo.toml --check`。
+- `upstream/codex-history-repair-session-manager` 的 glob state DB discovery / reconcile CLI 内容已经被当前 main 后续实现覆盖。冲突文件 `scripts/codex-history-tool/codex_history_tool.py` 与 `src-tauri/src/codex_history_migration.rs` 必须保留 main，避免旧默认 provider、较窄扫描逻辑和 mojibake 注释回滚当前实现。验证：`pnpm history:tool:check`；`cargo test --manifest-path src-tauri\Cargo.toml codex_history_migration::tests --lib -- --nocapture`。
+- 合并后仍未进 `main` 的本地分支只剩非本轮目标：`backup/main-mixed-before-clean-20260622` 是旧混合备份，包含早期 sidecar/router 实验和 `Codex <codex@local>` 提交，不应直接合入；`docs/codex-responses-websocket-routing-notes` 只剩文档提交未合入，其中代码提交 `fix(codex): sync multirouter model cache` 已被 `main` 等价吸收。
+
 ## 2026-07-01 Codex OAuth Native Request Shape Diagnostics
 
 - Added read-only script `scripts/codex-oauth-diagnostics.ps1` for capacity/OAuth triage. It writes sanitized evidence under `scripts/logs/codex-oauth-diagnostics/<timestamp>`: live Codex config, auth metadata, parsed `codex-router.log` events, capacity/error candidates, and summary. Token-like fields plus account ids are represented only by length and short SHA256 prefixes.
