@@ -74,6 +74,7 @@ interface CodexMultiRouterWizardProps {
   providers: Provider[];
   onOpenChange: (open: boolean) => void;
   onCreateProvider: () => void;
+  onOpenProviderConfig?: (provider: Provider) => void;
   onOpenWorkspace: (provider: Provider, tab: WorkspaceTab) => void;
   onEnablePlan: (provider: Provider) => void | Promise<void>;
 }
@@ -111,6 +112,27 @@ interface WizardIssue {
   detail: string;
   canContinue: boolean;
   providerName?: string;
+}
+
+type ModelFetchCardStatus =
+  | "idle"
+  | "loading"
+  | "updated"
+  | "unchanged"
+  | "skipped"
+  | "error";
+
+interface ModelFetchDiff {
+  added: string[];
+  removed: string[];
+  changed: string[];
+}
+
+interface ModelFetchCardState {
+  status: ModelFetchCardStatus;
+  message: string;
+  modelCount: number;
+  diff?: ModelFetchDiff;
 }
 
 const STEPS: WizardStep[] = [
@@ -385,7 +407,7 @@ function wizardFlowReducer(
       return {
         ...state,
         status: event.partial ? "modelFetchPartial" : "modelsFetched",
-        stepKey: event.partial ? "fetchModels" : "collisions",
+        stepKey: "fetchModels",
         fetchSummary: event.summary,
       };
     case "PROBE_START":
@@ -442,6 +464,114 @@ function modelSourceSummary(provider: Provider): string {
   const models = readWizardModelCatalog(provider);
   if (models.length === 0) return "尚未获取模型";
   return `${models.length} 个模型`;
+}
+
+// 生成模型目录对比签名；只比较会影响路由、展示、上下文和多模态能力的字段。
+function modelCatalogSignature(model: CodexCatalogModel): string {
+  const displayName = model.displayName?.trim() || model.model;
+  return JSON.stringify({
+    upstreamModel: model.upstreamModel ?? model.upstream_model ?? model.model,
+    displayName,
+    contextWindow:
+      model.contextWindow === undefined ? null : String(model.contextWindow),
+    inputModalities: model.inputModalities ?? model.input_modalities ?? [],
+    textOnly: model.textOnly ?? model.text_only ?? null,
+    supportsImage: model.supportsImage ?? model.supports_image ?? null,
+    vision: model.vision ?? null,
+  });
+}
+
+// 比较刷新前后的目录，用于在 provider 卡片上标注“有更新/无更新”。
+function diffWizardModelCatalog(
+  beforeModels: CodexCatalogModel[],
+  afterModels: CodexCatalogModel[],
+): ModelFetchDiff {
+  const beforeByModel = new Map(
+    beforeModels.map((model) => [model.model, modelCatalogSignature(model)]),
+  );
+  const afterByModel = new Map(
+    afterModels.map((model) => [model.model, modelCatalogSignature(model)]),
+  );
+  const added = afterModels
+    .map((model) => model.model)
+    .filter((model) => !beforeByModel.has(model));
+  const removed = beforeModels
+    .map((model) => model.model)
+    .filter((model) => !afterByModel.has(model));
+  const changed = afterModels
+    .map((model) => model.model)
+    .filter(
+      (model) =>
+        beforeByModel.has(model) &&
+        beforeByModel.get(model) !== afterByModel.get(model),
+    );
+  return { added, removed, changed };
+}
+
+// 判断一次 /models 读取是否实际改变了目录内容。
+function hasModelFetchDiff(diff: ModelFetchDiff): boolean {
+  return (
+    diff.added.length > 0 || diff.removed.length > 0 || diff.changed.length > 0
+  );
+}
+
+// 只展示少量变化样例，避免 provider 卡片被很长的模型列表撑高。
+function formatModelFetchDiff(diff?: ModelFetchDiff): string | null {
+  if (!diff || !hasModelFetchDiff(diff)) return null;
+  const parts: string[] = [];
+  if (diff.added.length > 0) {
+    parts.push(
+      `新增 ${diff.added.length}: ${diff.added.slice(0, 3).join(", ")}`,
+    );
+  }
+  if (diff.removed.length > 0) {
+    parts.push(
+      `移除 ${diff.removed.length}: ${diff.removed.slice(0, 3).join(", ")}`,
+    );
+  }
+  if (diff.changed.length > 0) {
+    parts.push(
+      `更新 ${diff.changed.length}: ${diff.changed.slice(0, 3).join(", ")}`,
+    );
+  }
+  return parts.join("；");
+}
+
+// 给未刷新过的 provider 卡片提供稳定默认状态。
+function defaultModelFetchCardState(provider: Provider): ModelFetchCardState {
+  return {
+    status: "idle",
+    message: "等待读取模型列表",
+    modelCount: readWizardModelCatalog(provider).length,
+  };
+}
+
+// 模型读取状态的 badge 统一在这里收口，保证顶部按钮和卡片语义一致。
+function modelFetchStatusLabel(status: ModelFetchCardStatus): string {
+  switch (status) {
+    case "loading":
+      return "正在读取";
+    case "updated":
+      return "有模型列表更新";
+    case "unchanged":
+      return "无模型列表更新";
+    case "skipped":
+      return "无法在线读取";
+    case "error":
+      return "获取失败";
+    case "idle":
+    default:
+      return "等待读取";
+  }
+}
+
+// 根据结果选择 badge 风格；失败用 destructive，其它状态保持低干扰。
+function modelFetchBadgeVariant(
+  status: ModelFetchCardStatus,
+): "outline" | "secondary" | "destructive" {
+  if (status === "error") return "destructive";
+  if (status === "updated" || status === "unchanged") return "secondary";
+  return "outline";
 }
 
 // 把 /models 抓取参数格式化成安全摘要，不展示真实 API Key。
@@ -517,7 +647,7 @@ function providerConfigStatus(provider: Provider): {
       badge: "已有模型目录，可继续",
       badgeVariant: "secondary",
       summary:
-        "已有 modelCatalog，可跳过 /models 在线读取；如需刷新模型，请补 Base URL/API Key 后再获取。",
+        "已有 modelCatalog，可以继续生成路由；进入获取模型列表步骤时仍会重新尝试 /models 在线读取。",
     };
   }
   return {
@@ -619,11 +749,28 @@ function resolveActiveSpawnAgentModels(
   return draftModels.filter((model) => catalogModelSet.has(model)).slice(0, 5);
 }
 
+// 刷新模型列表后保留用户已经勾选的模型，只把真正新增的模型追加进去。
+function reconcileCatalogModelOrderAfterFetch(
+  currentOrder: string[] | null,
+  previousAvailableModels: string[],
+  nextAvailableModels: string[],
+) {
+  if (currentOrder === null) return null;
+  const nextAvailableSet = new Set(nextAvailableModels);
+  const previousAvailableSet = new Set(previousAvailableModels);
+  const retained = currentOrder.filter((model) => nextAvailableSet.has(model));
+  const added = nextAvailableModels.filter(
+    (model) => !previousAvailableSet.has(model),
+  );
+  return [...retained, ...added];
+}
+
 export function CodexMultiRouterWizard({
   open,
   providers,
   onOpenChange,
   onCreateProvider,
+  onOpenProviderConfig,
   onOpenWorkspace,
   onEnablePlan,
 }: CodexMultiRouterWizardProps) {
@@ -649,6 +796,9 @@ export function CodexMultiRouterWizard({
   const [isConnectivityConfirmOpen, setIsConnectivityConfirmOpen] =
     useState(false);
   const [wizardIssues, setWizardIssues] = useState<WizardIssue[]>([]);
+  const [modelFetchCards, setModelFetchCards] = useState<
+    Record<string, ModelFetchCardState>
+  >({});
   const initializedOpenRef = useRef(false);
 
   const existingPlan = useMemo(
@@ -715,6 +865,14 @@ export function CodexMultiRouterWizard({
     );
     setConnectivityResults([]);
     setWizardIssues([]);
+    setModelFetchCards(
+      Object.fromEntries(
+        providerModelSources.map((provider) => [
+          provider.id,
+          defaultModelFetchCardState(provider),
+        ]),
+      ),
+    );
     dispatchFlow({
       type: "INIT",
       hasSources: providerModelSources.length > 0,
@@ -746,6 +904,14 @@ export function CodexMultiRouterWizard({
       }
       return [...retainedSources, ...appendedSources];
     });
+    setModelFetchCards((currentCards) =>
+      Object.fromEntries(
+        providerModelSources.map((provider) => [
+          provider.id,
+          currentCards[provider.id] ?? defaultModelFetchCardState(provider),
+        ]),
+      ),
+    );
   }, [existingPlan, open, providerModelSources]);
 
   // 所有异步 catch 都进入同一个问题列表，让 toast 之外的 UI 也能长期展示异常和继续策略。
@@ -977,18 +1143,53 @@ export function CodexMultiRouterWizard({
   const refreshModelSources = async () => {
     dispatchFlow({ type: "FETCH_START" });
     clearWizardIssuesForStage("fetchModels");
+    const previousAvailableModels = availableCatalogModels.map(
+      (model) => model.model,
+    );
     let successCount = 0;
     let skippedCount = 0;
     let failedCount = 0;
+    setModelFetchCards(
+      Object.fromEntries(
+        draftSources.map((provider) => {
+          const config = getWizardModelFetchConfig(provider);
+          const existingCount = readWizardModelCatalog(provider).length;
+          return [
+            provider.id,
+            config
+              ? {
+                  status: "loading",
+                  message: "正在读取 /models 并准备写回 modelCatalog",
+                  modelCount: existingCount,
+                }
+              : {
+                  status: "skipped",
+                  message:
+                    "缺少 Base URL 或 API Key，无法在线读取；已保留现有模型目录。",
+                  modelCount: existingCount,
+                },
+          ];
+        }),
+      ),
+    );
     try {
       const nextSources: Provider[] = [];
       for (const provider of draftSources) {
         const config = getWizardModelFetchConfig(provider);
+        const beforeModels = readWizardModelCatalog(provider);
         if (!config) {
           skippedCount += 1;
           nextSources.push(provider);
           continue;
         }
+        setModelFetchCards((current) => ({
+          ...current,
+          [provider.id]: {
+            status: "loading",
+            message: `正在读取 ${fetchConfigSummary(config)}`,
+            modelCount: beforeModels.length,
+          },
+        }));
         try {
           const fetchedModels = await fetchModelsForConfig(
             config.baseUrl,
@@ -1001,9 +1202,23 @@ export function CodexMultiRouterWizard({
             provider,
             fetchedModels,
           );
+          const afterModels = readWizardModelCatalog(nextProvider);
+          const diff = diffWizardModelCatalog(beforeModels, afterModels);
+          const hasDiff = hasModelFetchDiff(diff);
           await providersApi.update(nextProvider, "codex");
           nextSources.push(nextProvider);
           successCount += 1;
+          setModelFetchCards((current) => ({
+            ...current,
+            [provider.id]: {
+              status: hasDiff ? "updated" : "unchanged",
+              message: hasDiff
+                ? `读取成功，已写入 ${afterModels.length} 个模型。`
+                : `读取成功，无模型列表更新，仍为 ${afterModels.length} 个模型。`,
+              modelCount: afterModels.length,
+              diff,
+            },
+          }));
         } catch (error) {
           console.error("[CodexMultiRouterWizard] fetch models failed", error);
           const message = formatWizardError(error);
@@ -1011,17 +1226,39 @@ export function CodexMultiRouterWizard({
             stage: "fetchModels",
             severity: "warning",
             title: "模型列表获取失败",
-            detail: message,
+            detail: `获取模型列表失败，请检查当前 provider 配置：${message}`,
             canContinue: true,
             providerName: provider.name,
           });
           failedCount += 1;
           nextSources.push(provider);
+          setModelFetchCards((current) => ({
+            ...current,
+            [provider.id]: {
+              status: "error",
+              message: `获取模型列表失败，请检查当前 provider 配置：${message}`,
+              modelCount: beforeModels.length,
+            },
+          }));
         }
       }
       setDraftSources(nextSources);
-      setCatalogModelOrder(null);
-      setDraftSpawnAgentModels([]);
+      const nextAvailableModels = buildWizardModelCatalog(
+        resolveWizardModelNameCollisions(nextSources),
+      ).models.map((model) => model.model);
+      setCatalogModelOrder((current) =>
+        reconcileCatalogModelOrderAfterFetch(
+          current,
+          previousAvailableModels,
+          nextAvailableModels,
+        ),
+      );
+      setDraftSpawnAgentModels((current) => {
+        const nextAvailableSet = new Set(nextAvailableModels);
+        return current
+          .filter((model) => nextAvailableSet.has(model))
+          .slice(0, 5);
+      });
       setConnectivityResults([]);
       await queryClient.invalidateQueries({ queryKey: ["providers", "codex"] });
       dispatchFlow({
@@ -1030,7 +1267,7 @@ export function CodexMultiRouterWizard({
         summary: { successCount, skippedCount, failedCount },
       });
       toast.success(
-        `模型列表刷新完成：${successCount} 个成功，${skippedCount} 个跳过，${failedCount} 个失败。`,
+        `模型列表读取完成：${successCount} 个成功，${skippedCount} 个无法读取，${failedCount} 个失败。`,
         { closeButton: true },
       );
     } catch (error) {
@@ -1580,14 +1817,52 @@ export function CodexMultiRouterWizard({
                   Codex 会话一定完整正常。
                 </div>
                 <div className="grid gap-3 md:grid-cols-2">
-                  {draftSources.map((provider) => (
-                    <div key={provider.id} className="rounded-lg border p-3">
-                      <div className="font-medium">{provider.name}</div>
-                      <div className="mt-2 text-sm text-muted-foreground">
-                        {modelSourceSummary(provider)}
-                      </div>
-                    </div>
-                  ))}
+                  {draftSources.map((provider) => {
+                    const cardState =
+                      modelFetchCards[provider.id] ??
+                      defaultModelFetchCardState(provider);
+                    const diffText = formatModelFetchDiff(cardState.diff);
+                    return (
+                      <button
+                        key={provider.id}
+                        type="button"
+                        className="rounded-lg border p-3 text-left transition hover:border-primary/60 hover:bg-muted/40 focus:outline-none focus:ring-2 focus:ring-primary/40"
+                        onClick={() => onOpenProviderConfig?.(provider)}
+                        aria-label={`打开 ${provider.name} 配置页`}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="truncate font-medium">
+                              {provider.name}
+                            </div>
+                            <div className="mt-2 text-sm text-muted-foreground">
+                              {cardState.modelCount} 个模型
+                            </div>
+                          </div>
+                          <Badge
+                            variant={modelFetchBadgeVariant(cardState.status)}
+                            className="shrink-0 gap-1"
+                          >
+                            {cardState.status === "loading" && (
+                              <RefreshCw className="h-3 w-3 animate-spin" />
+                            )}
+                            {modelFetchStatusLabel(cardState.status)}
+                          </Badge>
+                        </div>
+                        <div className="mt-2 line-clamp-2 text-xs leading-5 text-muted-foreground">
+                          {cardState.message}
+                        </div>
+                        {diffText && (
+                          <div className="mt-2 line-clamp-2 rounded-md bg-primary/10 px-2 py-1 text-xs leading-5 text-primary">
+                            {diffText}
+                          </div>
+                        )}
+                        <div className="mt-2 text-xs text-muted-foreground">
+                          点击打开 provider 配置页
+                        </div>
+                      </button>
+                    );
+                  })}
                 </div>
                 {connectivityResults.length > 0 && (
                   <div className="max-h-80 overflow-auto rounded-lg border">

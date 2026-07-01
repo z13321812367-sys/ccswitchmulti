@@ -190,9 +190,112 @@ describe("CodexMultiRouterWizard", () => {
     fireEvent.click(screen.getByRole("button", { name: "配置核心参数" }));
 
     expect(screen.getByText("已有模型目录，可继续")).toBeInTheDocument();
-    expect(screen.getByText(/已有 modelCatalog，可跳过/)).toBeInTheDocument();
+    expect(screen.getByText(/仍会重新尝试/)).toBeInTheDocument();
     expect(screen.queryByText(/未配置在线获取参数/)).not.toBeInTheDocument();
     expect(screen.queryByText("需补全配置")).not.toBeInTheDocument();
+  });
+
+  it("refreshes providers that already have modelCatalog and marks unchanged lists", async () => {
+    vi.mocked(fetchModelsForConfig).mockResolvedValueOnce([
+      { id: "deepseek-chat", ownedBy: null },
+    ]);
+    vi.mocked(providersApi.update).mockResolvedValueOnce(true);
+
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[provider()]}
+        onOpenChange={vi.fn()}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "自动获取并写入模型列表" }),
+    );
+
+    expect(await screen.findByText("无模型列表更新")).toBeInTheDocument();
+    expect(fetchModelsForConfig).toHaveBeenCalledTimes(1);
+    expect(providersApi.update).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps previous model selections while appending newly fetched models", async () => {
+    vi.mocked(fetchModelsForConfig).mockResolvedValueOnce([
+      { id: "model-a", ownedBy: null },
+      { id: "model-b", ownedBy: null },
+      { id: "model-c", ownedBy: null },
+    ]);
+    vi.mocked(providersApi.update).mockResolvedValueOnce(true);
+
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[
+          provider({
+            id: "relay",
+            name: "Relay",
+            settingsConfig: {
+              base_url: "https://relay.example/v1",
+              auth: { OPENAI_API_KEY: "sk-test" },
+              modelCatalog: {
+                models: [
+                  { model: "model-a", upstreamModel: "model-a" },
+                  { model: "model-b", upstreamModel: "model-b" },
+                ],
+              },
+            },
+          }),
+        ]}
+        onOpenChange={vi.fn()}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "整理模型" }));
+    fireEvent.click(screen.getByLabelText("保留 model-b"));
+    expect(screen.getByLabelText("保留 model-b")).not.toBeChecked();
+
+    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "自动获取并写入模型列表" }),
+    );
+
+    expect(await screen.findByText("有模型列表更新")).toBeInTheDocument();
+    expect(screen.getByText(/新增 1: model-c/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "整理模型" }));
+    expect(screen.getByLabelText("保留 model-a")).toBeChecked();
+    expect(screen.getByLabelText("保留 model-b")).not.toBeChecked();
+    expect(screen.getByLabelText("保留 model-c")).toBeChecked();
+  });
+
+  it("opens a provider config page from the model fetch cards", () => {
+    const onOpenProviderConfig = vi.fn();
+    const source = provider();
+
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[source]}
+        onOpenChange={vi.fn()}
+        onCreateProvider={vi.fn()}
+        onOpenProviderConfig={onOpenProviderConfig}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "打开 DeepSeek 配置页" }),
+    );
+
+    expect(onOpenProviderConfig).toHaveBeenCalledWith(source);
   });
 
   it("shows inferred Responses format for official OpenAI sources with stale chat metadata", () => {
@@ -423,7 +526,7 @@ describe("CodexMultiRouterWizard", () => {
     );
 
     expect(await screen.findByText("模型列表获取失败")).toBeInTheDocument();
-    expect(screen.getByText("upstream /models timeout")).toBeInTheDocument();
+    expect(screen.getAllByText(/upstream \/models timeout/).length).toBe(2);
     expect(screen.getByText("可继续")).toBeInTheDocument();
     consoleError.mockRestore();
   });

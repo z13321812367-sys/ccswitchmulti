@@ -1906,6 +1906,12 @@ function App() {
           setActiveApp("codex");
           setIsAddOpen(true);
         }}
+        onOpenProviderConfig={(provider) => {
+          setIsCodexMultiRouterWizardOpen(false);
+          setActiveApp("codex");
+          setCurrentView("providers");
+          setEditingProvider(provider);
+        }}
         onOpenWorkspace={(provider, tab) =>
           openCodexRouterWorkspace(provider, tab)
         }
