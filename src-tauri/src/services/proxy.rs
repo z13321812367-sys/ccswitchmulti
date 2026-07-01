@@ -2864,6 +2864,9 @@ impl ProxyService {
 
         let auth = config.get("auth");
         let config_str = config.get("config").and_then(|v| v.as_str());
+        let live_oauth_auth = read_json_file(&get_codex_auth_path())
+            .ok()
+            .filter(crate::codex_config::codex_auth_has_oauth_login_material);
 
         // Decide the config.toml text ONCE, before splitting on auth. A stored
         // Codex backup comes in two shapes needing opposite handling:
@@ -2893,6 +2896,25 @@ impl ProxyService {
 
         match (auth, prepared_cfg.as_deref()) {
             (Some(auth), Some(cfg)) => {
+                // Codex Desktop 的 ChatGPT 登录态归 live `auth.json` 所有。崩溃恢复、
+                // 关机恢复和接管关闭只应该恢复 provider/config 投影；如果当前机器已经有
+                // OAuth 登录材料，就不能用旧备份里的空 auth、API key auth 或过期 OAuth
+                // 覆盖它，否则 Codex 先于 CCSwitchMulti 启动时会表现为 app 登录丢失。
+                if live_oauth_auth.is_some() {
+                    let cfg = if crate::codex_config::extract_codex_auth_api_key(auth).is_some()
+                        && !cfg.trim().is_empty()
+                    {
+                        crate::codex_config::prepare_codex_provider_live_config(auth, cfg)
+                            .map_err(|e| format!("写入 Codex 配置失败: {e}"))?
+                    } else {
+                        cfg.to_string()
+                    };
+                    let config_path = get_codex_config_path();
+                    crate::config::write_text_file(&config_path, &cfg)
+                        .map_err(|e| format!("写入 Codex config 失败: {e}"))?;
+                    return Ok(());
+                }
+
                 let auth_path = get_codex_auth_path();
                 if auth.as_object().is_some_and(|obj| obj.is_empty()) {
                     let _ = crate::config::delete_file(&auth_path);
@@ -2905,6 +2927,9 @@ impl ProxyService {
                 }
             }
             (Some(auth), None) => {
+                if live_oauth_auth.is_some() {
+                    return Ok(());
+                }
                 let auth_path = get_codex_auth_path();
                 write_json_file(&auth_path, auth)
                     .map_err(|e| format!("写入 Codex auth 失败: {e}"))?;
@@ -6851,6 +6876,134 @@ wire_api = "responses"
         assert!(
             !crate::codex_config::get_codex_auth_path().exists(),
             "empty-auth restore must delete auth.json rather than write an empty one"
+        );
+    }
+
+    /// 回归：Codex Desktop 的 app 登录态在 live `auth.json` 中维护。
+    ///
+    /// 如果 CCSwitchMulti 崩溃、系统重启，或 Codex Desktop 先于 CCSwitchMulti 启动，
+    /// 恢复旧接管备份时不能用空 auth 备份删除当前 live OAuth 登录，否则用户会看到
+    /// Codex app 需要重新登录。配置仍应从备份恢复，模型目录也要照常投影。
+    #[tokio::test]
+    #[serial]
+    async fn codex_restore_empty_auth_backup_preserves_current_live_oauth_login() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+
+        let codex_dir = crate::codex_config::get_codex_config_dir();
+        std::fs::create_dir_all(&codex_dir).expect("create codex dir");
+        std::fs::write(
+            codex_dir.join("models_cache.json"),
+            r#"{"models":[{"slug":"gpt-5.5"}]}"#,
+        )
+        .expect("seed models_cache template");
+        let live_oauth = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "account_id": "acct-live",
+                "access_token": "live-access",
+                "refresh_token": "live-refresh"
+            }
+        });
+        crate::config::write_json_file(&crate::codex_config::get_codex_auth_path(), &live_oauth)
+            .expect("seed live OAuth auth");
+
+        let backup_json = serde_json::to_string(&json!({
+            "auth": {},
+            "config": "model_provider = \"custom\"\nmodel = \"deepseek-v4-flash\"\n\n[model_providers.custom]\nname = \"DeepSeek\"\nbase_url = \"https://api.deepseek.example/v1\"\nwire_api = \"responses\"\nexperimental_bearer_token = \"sk-deepseek\"\n",
+            "modelCatalog": {
+                "models": [ { "model": "deepseek-v4-flash", "displayName": "DeepSeek V4 Flash" } ]
+            }
+        }))
+        .expect("serialize backup");
+        db.save_live_backup("codex", &backup_json)
+            .await
+            .expect("seed live backup");
+
+        service
+            .restore_live_config_for_app_with_fallback(&AppType::Codex)
+            .await
+            .expect("restore codex live from backup");
+
+        let restored_auth: Value =
+            crate::config::read_json_file(&crate::codex_config::get_codex_auth_path())
+                .expect("read restored auth.json");
+        assert_eq!(
+            restored_auth, live_oauth,
+            "restore must preserve current Codex Desktop OAuth login material"
+        );
+        let restored = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read restored config.toml");
+        assert!(
+            restored.contains("model_catalog_json"),
+            "restore must still project the inline catalog pointer, got:\n{restored}"
+        );
+        assert!(
+            restored.contains("experimental_bearer_token = \"sk-deepseek\""),
+            "restore must keep provider bearer token in config.toml, got:\n{restored}"
+        );
+    }
+
+    /// 回归：接管备份里的 OAuth token 可能早于 Codex Desktop 当前 live token。
+    ///
+    /// 关闭接管或异常恢复不是账号切换操作；只要当前 live auth 仍有 OAuth 登录材料，
+    /// 就不能把它回滚到备份里的旧 access/refresh token。
+    #[tokio::test]
+    #[serial]
+    async fn codex_restore_stale_oauth_backup_preserves_current_live_oauth_login() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+
+        let live_oauth = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "account_id": "acct-live",
+                "access_token": "current-access",
+                "refresh_token": "current-refresh"
+            }
+        });
+        crate::config::write_json_file(&crate::codex_config::get_codex_auth_path(), &live_oauth)
+            .expect("seed live OAuth auth");
+
+        let backup_json = serde_json::to_string(&json!({
+            "auth": {
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "account_id": "acct-live",
+                    "access_token": "stale-access",
+                    "refresh_token": "stale-refresh"
+                }
+            },
+            "config": "model = \"gpt-5.5\"\nmodel_provider = \"openai\"\n"
+        }))
+        .expect("serialize backup");
+        db.save_live_backup("codex", &backup_json)
+            .await
+            .expect("seed live backup");
+
+        service
+            .restore_live_config_for_app_with_fallback(&AppType::Codex)
+            .await
+            .expect("restore codex live from backup");
+
+        let restored_auth: Value =
+            crate::config::read_json_file(&crate::codex_config::get_codex_auth_path())
+                .expect("read restored auth.json");
+        assert_eq!(
+            restored_auth, live_oauth,
+            "restore must not roll back current Codex Desktop OAuth tokens to stale backup tokens"
+        );
+        let restored = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read restored config.toml");
+        assert!(
+            restored.contains("model_provider = \"openai\""),
+            "restore should still apply backup config.toml, got:\n{restored}"
         );
     }
 

@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-07-01 Codex Desktop Login Preservation During Takeover Restore
+
+- Codex Desktop app 登录态的唯一安全来源是 live `~/.codex/auth.json`。CCSwitchMulti 的 MultiRouter/OAuth 只负责 LLM 请求出口，异常恢复、关闭接管、启动自恢复都不能把旧 `proxy_live_backup` 里的空 auth、API key auth 或过期 OAuth 快照覆盖到当前 live auth。
+- 崩溃/系统重启/Codex 先于 CCSwitchMulti 启动的关键风险不是 `15721` 本地代理配置本身，而是恢复旧备份时删除或回滚 `auth.json`。`ProxyService::write_codex_live_verbatim` 现在在恢复 Codex 备份时，如果当前 live auth 有 OAuth 登录材料，只写/投影 `config.toml`，保留 live `auth.json`；第三方 API key 仍放进 `experimental_bearer_token`。
+- 保持兼容边界：如果当前 live 没有 OAuth 登录材料，空 auth 备份仍可删除 `auth.json`，以支持 config-only 第三方 provider；有 live OAuth 时，空 auth 和 stale OAuth 备份都不能影响 app 登录。回归测试覆盖 `codex_restore_empty_auth_backup_preserves_current_live_oauth_login` 与 `codex_restore_stale_oauth_backup_preserves_current_live_oauth_login`。
+
 ## 2026-07-01 GitHub CI and Release Workflow Failure Boundaries
 
 - GitHub CI 的 backend job 比本地常用验证更严格：`cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings` 和 `cargo test --manifest-path src-tauri/Cargo.toml` 都会跑。发布前不能只跑前端 `typecheck/vitest/prettier`，Rust warning 在 stable toolchain 升级后会直接卡 CI。
