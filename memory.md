@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-07-01 Codex OAuth Responses Passthrough Content Shape
+
+- 用户截图里的 `Invalid 'input[3].content': array too long. Expected an array with maximum length 0, but got an array with length 1 instead.` 发生在 Codex `/responses` 直透 ChatGPT Codex OAuth backend，日志特征是 `responses_to_chat=false`、`responses_to_messages=false`、`upstream_url=https://chatgpt.com/backend-api/codex/responses`。这不是第三方 Chat 转换问题，也不是模型容量问题。
+- 根因是 `openai_compat::normalize_codex_oauth_responses_request` 对 Codex Desktop 已经发来的 `input` 数组只做字段补齐，未清理非 message item 上的冗余 `content`。官方 Codex app-server protocol 的 `function_call_output`、`custom_tool_call_output`、`tool_search_output` 只允许 `output/tools/call_id/status/execution` 等字段，不允许携带 message-style `content`；ChatGPT backend 会把该 content 视为长度必须为 0 的数组并返回 400。
+- 修复边界：只在 official managed Codex OAuth passthrough normalizer 中清理 input item，保留 `message` 和 `reasoning` 的 `content`，删除 tool/call/web/image/compaction 等非 message item 的 `content`。公开 OpenAI Responses、第三方 Responses、Responses->Chat 转换路径不调用这条清理逻辑，避免扩大行为变更。
+- 回归测试落点：`openai_compat.rs::codex_responses_request_normalizer_strips_content_from_tool_output_items` 覆盖 function/custom/tool-search output item 带 `content` 时会被删除，同时保留 `output/tools` 和普通 user message content。
+
 ## 2026-07-01 CCSwitchMulti v3.16.4-5 Formal Release
 
 - CCSwitchMulti 正式发布远端是 `fork` (`BigStrongSun/ccswitchmulti`)；`origin`/`upstream` 指向原版 `farion1231/cc-switch`，发布、tag、asset upload 都不能推到 `origin`。

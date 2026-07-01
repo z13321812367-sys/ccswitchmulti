@@ -146,7 +146,69 @@ fn normalize_codex_oauth_responses_input(body: &mut Map<String, Value>) {
         Some(other) => codex_oauth_input_text_message(other.to_string()),
     };
 
-    body.insert("input".to_string(), input);
+    body.insert(
+        "input".to_string(),
+        normalize_codex_oauth_input_items(input),
+    );
+}
+
+/// 清理 Codex OAuth backend 不接受的 input item 冗余字段。
+///
+/// 参数:
+/// - `input`: 已经规整成 Responses `input` 数组或单条消息的 JSON。
+///   返回:
+/// - 清理后的 `input` JSON，保留 message/reasoning 的 content，删除 tool/call item 上的 content。
+///   副作用:
+/// - 无。该函数只修改传入 JSON 的内存副本。
+///   边界:
+/// - 只服务 ChatGPT Codex OAuth 私有 backend；公开 OpenAI Responses API 兼容路径不调用。
+fn normalize_codex_oauth_input_items(input: Value) -> Value {
+    let Value::Array(items) = input else {
+        return input;
+    };
+
+    Value::Array(
+        items
+            .into_iter()
+            .map(normalize_codex_oauth_input_item)
+            .collect(),
+    )
+}
+
+/// 清理单个 Codex Responses input item 的私有 backend 不兼容字段。
+///
+/// 参数:
+/// - `item`: 一条 Responses input item。
+///   返回:
+/// - 若是非 message/reasoning item，则删除多余 `content`；其他字段原样保留。
+///   副作用:
+/// - 无。
+fn normalize_codex_oauth_input_item(item: Value) -> Value {
+    let Value::Object(mut object) = item else {
+        return item;
+    };
+
+    let item_type = object
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !codex_oauth_input_item_allows_content(item_type) {
+        object.remove("content");
+    }
+
+    Value::Object(object)
+}
+
+/// 判断 Codex OAuth backend 的 input item 是否允许携带 `content`。
+///
+/// 参数:
+/// - `item_type`: Responses input item 的 `type` 字段。
+///   返回:
+/// - `true` 表示该 item 可以保留 content；`false` 表示 content 是冗余字段，应移除。
+///   副作用:
+/// - 无。
+fn codex_oauth_input_item_allows_content(item_type: &str) -> bool {
+    matches!(item_type, "message" | "reasoning")
 }
 
 /// 构造 Codex Responses 兼容的单条 user text message。
@@ -1222,6 +1284,53 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn codex_responses_request_normalizer_strips_content_from_tool_output_items() {
+        // ChatGPT Codex OAuth backend 的 tool/call output item 不接受 content 数组；
+        // Codex Desktop 某些工具回传会额外带 content，必须在直透前删除。
+        let body = json!({
+            "model": "gpt-5.4",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "run tool" }]
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_fn",
+                    "output": "done",
+                    "content": [{ "type": "output_text", "text": "done" }]
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_custom",
+                    "output": { "body": "patched" },
+                    "content": [{ "type": "output_text", "text": "patched" }]
+                },
+                {
+                    "type": "tool_search_output",
+                    "call_id": "call_search",
+                    "status": "completed",
+                    "execution": "client",
+                    "tools": [],
+                    "content": [{ "type": "output_text", "text": "[]" }]
+                }
+            ]
+        });
+
+        let normalized = normalize_codex_oauth_responses_request(body);
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert!(input[0].get("content").is_some());
+        assert!(input[1].get("content").is_none());
+        assert!(input[2].get("content").is_none());
+        assert!(input[3].get("content").is_none());
+        assert_eq!(input[1]["output"], "done");
+        assert_eq!(input[2]["output"]["body"], "patched");
+        assert_eq!(input[3]["tools"], json!([]));
     }
 
     #[test]
