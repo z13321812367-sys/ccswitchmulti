@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-07-02 CCSwitchMulti v3.16.4-7 Formal Release
+
+- `v3.16.4-7` 是 `v3.16.4-6` 后的 MultiRouter 路由热修复正式发布，核心变更是修复第三方 GPT alias 只出现在聚合 `modelCatalog`、没有回到第三方 route `match.models/modelMap` 时被官方 `gpt` 前缀 route 抢走的问题；版本提交为 `755b69e4ee0b5a91461558e4b7a8d8753b38bc5e`（`chore(release): bump CCSwitchMulti to v3.16.4-7`）。
+- 本地正式输出目录：`C:\Users\sunda\Documents\LLMservice\ccswitchmulti-release-v3.16.4-7`。验证：`latest.json` 版本为 `3.16.4-7` 且下载 URL 指向 `https://github.com/BigStrongSun/ccswitchmulti/releases/download/v3.16.4-7/CCSwitchMulti_3.16.4-7_x64-setup.exe`；raw exe `FileVersion/ProductVersion=3.16.4-7`。
+- `v3.16.4-7` 已作为 BigStrongSun/ccswitchmulti 的 GitHub 正式 release 发布：`https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.16.4-7`。Release 为非 draft、`prerelease=false`，latest API 已返回 `tag_name=v3.16.4-7`，annotated tag 对象 `8d0890abefef939681724e350aad5e103d8d5a37` 解引用到 `755b69e4ee0b5a91461558e4b7a8d8753b38bc5e`。
+- 本地/远端主资产 SHA256 对齐：setup `FC1D50037CB4FFC2C6BD008EEA6F72222DB33893A744128B50DAAFFAB8487C25`，portable `352905FB4A42C334ACACFC849B6805EB2B8B30C45615F7959551CA7DDC218DD2`，raw exe `22BE67AC4394B86B825CDE418D47C45C08948E64A1129D1433D0EA0655DF3E9A`。
+- 发布前验证：`pnpm vitest run tests/lib/codexMultiRouterSync.test.ts tests/lib/codexMultiRouterWizard.test.ts src/components/codex/CodexRouterWorkspacePage.test.ts`；`pnpm typecheck`；`pnpm exec prettier --check tests/lib/codexMultiRouterSync.test.ts src/components/codex/CodexRouterWorkspacePage.tsx src/components/codex/CodexRouterWorkspacePage.test.ts memory.md docs/release-notes/v3.16.4-7-zh.md package.json src-tauri/tauri.conf.json`；`git diff --check`（仅 Cargo.lock CRLF 提示）。
+
 ## 2026-07-02 Codex MultiRouter Catalog Route Divergence Misroute
 
 - 另一位用户的日志包 `ccswitchmulti_logs_2026-07-02_141527-150209(1).zip` 证明了第三种 GPT 错路由形态：51 条 `request_model=gpt-5.5-longnows-gpt` 的 Codex 请求都落到 `codex-multirouter::route::router-codex-official`，实际上游模型被改写为 `model=gpt-5.5`；同时 `_codex_session` 侧仍记录 `gpt-5.5-longnows-gpt`，说明 Codex 选择器能看到 longnows alias，但 runtime 没有对应 exact route，只能被官方 `gpt` 前缀 route 接走。
