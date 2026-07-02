@@ -353,6 +353,96 @@ describe("codexMultiRouterSync", () => {
     expect(synced?.removedSpawnAgentModels).toEqual([]);
   });
 
+  it("同步 provider 模型变更时把新增第三方 GPT alias 加回第三方 route", () => {
+    const official = provider({
+      id: "official",
+      name: "OpenAI Official",
+      category: "official",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "gpt-5.5", contextWindow: 300000 }],
+        },
+      },
+    });
+    const longnows = provider({
+      id: "longnows",
+      name: "LongNows GPT",
+      settingsConfig: {
+        modelCatalog: {
+          models: [
+            { model: "claude-opus-4-8", contextWindow: 200000 },
+            {
+              model: "gpt-5.5-longnows-gpt",
+              upstreamModel: "gpt-5.5",
+              displayName: "LongNows GPT",
+              contextWindow: 272000,
+            },
+          ],
+        },
+      },
+    });
+    const plan = provider({
+      id: "router",
+      settingsConfig: {
+        modelCatalog: {
+          models: [
+            { model: "gpt-5.5", contextWindow: 300000 },
+            { model: "claude-opus-4-8", contextWindow: 200000 },
+          ],
+          spawnAgentModels: ["claude-opus-4-8"],
+        },
+        codexRouting: {
+          enabled: true,
+          routes: [
+            {
+              id: "router-official",
+              targetProviderId: "official",
+              match: { models: ["gpt-5.5"], prefixes: ["gpt"] },
+              upstream: {
+                apiFormat: "openai_responses",
+                auth: { source: "managed_codex_oauth" },
+              },
+            },
+            {
+              id: "router-longnows",
+              targetProviderId: "longnows",
+              match: { models: ["claude-opus-4-8"], prefixes: ["claude"] },
+              upstream: {
+                apiFormat: "openai_chat",
+                auth: { source: "provider_config" },
+              },
+            },
+          ],
+        },
+      },
+    });
+
+    const synced = syncCodexMultiRouterPlanWithProviders(
+      plan,
+      new Map([
+        [official.id, official],
+        [longnows.id, longnows],
+        [plan.id, plan],
+      ]),
+    );
+
+    expect(synced).not.toBeNull();
+    const routes = synced?.plan.settingsConfig.codexRouting.routes ?? [];
+    expect(routes[1].match.models).toEqual([
+      "claude-opus-4-8",
+      "gpt-5.5-longnows-gpt",
+    ]);
+    expect(routes[1].upstream.modelMap).toEqual({
+      "gpt-5.5-longnows-gpt": "gpt-5.5",
+    });
+    expect(synced?.plan.settingsConfig.modelCatalog.models).toContainEqual({
+      model: "gpt-5.5-longnows-gpt",
+      upstreamModel: "gpt-5.5",
+      displayName: "LongNows GPT",
+      contextWindow: 272000,
+    });
+  });
+
   it("provider id 改名时同步 route 目标并按新 provider 目录重建", () => {
     const renamed = provider({
       id: "new-provider",
