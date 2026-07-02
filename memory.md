@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-07-03 GitHub Release latest.json Retry Boundary
+
+- `v3.16.4-10` 验证了 unsigned macOS DMG fallback 是有效的：Release 资产已包含 `CC-Switch-v3.16.4-10-macOS.dmg`、`macOS.tar.gz`、`.sig` 和 `macOS.zip`，说明 macOS build 和 `Prepare macOS Assets` 修复没有问题。
+- 同一 run `28613873120` 最终失败在 `Assemble latest.json` 的 `Download all release assets`：`gh release download v3.16.4-10` 调 GitHub asset API 时返回 HTTP 503，导致 `latest.json` 没生成。这个失败点发生在资产上传之后，所以 Release 看起来可下载但缺 updater 元数据。
+- 修复边界：`assemble-latest-json` 不能单次依赖 GitHub release asset API；下载全部 release 资产和上传 `latest.json` 都要有限重试，失败时保留明确错误。不要把这种 503 误判成 macOS DMG fallback 失败。
+- 后续发布应推进新 tag 覆盖半成功 release，而不是只手工给旧 release 补 `latest.json`；否则 workflow 本身仍会在下一次 GitHub API 抖动时复发。
+
 ## 2026-07-03 macOS Unsigned DMG Release Fallback
 
 - `v3.16.4-9` 的 GitHub macOS job 已证明 Tauri 会在 `pnpm tauri build --target universal-apple-darwin` 阶段生成 `src-tauri/target/universal-apple-darwin/release/bundle/dmg/CCSwitchMulti_*_universal.dmg`，即使仓库缺少 Apple 签名和公证 secrets。

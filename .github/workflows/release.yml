@@ -769,7 +769,19 @@ jobs:
           set -euxo pipefail
           TAG="${GITHUB_REF_NAME}"
           mkdir -p dl
-          gh release download "$TAG" --dir dl --repo "$GITHUB_REPOSITORY"
+          for attempt in 1 2 3 4 5 6; do
+            rm -rf dl/*
+            if gh release download "$TAG" --dir dl --repo "$GITHUB_REPOSITORY"; then
+              break
+            fi
+            if [ "$attempt" -eq 6 ]; then
+              echo "Failed to download release assets for $TAG after $attempt attempts" >&2
+              exit 1
+            fi
+            sleep_seconds=$((attempt * 20))
+            echo "Release asset download failed, retrying in ${sleep_seconds}s..."
+            sleep "$sleep_seconds"
+          done
           ls -la dl || true
       - name: Generate latest.json
         env:
@@ -857,4 +869,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euxo pipefail
-          gh release upload "$GITHUB_REF_NAME" latest.json --clobber --repo "$GITHUB_REPOSITORY"
+          for attempt in 1 2 3 4 5 6; do
+            if gh release upload "$GITHUB_REF_NAME" latest.json --clobber --repo "$GITHUB_REPOSITORY"; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 6 ]; then
+              echo "Failed to upload latest.json after $attempt attempts" >&2
+              exit 1
+            fi
+            sleep_seconds=$((attempt * 20))
+            echo "latest.json upload failed, retrying in ${sleep_seconds}s..."
+            sleep "$sleep_seconds"
+          done
