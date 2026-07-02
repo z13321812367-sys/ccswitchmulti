@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-07-03 CCSwitchMulti v3.16.4-11 GitHub Release Verification
+
+- `v3.16.4-11` 已作为 BigStrongSun/ccswitchmulti 的正式 release 发布并通过 GitHub Actions release run `28616009981`，head sha 为 `8e93cd6df6b7737c3420a5b6861de41992449ca8`。五个平台 build、Publish GitHub Release、Assemble `latest.json` 全部成功。
+- Release `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.16.4-11` 为 `draft=false`、`prerelease=false`，GitHub latest API 已返回 `tag_name=v3.16.4-11`。资产共 19 个，包含 unsigned `CC-Switch-v3.16.4-11-macOS.dmg`、macOS updater `macOS.tar.gz`/`.sig`、macOS zip、Windows x64/ARM64 setup/portable/signature、Linux x64/ARM64 AppImage/deb/rpm/signature、以及 `latest.json`。
+- macOS job 日志确认 Apple secrets 仍为空，`APPLE_SIGNING_IDENTITY` 为空，workflow 明确走 unsigned fallback：复制 `src-tauri/target/universal-apple-darwin/release/bundle/dmg/CCSwitchMulti_3.16.4-11_universal.dmg` 到 `release-assets/CC-Switch-v3.16.4-11-macOS.dmg`，跳过 notarization 和 signed verification。这符合“允许接受未签名版本，后续再补 mac 签名”的发布边界。
+- `latest.json` 已下载并解析成功：`version=3.16.4-11`，包含 6 个 updater 平台；`darwin-aarch64` 和 `darwin-x86_64` 都指向同一个 universal `CC-Switch-v3.16.4-11-macOS.tar.gz`，`windows-aarch64` 指向 `CC-Switch-v3.16.4-11-Windows-arm64-Setup.exe`。
+
 ## 2026-07-03 GitHub Release latest.json Retry Boundary
 
 - `v3.16.4-10` 验证了 unsigned macOS DMG fallback 是有效的：Release 资产已包含 `CC-Switch-v3.16.4-10-macOS.dmg`、`macOS.tar.gz`、`.sig` 和 `macOS.zip`，说明 macOS build 和 `Prepare macOS Assets` 修复没有问题。
