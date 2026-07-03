@@ -237,7 +237,8 @@ fn lift_codex_responses_control_messages(input: Value) -> (Value, Vec<String>) {
 /// 参数:
 /// - `input`: 已经规整成 Responses `input` 数组或单条消息的 JSON。
 ///   返回:
-/// - 清理后的 `input` JSON，保留 message/reasoning 的 content，删除 tool/call item 上的 content。
+/// - 清理后的 `input` JSON，保留 message content；reasoning item 保留 summary /
+///   encrypted_content，并把 raw content 归并为 summary，删除 backend 不接受的 content。
 ///   副作用:
 /// - 无。该函数只修改传入 JSON 的内存副本。
 ///   边界:
@@ -261,7 +262,8 @@ fn normalize_codex_oauth_input_items(input: Value) -> Value {
 /// 参数:
 /// - `item`: 一条 Responses input item。
 ///   返回:
-/// - 若是非 message/reasoning item，则删除多余 `content`；其他字段原样保留。
+/// - 若是 message item，则保留 content；reasoning item 会把 raw content 归并进 summary；
+///   其它 item 删除多余 `content`，其他字段原样保留。
 ///   副作用:
 /// - 无。
 fn normalize_codex_oauth_input_item(item: Value) -> Value {
@@ -273,7 +275,9 @@ fn normalize_codex_oauth_input_item(item: Value) -> Value {
         .get("type")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if !codex_oauth_input_item_allows_content(item_type) {
+    if item_type == "reasoning" {
+        normalize_codex_oauth_reasoning_item(&mut object);
+    } else if !codex_oauth_input_item_allows_content(item_type) {
         object.remove("content");
     }
 
@@ -318,16 +322,135 @@ fn codex_responses_input_item_text(object: &Map<String, Value>) -> String {
     })
 }
 
-/// 判断 Codex OAuth backend 的 input item 是否允许携带 `content`。
+/// 判断 Codex OAuth backend 的 input item 是否允许原样携带 `content`。
 ///
 /// 参数:
 /// - `item_type`: Responses input item 的 `type` 字段。
 ///   返回:
-/// - `true` 表示该 item 可以保留 content；`false` 表示 content 是冗余字段，应移除。
+/// - `true` 表示该 item 可以原样保留 content；`false` 表示 content 是冗余字段，应移除。
 ///   副作用:
 /// - 无。
 fn codex_oauth_input_item_allows_content(item_type: &str) -> bool {
-    matches!(item_type, "message" | "reasoning")
+    item_type == "message"
+}
+
+/// 规整 official OAuth reasoning input item 的 raw content。
+///
+/// 参数:
+/// - `object`: `type=reasoning` 的 Responses input item。
+///   返回:
+/// - 无，直接修改 item。
+///   副作用:
+/// - 无外部副作用；只修改内存中的 JSON 对象。
+///   边界:
+/// - ChatGPT Codex backend 通过 `summary` / `encrypted_content` 回放 reasoning；
+///   `content` 字段在该私有 backend 的 input schema 中不可携带。
+fn normalize_codex_oauth_reasoning_item(object: &mut Map<String, Value>) {
+    let Some(content) = object.remove("content") else {
+        return;
+    };
+
+    if !codex_oauth_reasoning_summary_has_text(object.get("summary")) {
+        if let Some(summary) = codex_oauth_reasoning_content_to_summary(&content) {
+            object.insert("summary".to_string(), summary);
+        }
+    }
+}
+
+/// 判断 reasoning summary 是否已经包含可回放的文本。
+///
+/// 参数:
+/// - `summary`: reasoning item 的 `summary` 字段。
+///   返回:
+/// - `true` 表示已有非空 summary 文本，不需要从 raw content 补齐。
+///   副作用:
+/// - 无。
+fn codex_oauth_reasoning_summary_has_text(summary: Option<&Value>) -> bool {
+    summary
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|part| {
+            part.get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| !text.trim().is_empty())
+        })
+}
+
+/// 把 reasoning raw content 转成 official backend 接受的 summary 片段。
+///
+/// 参数:
+/// - `content`: 被移除的 raw reasoning `content` 字段。
+///   返回:
+/// - 有可读文本时返回 `summary_text` 数组；否则返回 `None`。
+///   副作用:
+/// - 无。
+fn codex_oauth_reasoning_content_to_summary(content: &Value) -> Option<Value> {
+    let mut texts = Vec::new();
+    collect_codex_oauth_reasoning_content_text(content, &mut texts);
+    if texts.is_empty() {
+        return None;
+    }
+
+    Some(Value::Array(
+        texts
+            .into_iter()
+            .map(|text| {
+                let mut part = Map::new();
+                part.insert(
+                    "type".to_string(),
+                    Value::String("summary_text".to_string()),
+                );
+                part.insert("text".to_string(), Value::String(text));
+                Value::Object(part)
+            })
+            .collect(),
+    ))
+}
+
+/// 收集 reasoning raw content 中的文本，兼容字符串、数组和对象几种历史形态。
+///
+/// 参数:
+/// - `value`: raw content 的任意 JSON 值。
+/// - `texts`: 输出文本片段。
+///   返回:
+/// - 无。
+///   副作用:
+/// - 向 `texts` 追加文本片段。
+fn collect_codex_oauth_reasoning_content_text(value: &Value, texts: &mut Vec<String>) {
+    match value {
+        Value::String(text) => push_non_empty_reasoning_text(texts, text),
+        Value::Array(parts) => {
+            for part in parts {
+                collect_codex_oauth_reasoning_content_text(part, texts);
+            }
+        }
+        Value::Object(part) => {
+            for key in ["text", "content", "reasoning_content", "reasoning"] {
+                if let Some(text) = part.get(key).and_then(Value::as_str) {
+                    push_non_empty_reasoning_text(texts, text);
+                    return;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 追加非空 reasoning 文本，并避免空白片段污染 summary。
+///
+/// 参数:
+/// - `texts`: 输出文本片段。
+/// - `text`: 待追加文本。
+///   返回:
+/// - 无。
+///   副作用:
+/// - 向 `texts` 追加裁剪后的非空文本。
+fn push_non_empty_reasoning_text(texts: &mut Vec<String>, text: &str) {
+    let text = text.trim();
+    if !text.is_empty() {
+        texts.push(text.to_string());
+    }
 }
 
 /// 把从 input 中提升出来的 Codex 控制消息追加到顶层 instructions。
@@ -1481,6 +1604,71 @@ mod tests {
         assert_eq!(input[1]["output"], "done");
         assert_eq!(input[2]["output"]["body"], "patched");
         assert_eq!(input[3]["tools"], json!([]));
+    }
+
+    #[test]
+    fn codex_oauth_responses_normalizer_removes_duplicate_reasoning_content() {
+        // official OAuth backend 依赖 encrypted_content/summary 回放 reasoning；
+        // 带 encrypted_content 的 reasoning input 不能再携带 raw content，否则上游会按
+        // content 最大长度 0 拒绝。
+        let body = json!({
+            "model": "gpt-5.4",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "continue" }]
+                },
+                {
+                    "type": "reasoning",
+                    "summary": [{ "type": "summary_text", "text": "Need to inspect files." }],
+                    "encrypted_content": "enc_reasoning",
+                    "content": [{ "type": "reasoning_text", "text": "raw hidden reasoning" }]
+                }
+            ]
+        });
+
+        let normalized = normalize_codex_oauth_responses_request(body);
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert!(input[1].get("content").is_none());
+        assert_eq!(input[1]["summary"][0]["text"], "Need to inspect files.");
+        assert_eq!(input[1]["encrypted_content"], "enc_reasoning");
+    }
+
+    #[test]
+    fn codex_oauth_responses_normalizer_promotes_raw_reasoning_content_to_summary() {
+        // 旧会话或第三方转换可能只有 reasoning.content，没有 summary。
+        // 为了不影响续写体验，official OAuth 直透前把可读文本搬到 summary_text。
+        let body = json!({
+            "model": "gpt-5.4",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "continue" }]
+                },
+                {
+                    "type": "reasoning",
+                    "content": [
+                        { "type": "reasoning_text", "text": "Need to check current route." },
+                        { "type": "text", "text": "Then answer." }
+                    ]
+                }
+            ]
+        });
+
+        let normalized = normalize_codex_oauth_responses_request(body);
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert!(input[1].get("content").is_none());
+        assert_eq!(
+            input[1]["summary"],
+            json!([
+                { "type": "summary_text", "text": "Need to check current route." },
+                { "type": "summary_text", "text": "Then answer." }
+            ])
+        );
     }
 
     #[test]

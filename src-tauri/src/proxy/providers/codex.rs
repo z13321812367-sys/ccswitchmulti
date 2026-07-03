@@ -304,8 +304,14 @@ pub fn materialize_codex_routed_provider_from_target(
         );
     }
 
+    let managed_codex_oauth =
+        should_treat_target_as_managed_codex_oauth(route_provider, target_provider, &materialized);
+    if managed_codex_oauth {
+        sanitize_materialized_managed_codex_oauth_settings(&mut settings);
+    }
+
     materialized.settings_config = JsonValue::Object(settings);
-    if should_treat_target_as_managed_codex_oauth(route_provider, target_provider, &materialized) {
+    if managed_codex_oauth {
         let meta = materialized.meta.get_or_insert_with(ProviderMeta::default);
         meta.provider_type = Some("codex_oauth".to_string());
     }
@@ -333,11 +339,10 @@ pub fn build_codex_route_probe_provider(
 /// 判断 route 引用的旧版官方 Codex provider 是否实际应走托管 ChatGPT OAuth。
 ///
 /// 早期 `codex-official` 只保存 `auth.auth_mode = "chatgpt"` 和 OAuth tokens，
-/// 没有写 `meta.provider_type = "codex_oauth"` 或 `base_url`。MultiRouter 通过
-/// `targetProviderId` 命中这类 provider 时，如果不在物化阶段补齐语义，后续
-/// `CodexAdapter::extract_base_url` 会把它当成普通 OpenAI-compatible provider 并报
-/// “缺少 base_url”。这里只在目标 provider 本身没有可解析 base_url 时兜底，避免覆盖
-/// 用户明确配置的第三方 OpenAI-compatible Codex provider。
+/// 没有写 `meta.provider_type = "codex_oauth"`；异常恢复后还可能残留第三方
+/// `base_url` / API key。MultiRouter 通过 `targetProviderId` 命中官方身份时必须
+/// 先按 managed OAuth 物化，避免污染字段把官方 route 拉到第三方中转。只有没有官方
+/// 身份证据的 provider 才用真实非本地 `base_url` 阻止 OAuth 兜底。
 fn should_treat_target_as_managed_codex_oauth(
     route_provider: &Provider,
     target_provider: &Provider,
@@ -353,23 +358,33 @@ fn should_treat_target_as_managed_codex_oauth(
     }
 
     let route_target = codex_route_target_provider_id(route_provider).unwrap_or_default();
+    if target_provider_looks_like_managed_codex_oauth(target_provider, route_target) {
+        return true;
+    }
+
+    if provider_id_or_name_marks_official(target_provider, route_target)
+        && provider_has_managed_codex_oauth_auth(route_provider)
+    {
+        return true;
+    }
+
     if provider_has_non_proxy_codex_base_url(target_provider)
         || provider_has_non_proxy_codex_base_url(materialized)
     {
         return false;
     }
 
-    if target_provider_looks_like_managed_codex_oauth(target_provider, route_target) {
-        return true;
-    }
-
-    provider_id_or_name_marks_official(target_provider, route_target)
-        && provider_has_managed_codex_oauth_auth(route_provider)
+    false
 }
 
-/// 检查 provider settings/config 中是否已经有可用于 Codex adapter 的 base_url。
-fn provider_has_codex_base_url(provider: &Provider) -> bool {
-    provider_codex_base_url(provider).is_some()
+/// 移除官方 OAuth 物化 provider 上可能来自旧 DB/接管备份的普通 API 字段。
+///
+/// 这些字段保留在持久 provider 里不会被改写；这里只清理 request-local effective
+/// provider，避免后续诊断或兼容逻辑再次把 `codex-official` 当成第三方中转。
+fn sanitize_materialized_managed_codex_oauth_settings(settings: &mut Map<String, JsonValue>) {
+    for key in ["base_url", "baseURL", "baseUrl", "apiKey", "api_key"] {
+        settings.remove(key);
+    }
 }
 
 /// 检查 provider 是否有非本地接管代理的真实上游地址。
@@ -1956,8 +1971,7 @@ fn provider_is_managed_codex_oauth(provider: &Provider) -> bool {
         return true;
     }
 
-    !provider_has_codex_base_url(provider)
-        && target_provider_looks_like_managed_codex_oauth(provider, "")
+    target_provider_looks_like_managed_codex_oauth(provider, "")
 }
 
 #[cfg(test)]
@@ -2381,6 +2395,66 @@ experimental_bearer_token = "PROXY_MANAGED"
             adapter.extract_auth(&materialized).unwrap().strategy,
             AuthStrategy::CodexOAuth
         );
+    }
+
+    #[test]
+    fn test_codex_route_target_provider_treats_polluted_official_as_managed_oauth() {
+        let adapter = CodexAdapter::new();
+        let router = create_provider(json!({
+            "codexRouting": {
+                "enabled": true,
+                "routes": [{
+                    "id": "router-codex-official",
+                    "label": "OpenAI Official",
+                    "targetProviderId": "codex-official",
+                    "match": { "models": ["gpt-5.5"] },
+                    "upstream": {
+                        "apiFormat": "openai_responses",
+                        "auth": { "source": "managed_codex_oauth" }
+                    }
+                }]
+            }
+        }));
+        let mut target = Provider::with_id(
+            "codex-official".to_string(),
+            "OpenAI Official Backup".to_string(),
+            json!({
+                "base_url": "https://relay.example.com/v1",
+                "apiKey": "sk-third-party",
+                "auth": {
+                    "OPENAI_API_KEY": "sk-third-party"
+                },
+                "model": "gpt-5.5"
+            }),
+            None,
+        );
+        target.category = Some("official".to_string());
+
+        let routed = resolve_codex_model_routed_provider(&router, &json!({ "model": "gpt-5.5" }))
+            .expect("official route");
+        let materialized = materialize_codex_routed_provider_from_target(&routed, &target);
+
+        assert_eq!(
+            materialized
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.provider_type.as_deref()),
+            Some("codex_oauth")
+        );
+        assert!(materialized.settings_config.get("base_url").is_none());
+        assert!(materialized.settings_config.get("apiKey").is_none());
+        assert_eq!(
+            adapter.extract_base_url(&materialized).unwrap(),
+            "https://chatgpt.com/backend-api/codex"
+        );
+        assert_eq!(
+            adapter.extract_auth(&materialized).unwrap().strategy,
+            AuthStrategy::CodexOAuth
+        );
+        assert!(!should_convert_codex_responses_to_chat(
+            &materialized,
+            "/v1/responses"
+        ));
     }
 
     #[test]

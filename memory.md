@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-07-03 Codex Official OAuth Reasoning Content Boundary
+
+- 更新 2026-07-01 的 Responses input 清理边界：official managed Codex OAuth 不能再原样保留 `type=reasoning` item 上的 raw `content`。真实上游错误 `Invalid input[n].content: array too long. Expected an array with maximum length 0` 同样会发生在 reasoning item；这说明 ChatGPT Codex 私有 `/responses` input schema 不接受 reasoning.content。
+- 修复边界不是丢弃 reasoning 状态：`openai_compat.rs::normalize_codex_oauth_responses_request` 仍保留普通 `message.content`，并保留 reasoning item 的 `encrypted_content` 与已有 `summary`；只有没有 summary 的旧会话/第三方转换形态，才把 raw `content` 中可读文本提升为 `summary: [{type:"summary_text", text:...}]` 后移除 raw `content`。公开 OpenAI Responses、第三方 Responses、Responses->Chat 转换路径不调用这条 official OAuth 专属清理。
+- 路由错分流的另一个根因是旧 DB/接管备份可能把 `codex-official` 目标 provider 污染成带第三方 `base_url`/`apiKey`。MultiRouter materialize 时官方身份应优先于污染的普通 API 字段：`targetProviderId=codex-official` 或 official/category/OAuth auth 命中时物化为 `meta.provider_type=codex_oauth`，并只在 request-local effective provider 上移除 `base_url/baseURL/baseUrl/apiKey/api_key`，持久 provider 不被重写。
+- 回归测试应覆盖两类场景：reasoning 带 `summary+encrypted_content+content` 时移除 content 且保留 summary/encrypted_content；reasoning 只有 raw content 时提升为 summary_text；污染的 `codex-official` target provider 仍提取 `https://chatgpt.com/backend-api/codex` 与 `AuthStrategy::CodexOAuth`，且不走 Responses->Chat。
+
 ## 2026-07-03 GitHub Release Body Must Use CCSwitchMulti Notes
 
 - Release tag 本身应继续使用推送的 fork tag（例如 `v3.16.4-11`），不要从 upstream/origin 取原版 tag 或 release 文案。`release.yml` 的 `tag_name: ${{ github.ref_name }}` 是正确边界。
