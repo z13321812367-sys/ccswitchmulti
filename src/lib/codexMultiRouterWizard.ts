@@ -634,7 +634,7 @@ export function canContinueAfterConnectivity(
   return results.length > 0 && results.every((result) => result.canContinue);
 }
 
-// 将显式 Chat / Responses 双协议探测结果反写到向导草稿；实测结果优先于旧的 openai_chat 元数据。
+// 将 Chat / Responses 双协议探测结果反写到向导草稿；用户手动锁定的协议优先于探测推荐。
 export function applyWizardConnectivityApiFormatOverrides(
   providers: Provider[],
   results: WizardConnectivityResult[],
@@ -649,6 +649,9 @@ export function applyWizardConnectivityApiFormatOverrides(
 
   return providers.map((provider) => {
     const providerResults = resultsByProvider.get(provider.id) ?? [];
+    if (provider.meta?.apiFormatSource === "manual") {
+      return provider;
+    }
     const recommendedFormats = providerResults
       .map((result) => result.recommendedApiFormat)
       .filter((format): format is CodexApiFormat => Boolean(format));
@@ -670,6 +673,7 @@ export function applyWizardConnectivityApiFormatOverrides(
         meta: {
           ...(provider.meta ?? {}),
           apiFormat: "openai_chat",
+          apiFormatSource: "probe",
         },
         settingsConfig: {
           ...(provider.settingsConfig ?? {}),
@@ -683,6 +687,7 @@ export function applyWizardConnectivityApiFormatOverrides(
       meta: {
         ...(provider.meta ?? {}),
         apiFormat: "openai_responses",
+        apiFormatSource: "probe",
       },
       settingsConfig: {
         ...(provider.settingsConfig ?? {}),

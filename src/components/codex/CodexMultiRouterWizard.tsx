@@ -30,6 +30,13 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -614,6 +621,22 @@ function providerApiFormatSummary(provider: Provider): string {
   return `${apiFormatDisplayName(inferredFormat)}（向导推断；官方 GPT/O 优先 Responses，未知第三方默认 Chat）`;
 }
 
+// 判断协议是否由用户在向导里锁定；锁定后保存阶段不会再被连通性探测推荐覆盖。
+function providerApiFormatSourceLabel(provider: Provider): string {
+  return provider.meta?.apiFormatSource === "manual"
+    ? "用户已锁定"
+    : "可由探测推荐更新";
+}
+
+// 向导只暴露 Codex 当前支持的两个上游协议；历史 openai_messages 配置按 Chat 路径展示和保存。
+function selectableApiFormat(
+  provider: Provider,
+): Extract<CodexApiFormat, "openai_responses" | "openai_chat"> {
+  return inferWizardApiFormat(provider) === "openai_responses"
+    ? "openai_responses"
+    : "openai_chat";
+}
+
 // 将 route 的缓存能力转换成向导里的说明，强调缓存验证看真实 usage，而不是基础连通性。
 function cacheCapabilitySummary(cache?: CodexCacheConfig): string {
   switch (cache?.cacheMode) {
@@ -801,6 +824,25 @@ function reconcileCatalogModelOrderAfterFetch(
   return [...retained, ...added];
 }
 
+// 将用户在配置步骤选择的协议写回草稿 provider，并清空旧探测结果避免预览继续使用过期推荐。
+function applyManualApiFormatToProvider(
+  provider: Provider,
+  apiFormat: CodexApiFormat,
+): Provider {
+  return {
+    ...provider,
+    meta: {
+      ...(provider.meta ?? {}),
+      apiFormat,
+      apiFormatSource: "manual",
+    },
+    settingsConfig: {
+      ...(provider.settingsConfig ?? {}),
+      apiFormat,
+    },
+  };
+}
+
 export function CodexMultiRouterWizard({
   open,
   providers,
@@ -875,6 +917,21 @@ export function CodexMultiRouterWizard({
   const isProbingConnectivity = flowState.status === "probingConnectivity";
   const isSavingPlan = flowState.status === "savingPlan";
   const isEnablingPlan = flowState.status === "enabling";
+
+  // 用户手动选择协议时立即更新草稿，并废弃旧探测结果，避免保存时再次套用过期推荐。
+  const handleProviderApiFormatChange = (
+    providerId: string,
+    apiFormat: CodexApiFormat,
+  ) => {
+    setDraftSources((current) =>
+      current.map((provider) =>
+        provider.id === providerId
+          ? applyManualApiFormatToProvider(provider, apiFormat)
+          : provider,
+      ),
+    );
+    setConnectivityResults([]);
+  };
 
   // 每次打开向导只初始化一次。父组件 rerender 会传入新的 providers 数组，不能因此把用户从第 2 步重置回第 1 步。
   useEffect(() => {
@@ -1839,6 +1896,35 @@ export function CodexMultiRouterWizard({
                         </div>
                         <div className="mt-2 text-xs text-muted-foreground">
                           API 格式：{providerApiFormatSummary(provider)}
+                        </div>
+                        <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                          <div className="text-xs text-muted-foreground">
+                            协议选择：{providerApiFormatSourceLabel(provider)}
+                          </div>
+                          <Select
+                            value={selectableApiFormat(provider)}
+                            onValueChange={(value) =>
+                              handleProviderApiFormatChange(
+                                provider.id,
+                                value as CodexApiFormat,
+                              )
+                            }
+                          >
+                            <SelectTrigger
+                              aria-label={`${provider.name} API 格式`}
+                              className="w-full sm:w-[220px]"
+                            >
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="openai_responses">
+                                Responses API
+                              </SelectItem>
+                              <SelectItem value="openai_chat">
+                                Chat Completions
+                              </SelectItem>
+                            </SelectContent>
+                          </Select>
                         </div>
                       </div>
                     );

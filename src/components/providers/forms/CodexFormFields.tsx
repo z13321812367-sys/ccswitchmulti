@@ -948,16 +948,26 @@ export function CodexFormFields({
         onProviderSplitSuggestionChange(null);
       }
 
+      if (responsesPass > 0 && chatPass > 0) {
+        const summary = `Responses 和 Chat 的基础请求都有模型可用，保留当前上游格式；Responses 通常是 Codex 原生优先选择，但你可以继续使用 Chat Completions。Responses 通过 ${responsesPass}/${models.length}，Chat 通过 ${chatPass}/${models.length}。${
+          canApplySplitSuggestion
+            ? "检测到真实协议结果混合，建议下一步拆成 Responses / Chat 两个 provider。"
+            : ""
+        }通过不等于完整 Codex 功能验证。${detail}`;
+        const tone = failedCount > 0 ? "warning" : "success";
+        setProtocolProbeTone(tone);
+        setProtocolProbeSummary(summary);
+        if (tone === "warning") {
+          toast.warning(summary, { closeButton: true });
+        } else {
+          toast.success(summary, { closeButton: true });
+        }
+        return;
+      }
+
       if (responsesPass > 0) {
         onApiFormatChange("openai_responses");
-        const summary =
-          chatPass > 0
-            ? `Responses 和 Chat 的基础请求都有模型可用，已优先切换为 Responses。Responses 通过 ${responsesPass}/${models.length}，Chat 通过 ${chatPass}/${models.length}。${
-                canApplySplitSuggestion
-                  ? "检测到真实协议结果混合，建议下一步拆成 Responses / Chat 两个 provider。"
-                  : ""
-              }通过不等于完整 Codex 功能验证。${detail}`
-            : `只有 Responses 基础请求可用，已切换为 Responses。Responses 通过 ${responsesPass}/${models.length}。通过不等于完整 Codex 功能验证。${detail}`;
+        const summary = `只有 Responses 基础请求可用，已切换为 Responses。Responses 通过 ${responsesPass}/${models.length}。通过不等于完整 Codex 功能验证。${detail}`;
         const tone = failedCount > 0 ? "warning" : "success";
         setProtocolProbeTone(tone);
         setProtocolProbeSummary(summary);

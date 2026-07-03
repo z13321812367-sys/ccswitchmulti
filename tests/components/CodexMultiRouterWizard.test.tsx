@@ -491,6 +491,72 @@ describe("CodexMultiRouterWizard", () => {
     expect(screen.queryByText(/默认 Chat Completions/)).not.toBeInTheDocument();
   });
 
+  it("saves manually locked chat protocol instead of probe recommendations", async () => {
+    vi.mocked(probeCodexResponsesForConfig).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      url: "https://relay.example/v1/responses",
+      model: "gpt-5.5",
+      detail: "ok",
+    });
+    vi.mocked(probeCodexChatForConfig).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      url: "https://relay.example/v1/chat/completions",
+      model: "gpt-5.5",
+      detail: "ok",
+    });
+
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[
+          provider({
+            id: "relay",
+            name: "Relay",
+            settingsConfig: {
+              base_url: "https://relay.example/v1",
+              auth: { OPENAI_API_KEY: "sk-test" },
+              apiFormat: "openai_chat",
+              modelCatalog: {
+                models: [{ model: "gpt-5.5", upstreamModel: "gpt-5.5" }],
+              },
+            },
+            meta: { apiFormat: "openai_chat", apiFormatSource: "manual" },
+          }),
+        ]}
+        onOpenChange={vi.fn()}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "测试 Chat / Responses 连通性" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
+    expect(
+      await screen.findByText("状态机：connectivityPassed"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "保存并发布" }));
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "保存并发布" }).at(-1)!,
+    );
+
+    await waitFor(() => {
+      expect(providersApi.add).toHaveBeenCalledTimes(1);
+    });
+    const savedProvider = vi.mocked(providersApi.add).mock.calls[0][0];
+    expect(
+      savedProvider.settingsConfig.codexRouting.routes[0].upstream,
+    ).toMatchObject({
+      apiFormat: "openai_chat",
+    });
+  });
+
   it("stays in needSources state when advancing without model sources", () => {
     renderWithQueryClient(
       <CodexMultiRouterWizard

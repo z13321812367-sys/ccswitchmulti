@@ -511,8 +511,11 @@ describe("CodexFormFields local model routing", () => {
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
 
     await waitFor(() => {
-      expect(onApiFormatChange).toHaveBeenCalledWith("openai_responses");
+      expect(screen.getByTitle("Responses=ok; Chat=ok")).toHaveTextContent(
+        "双协议",
+      );
     });
+    expect(onApiFormatChange).not.toHaveBeenCalled();
     expect(screen.getByTitle("Responses=ok; Chat=ok")).toHaveTextContent(
       "双协议",
     );
@@ -600,8 +603,9 @@ describe("CodexFormFields local model routing", () => {
     }
 
     await waitFor(() => {
-      expect(onApiFormatChange).toHaveBeenCalledWith("openai_responses");
+      expect(screen.getAllByText("双协议")).toHaveLength(4);
     });
+    expect(onApiFormatChange).not.toHaveBeenCalled();
     expect(await screen.findAllByText("双协议")).toHaveLength(4);
   });
 

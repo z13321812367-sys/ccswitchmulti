@@ -213,6 +213,43 @@ describe("codexMultiRouterWizard helpers", () => {
     expect(inferWizardApiFormat(resolvedRelay)).toBe("openai_chat");
   });
 
+  it("keeps manually selected chat format when both protocol probes pass", () => {
+    const relay = provider({
+      id: "relay",
+      name: "Relay",
+      category: "aggregator",
+      meta: { apiFormat: "openai_chat", apiFormatSource: "manual" },
+      settingsConfig: {
+        apiFormat: "openai_chat",
+        modelCatalog: {
+          models: [{ model: "gpt-5.5", upstreamModel: "gpt-5.5" }],
+        },
+      },
+    });
+
+    const [resolvedRelay] = applyWizardConnectivityApiFormatOverrides(
+      [relay],
+      [
+        {
+          providerId: "relay",
+          providerName: "Relay",
+          model: "gpt-5.5",
+          status: "pass",
+          canContinue: true,
+          recommendedApiFormat: "openai_responses",
+          detail: "Responses 和 Chat Completions 的基础请求都可用。",
+        },
+      ],
+    );
+
+    expect(inferWizardApiFormat(resolvedRelay)).toBe("openai_chat");
+    expect(
+      buildWizardRoutesFromSources([resolvedRelay])[0].upstream,
+    ).toMatchObject({
+      apiFormat: "openai_chat",
+    });
+  });
+
   it("groups generated routes by provider and infers common model prefixes", () => {
     const openai = provider({
       id: "openai",

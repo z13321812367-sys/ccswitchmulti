@@ -131,6 +131,9 @@ fn build_responses_probe_url(base_url: &str, is_full_url: bool) -> Result<String
         if let Some(index) = trimmed.find("/v1/") {
             return Ok(format!("{}/v1/responses", &trimmed[..index]));
         }
+        if ends_with_version_segment(trimmed) {
+            return Ok(format!("{trimmed}/responses"));
+        }
         if trimmed.ends_with("/chat/completions") {
             return Ok(format!(
                 "{}/responses",
@@ -167,6 +170,9 @@ fn build_chat_probe_url(base_url: &str, is_full_url: bool) -> Result<String, Str
     if is_full_url {
         if let Some(index) = trimmed.find("/v1/") {
             return Ok(format!("{}/v1/chat/completions", &trimmed[..index]));
+        }
+        if ends_with_version_segment(trimmed) {
+            return Ok(format!("{trimmed}/chat/completions"));
         }
         if trimmed.ends_with("/responses") {
             return Ok(format!(
@@ -381,9 +387,25 @@ mod tests {
     }
 
     #[test]
+    fn responses_probe_url_keeps_v1_when_full_url_is_version_root() {
+        assert_eq!(
+            build_responses_probe_url("https://example.com/v1", true).unwrap(),
+            "https://example.com/v1/responses"
+        );
+    }
+
+    #[test]
     fn chat_probe_url_derives_from_responses_full_url() {
         assert_eq!(
             build_chat_probe_url("https://example.com/v1/responses", true).unwrap(),
+            "https://example.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn chat_probe_url_keeps_v1_when_full_url_is_version_root() {
+        assert_eq!(
+            build_chat_probe_url("https://example.com/v1", true).unwrap(),
             "https://example.com/v1/chat/completions"
         );
     }
