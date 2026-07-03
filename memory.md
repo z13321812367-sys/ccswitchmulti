@@ -1,5 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-07-03 CCSwitchMulti v3.16.4-12 GitHub Release Verification
+
+- `v3.16.4-12` 已作为 BigStrongSun/ccswitchmulti 的正式 release 发布并通过 GitHub Actions release run `28647799609`，head sha 为 `70bf31ed19416c723ef58d1c4a92ddda29023fe2`。五个平台 build、Publish GitHub Release、Assemble `latest.json` 全部成功。
+- Annotated tag `v3.16.4-12` 的 tag object 为 `b0e83bbcfacf31efa089d3e4a06e35e9799933c2`，解引用到 release bump 提交 `70bf31ed19416c723ef58d1c4a92ddda29023fe2`。`fork/main` 也已推到同一提交；`origin/upstream` 仍是原版 `farion1231/cc-switch`，本次未向原版远端发布。
+- Release `https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.16.4-12` 为 `draft=false`、`prerelease=false`，GitHub latest API 已返回 `tag_name=v3.16.4-12`，release name 为 `CCSwitchMulti v3.16.4-12`，正文来自 `docs/release-notes/v3.16.4-12-zh.md` 并包含本轮 Codex 跨 provider 路由与 official OAuth reasoning 历史兼容修复说明。
+- 发布资产共 19 个：macOS unsigned DMG、macOS updater tarball/signature、macOS zip、Windows x64/ARM64 setup/portable/signature、Linux x64/ARM64 AppImage/signature/deb/rpm，以及 `latest.json`。
+- `latest.json` 已下载并解析成功：`version=3.16.4-12`，包含 6 个 updater 平台；`darwin-aarch64` 和 `darwin-x86_64` 都指向 `CC-Switch-v3.16.4-12-macOS.tar.gz`，`windows-aarch64` 指向 `CC-Switch-v3.16.4-12-Windows-arm64-Setup.exe`，所有平台 URL 都指向 `v3.16.4-12` 且签名字段存在。
+- 发布前本地验证覆盖：`rg` 确认四个版本面无 `3.16.4-11` 残留；`pnpm exec prettier --check package.json src-tauri/tauri.conf.json docs/release-notes/v3.16.4-12-zh.md`；`cargo fmt --manifest-path src-tauri\Cargo.toml --check`；`cargo test --manifest-path src-tauri\Cargo.toml codex_oauth_responses_normalizer --lib -- --nocapture`；`cargo test --manifest-path src-tauri\Cargo.toml codex_responses_passthrough --lib -- --nocapture`；`cargo test --manifest-path src-tauri\Cargo.toml proxy::providers::codex::tests --lib -- --nocapture`；`cargo test --manifest-path src-tauri\Cargo.toml proxy::providers::openai_compat::tests --lib -- --nocapture`；`git diff --check`。
+
 ## 2026-07-03 Codex Cross-Provider Model Switch Type Boundary
 
 - 原版 Codex 的 `/model` 切换不重写历史 item：TUI 通过 `AppEvent::UpdateModel` / `Op::OverrideTurnContext` 更新当前 thread settings，core 侧把 `model/effort` 合进 `SessionConfiguration.collaboration_mode`，下一轮再用新的 `TurnContext.model_info` 构造请求；历史仍来自 `clone_history().for_prompt(...)` 并作为 `Prompt.input` 进入 `ResponsesApiRequest.input`。
