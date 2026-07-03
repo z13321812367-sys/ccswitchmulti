@@ -6,6 +6,7 @@ import {
 import {
   extractCodexBaseUrl,
   extractCodexModelName,
+  extractCodexTopLevelInt,
   extractCodexWireApi,
 } from "@/utils/providerConfigUtils";
 
@@ -234,6 +235,35 @@ describe("Codex Chat provider presets", () => {
       // 原生 Responses 预设必须不带 modelCatalog，否则“本地路由映射”开关会默认勾选
       expect(preset?.modelCatalog ?? []).toHaveLength(0);
       expect(preset?.codexChatReasoning).toBeUndefined();
+    }
+  });
+
+  it("aligns Xiaomi MiMo native Responses presets with official Codex guidance", () => {
+    const expectedMiMoPresets = new Map([
+      ["Xiaomi MiMo", "https://api.xiaomimimo.com/v1"],
+      [
+        "Xiaomi MiMo Token Plan (China)",
+        "https://token-plan-cn.xiaomimimo.com/v1",
+      ],
+    ]);
+
+    for (const [name, baseUrl] of expectedMiMoPresets) {
+      const preset = codexProviderPresets.find((item) => item.name === name);
+
+      expect(preset, `${name} preset`).toBeDefined();
+      expect(preset?.apiFormat).toBe("openai_responses");
+      expect(extractCodexBaseUrl(preset?.config)).toBe(baseUrl);
+      expect(extractCodexWireApi(preset?.config)).toBe("responses");
+      expect(extractCodexModelName(preset?.config)).toBe("mimo-v2.5-pro");
+      expect(
+        extractCodexTopLevelInt(preset?.config, "model_context_window"),
+      ).toBe(1048576);
+      expect(preset?.config).toContain(
+        "model_supports_reasoning_summaries = true",
+      );
+      expect(preset?.config).toContain('model_reasoning_summary = "none"');
+      expect(preset?.config).toContain('web_search = "disabled"');
+      expect(preset?.modelCatalog ?? []).toHaveLength(0);
     }
   });
 });

@@ -68,6 +68,34 @@ base_url = ${tomlString(baseUrl)}
 wire_api = "responses"`;
 }
 
+/**
+ * 生成小米 MiMo 官方 Codex 接入配置。
+ *
+ * MiMo 官方 Codex 文档要求显式声明 reasoning summary 能力和 1M 上下文；
+ * 否则 Codex 会把 `model_reasoning_effort` 当作无效配置，并可能使用保守上下文预算。
+ */
+function generateMiMoCodexConfig(
+  providerName: string,
+  baseUrl: string,
+  modelName = "mimo-v2.5-pro",
+): string {
+  const tomlString = (value: string) => JSON.stringify(value);
+
+  return `model_provider = "custom"
+model = ${tomlString(modelName)}
+model_reasoning_effort = "high"
+model_supports_reasoning_summaries = true
+model_reasoning_summary = "none"
+model_context_window = 1048576
+web_search = "disabled"
+disable_response_storage = true
+
+[model_providers.custom]
+name = ${tomlString(providerName)}
+base_url = ${tomlString(baseUrl)}
+wire_api = "responses"`;
+}
+
 function modelCatalog(
   models: Array<
     | string
@@ -697,7 +725,7 @@ wire_api = "responses"`,
     websiteUrl: "https://platform.xiaomimimo.com",
     apiKeyUrl: "https://platform.xiaomimimo.com/#/console/api-keys",
     auth: generateThirdPartyAuth(""),
-    config: generateThirdPartyConfig(
+    config: generateMiMoCodexConfig(
       "xiaomi_mimo",
       "https://api.xiaomimimo.com/v1",
       "mimo-v2.5-pro",
@@ -714,7 +742,7 @@ wire_api = "responses"`,
     websiteUrl: "https://platform.xiaomimimo.com/#/token-plan",
     apiKeyUrl: "https://platform.xiaomimimo.com/#/console/plan-manage",
     auth: generateThirdPartyAuth(""),
-    config: generateThirdPartyConfig(
+    config: generateMiMoCodexConfig(
       "xiaomi_mimo_token_plan",
       "https://token-plan-cn.xiaomimimo.com/v1",
       "mimo-v2.5-pro",

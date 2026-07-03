@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-07-03 Xiaomi MiMo Codex Native Responses Preset Boundary
+
+- GitHub issue `BigStrongSun/ccswitchmulti#8` 反馈 `v3.16.4-11` 下非 Token Plan 小米 MiMo `mimo-v2.5-pro` 在 Codex 编码任务中途停下、需要手动“继续”。这不是 MultiRouter GPT 错路由或 official OAuth cleanup 问题；当前 MiMo Codex preset 是 native Responses 直连，核心差异是 preset 只用了通用 `generateThirdPartyConfig`，漏掉了小米官方 Codex 示例要求的 Codex 层字段。
+- 小米官方 Codex 配置示例明确要求 `model_supports_reasoning_summaries = true`、`model_reasoning_summary = "none"`、`model_context_window = 1048576`、`web_search = "disabled"`、`wire_api = "responses"`。缺少 `model_supports_reasoning_summaries` 时，原版 Codex 的 `build_reasoning` 会把 `model_reasoning_effort = "high"` 当成无效，不发送 `reasoning` 参数；缺少 `model_context_window` 时 TurnContext/token usage/auto-compact 只能走模型 catalog 或兜底上下文，容易和 MiMo 1M 窗口不一致。
+- 修复边界：不要为了补 MiMo 元数据给 native Responses preset 加 `modelCatalog`，因为 ProviderForm 仍用 `modelCatalog.models.length > 0` 推断“本地路由/接管”初始开关。MiMo 的默认单模型直连应靠 TOML 顶层字段修复，仍保持 `apiFormat = "openai_responses"` 且 `modelCatalog` 为空，避免把用户无代理直连路径改成本地接管。
+- 回归测试落点：`tests/config/codexChatProviderPresets.test.ts` 固定两个 MiMo Codex preset 同时包含官方 reasoning/context/web_search 字段、使用各自 base URL、模型为 `mimo-v2.5-pro`、`wire_api=responses`，并继续断言不带 `modelCatalog`。
+
 ## 2026-07-03 CCSwitchMulti v3.16.4-12 GitHub Release Verification
 
 - `v3.16.4-12` 已作为 BigStrongSun/ccswitchmulti 的正式 release 发布并通过 GitHub Actions release run `28647799609`，head sha 为 `70bf31ed19416c723ef58d1c4a92ddda29023fe2`。五个平台 build、Publish GitHub Release、Assemble `latest.json` 全部成功。
