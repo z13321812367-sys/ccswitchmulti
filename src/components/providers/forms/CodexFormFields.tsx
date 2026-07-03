@@ -633,7 +633,7 @@ export function CodexFormFields({
     setAdvancedExpanded(true);
     setProtocolProbeTone("warning");
     setProtocolProbeSummary(
-      "请先在下方“模型映射”右上角点击“获取模型列表”，或手动添加模型后再测试。",
+      "请先在上方“模型列表”点击“获取模型列表”，或手动添加模型后再测试。",
     );
     setShouldHighlightFetchModels(true);
     window.setTimeout(() => {
@@ -1197,28 +1197,31 @@ export function CodexFormFields({
   const pendingResponsesModels = pendingSplitRouting?.responsesModels ?? [];
   const pendingChatModels = pendingSplitRouting?.chatModels ?? [];
 
+  const renderFetchModelsButton = () => (
+    <Button
+      ref={fetchModelsButtonRef}
+      type="button"
+      variant="outline"
+      size="sm"
+      onClick={handleFetchModels}
+      disabled={isFetchingModels}
+      className={cn(
+        "h-7 gap-1",
+        shouldHighlightFetchModels &&
+          "border-blue-500 bg-blue-50 text-blue-700 shadow-[0_0_0_3px_rgba(59,130,246,0.18)] dark:bg-blue-950/40 dark:text-blue-200",
+      )}
+    >
+      {isFetchingModels ? (
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+      ) : (
+        <Download className="h-3.5 w-3.5" />
+      )}
+      {t("providerForm.fetchModels")}
+    </Button>
+  );
+
   const renderCatalogActionButtons = (onAdd: () => void, addLabel: string) => (
     <div className="flex gap-1">
-      <Button
-        ref={fetchModelsButtonRef}
-        type="button"
-        variant="outline"
-        size="sm"
-        onClick={handleFetchModels}
-        disabled={isFetchingModels}
-        className={cn(
-          "h-7 gap-1",
-          shouldHighlightFetchModels &&
-            "border-blue-500 bg-blue-50 text-blue-700 shadow-[0_0_0_3px_rgba(59,130,246,0.18)] dark:bg-blue-950/40 dark:text-blue-200",
-        )}
-      >
-        {isFetchingModels ? (
-          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        ) : (
-          <Download className="h-3.5 w-3.5" />
-        )}
-        {t("providerForm.fetchModels")}
-      </Button>
       <Button
         type="button"
         variant="outline"
@@ -1247,7 +1250,7 @@ export function CodexFormFields({
                 Completions。它会对当前模型目录里的模型发送真实请求，可能产生少量额度或流量消耗，也可能触发限流。
               </span>
               <span className="block">
-                如果还没有模型目录，请先到下方“模型映射”右上角点击“获取模型列表”，或手动添加至少一个模型。
+                如果还没有模型目录，请先到上方“模型列表”点击“获取模型列表”，或手动添加至少一个模型。
               </span>
               <span className="block">
                 每个模型会分别测试对应的 Responses 和 Chat Completions
@@ -1872,6 +1875,37 @@ export function CodexFormFields({
             </p>
           )}
           <CollapsibleContent className="space-y-3 pt-3">
+            {canEditCatalog && (
+              <div
+                ref={modelMappingSectionRef}
+                className="space-y-2 rounded-md border border-border-default bg-muted/20 p-3"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="space-y-1">
+                    <FormLabel>
+                      {t("codexConfig.modelListPrepareTitle", {
+                        defaultValue: "模型列表",
+                      })}
+                    </FormLabel>
+                    <p className="text-xs leading-relaxed text-muted-foreground">
+                      {t("codexConfig.modelListPrepareHint", {
+                        defaultValue:
+                          "先读取 /models 或手动补充模型，再测试 Chat / Responses；这个步骤不依赖“需要本地路由映射”开关。",
+                      })}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-muted-foreground">
+                      {catalogRows.length > 0
+                        ? `${catalogRows.length} 个已记录模型`
+                        : "尚未记录模型"}
+                    </span>
+                    {renderFetchModelsButton()}
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* 上游格式 + 本地路由映射 —— 两个平级、相互独立的控件。
                 格式不依赖路由：Responses 原生供应商无需开启路由即可直连；
                 沿用 shouldShowSpeedTest 门控，cloud_provider 保持不可切换。 */}
@@ -2092,10 +2126,7 @@ export function CodexFormFields({
             {/* 模型映射 —— 仅在本地路由开启 + 可编辑时显示（与上游格式解耦，
                 Responses 原生供应商同样可配置）；上方恒有 UA 字段，分隔线无需条件 */}
             {takeoverEnabled && canEditCatalog && (
-              <div
-                ref={modelMappingSectionRef}
-                className="space-y-4 border-t border-border-default pt-3"
-              >
+              <div className="space-y-4 border-t border-border-default pt-3">
                 <div className="space-y-1">
                   <div className="flex items-center justify-between gap-3">
                     <FormLabel>

@@ -131,6 +131,7 @@ function renderCatalogHarness(
     apiKey?: string;
     planAccessKeyId?: string;
     planSecretAccessKey?: string;
+    takeoverEnabled?: boolean;
     onProviderSplitSuggestionChange?: ReturnType<typeof vi.fn>;
   } = {},
 ) {
@@ -169,7 +170,7 @@ function renderCatalogHarness(
         onEndpointModalToggle={vi.fn()}
         autoSelect={false}
         onAutoSelectChange={vi.fn()}
-        takeoverEnabled={true}
+        takeoverEnabled={options.takeoverEnabled ?? true}
         onTakeoverEnabledChange={vi.fn()}
         apiFormat="openai_chat"
         onApiFormatChange={onApiFormatChange}
@@ -620,6 +621,29 @@ describe("CodexFormFields local model routing", () => {
     expect(screen.getByText("确认测试 Chat / Responses")).toBeInTheDocument();
   });
 
+  it("keeps fetch models visible above protocol probing when local routing is off", () => {
+    renderCatalogHarness([], {
+      shouldShowSpeedTest: true,
+      takeoverEnabled: false,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "高级选项" }));
+
+    const fetchButton = screen.getByRole("button", {
+      name: "providerForm.fetchModels",
+    });
+    const probeButton = screen.getByRole("button", {
+      name: "测试 Chat / Responses",
+    });
+
+    expect(fetchButton).toBeVisible();
+    expect(probeButton).toBeVisible();
+    expect(fetchButton.compareDocumentPosition(probeButton)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(screen.getByText("需要本地路由映射")).toBeInTheDocument();
+  });
+
   it("points users to fetch models when protocol probing has no catalog", async () => {
     renderCatalogHarness([], { shouldShowSpeedTest: true });
 
@@ -629,7 +653,7 @@ describe("CodexFormFields local model routing", () => {
     fireEvent.click(screen.getByRole("button", { name: "确认测试" }));
 
     expect(await screen.findByRole("status")).toHaveTextContent(
-      "请先在下方“模型映射”右上角点击“获取模型列表”，或手动添加模型后再测试。",
+      "请先在上方“模型列表”点击“获取模型列表”，或手动添加模型后再测试。",
     );
     const fetchButton = screen.getByRole("button", {
       name: "providerForm.fetchModels",
