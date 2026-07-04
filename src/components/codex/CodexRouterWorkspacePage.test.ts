@@ -427,7 +427,9 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         ),
     ).toBe(false);
 
-    currentRefresh.resolve([{ id: "new-model", ownedBy: null }]);
+    currentRefresh.resolve([
+      { id: "old-catalog", ownedBy: null, contextWindow: 131072 },
+    ]);
     await waitFor(() =>
       expect(
         vi
@@ -435,9 +437,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
           .mock.calls.some(
             ([savedProvider]) =>
               savedProvider.id === provider.id &&
-              JSON.stringify(savedProvider.settingsConfig).includes(
-                "new-model",
-              ),
+              JSON.stringify(savedProvider.settingsConfig).includes("131072"),
           ),
       ).toBe(true),
     );
@@ -613,6 +613,99 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     expect(
       screen.queryByText("未发现模型目录，保存后可在模型源补充目录"),
     ).not.toBeInTheDocument();
+  });
+
+  it("does not restore removed provider models during routes refresh", async () => {
+    vi.mocked(fetchModelsForConfig).mockResolvedValueOnce([
+      { id: "kept-model", ownedBy: null, contextWindow: 128000 },
+      { id: "removed-model", ownedBy: null, contextWindow: 64000 },
+    ]);
+    const provider: Provider = {
+      id: "codex-curated-source",
+      name: "Curated Source",
+      category: "custom",
+      settingsConfig: {
+        baseUrl: "https://curated.example/v1",
+        auth: { OPENAI_API_KEY: "key-curated" },
+        modelCatalog: {
+          models: [{ model: "kept-model" }],
+          spawnAgentModels: ["kept-model", "removed-model"],
+        },
+      },
+    };
+    const plan = createDraftRoutingPlan([provider], [provider]);
+    const route = normalizeCodexRouteForSave(
+      {
+        label: provider.name,
+        targetProviderId: provider.id,
+        match: { models: ["kept-model", "removed-model"] },
+      },
+      0,
+      new Set<string>(),
+    );
+    const stalePlan: Provider = {
+      ...plan,
+      settingsConfig: {
+        ...plan.settingsConfig,
+        modelCatalog: {
+          models: [{ model: "kept-model" }, { model: "removed-model" }],
+          spawnAgentModels: ["removed-model"],
+        },
+        codexRouting: {
+          enabled: true,
+          defaultRouteId: route.id,
+          routes: [route],
+        },
+      },
+    };
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [provider, stalePlan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: stalePlan.id,
+        initialProviderId: stalePlan.id,
+        initialTab: "routes",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    await waitFor(() => expect(providersApi.update).toHaveBeenCalled());
+    const savedProvider = vi
+      .mocked(providersApi.update)
+      .mock.calls.map(([saved]) => saved)
+      .find((saved) => saved.id === provider.id)!;
+    expect(
+      savedProvider.settingsConfig.modelCatalog.models.map(
+        (model: { model: string }) => model.model,
+      ),
+    ).toEqual(["kept-model"]);
+    expect(savedProvider.settingsConfig.modelCatalog.spawnAgentModels).toEqual([
+      "kept-model",
+    ]);
+
+    await waitFor(() =>
+      expect(
+        vi
+          .mocked(providersApi.update)
+          .mock.calls.some(([saved]) => saved.id === stalePlan.id),
+      ).toBe(true),
+    );
+    const savedPlan = vi
+      .mocked(providersApi.update)
+      .mock.calls.map(([saved]) => saved)
+      .find((saved) => saved.id === stalePlan.id)!;
+    expect(
+      savedPlan.settingsConfig.modelCatalog.models.map(
+        (model: { model: string }) => model.model,
+      ),
+    ).toEqual(["kept-model"]);
+    expect(savedPlan.settingsConfig.modelCatalog.spawnAgentModels).toEqual([]);
+    const savedRoutes = readCodexRouting(savedPlan)?.routes ?? [];
+    expect(savedRoutes[0]?.match?.models).toEqual(["kept-model"]);
   });
 
   it("opens the Codex add-source flow when route picker has no model sources", async () => {
@@ -796,7 +889,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       settingsConfig: {
         baseUrl: "https://ark.cn-beijing.volces.com/api/coding/v3",
         auth: {},
-        modelCatalog: { models: [{ model: "old-agentplan-model" }] },
+        modelCatalog: { models: [] },
       },
     };
     const plan = createDraftRoutingPlan([provider], [provider]);
@@ -854,7 +947,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       settingsConfig: {
         baseUrl: "https://ark.cn-beijing.volces.com/api/coding/v3",
         auth: { OPENAI_API_KEY: "sk-volc-route" },
-        modelCatalog: { models: [{ model: "old-agentplan-model" }] },
+        modelCatalog: { models: [] },
       },
     };
     const plan = createDraftRoutingPlan([provider], [provider]);

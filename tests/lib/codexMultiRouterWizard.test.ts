@@ -12,6 +12,7 @@ import {
   inferWizardApiFormat,
   inferWizardCacheConfig,
   isWizardCatalogOnlyModelSource,
+  mergeFetchedModelsIntoWizardProvider,
   resolveWizardModelNameCollisions,
 } from "@/lib/codexMultiRouterWizard";
 
@@ -27,6 +28,71 @@ function provider(overrides: Partial<Provider>): Provider {
 }
 
 describe("codexMultiRouterWizard helpers", () => {
+  it("preserves curated provider models when wizard refreshes fetched metadata", () => {
+    const source = provider({
+      id: "curated-source",
+      name: "Curated Source",
+      settingsConfig: {
+        modelCatalog: {
+          models: [
+            {
+              model: "kept-alias",
+              upstreamModel: "kept-upstream",
+              displayName: "Kept",
+            },
+          ],
+          spawnAgentModels: ["kept-alias", "removed-upstream"],
+        },
+      },
+    });
+
+    const refreshed = mergeFetchedModelsIntoWizardProvider(
+      source,
+      [
+        { id: "kept-upstream", ownedBy: null, contextWindow: 262144 },
+        { id: "removed-upstream", ownedBy: null, contextWindow: 131072 },
+      ],
+      { preserveExistingSelection: true },
+    );
+
+    expect(refreshed.settingsConfig.modelCatalog.models).toEqual([
+      {
+        model: "kept-alias",
+        upstreamModel: "kept-upstream",
+        displayName: "Kept",
+        contextWindow: 262144,
+      },
+    ]);
+    expect(refreshed.settingsConfig.modelCatalog.spawnAgentModels).toEqual([
+      "kept-alias",
+    ]);
+  });
+
+  it("initializes an empty provider catalog from fetched models", () => {
+    const source = provider({
+      id: "empty-source",
+      name: "Empty Source",
+      settingsConfig: {
+        modelCatalog: { models: [] },
+      },
+    });
+
+    const refreshed = mergeFetchedModelsIntoWizardProvider(
+      source,
+      [
+        { id: "first-model", ownedBy: null, contextWindow: 128000 },
+        { id: "second-model", ownedBy: null },
+      ],
+      { preserveExistingSelection: true },
+    );
+
+    expect(
+      refreshed.settingsConfig.modelCatalog.models.map(
+        (model: { model: string }) => model.model,
+      ),
+    ).toEqual(["first-model", "second-model"]);
+  });
+
   it("aliases third-party duplicate models while preserving upstreamModel", () => {
     const official = provider({
       id: "openai-official",

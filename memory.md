@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-07-04 Codex MultiRouter Provider Catalog Selection Sync
+
+- 用户反馈在普通 Codex provider 里删减保留模型后，进入 MultiRouter 配置或设置向导时远端 catalog 又全量出现。根因不是 provider 保存后的 `syncCodexMultiRouterPlanWithProviders()` 没跑，而是 MultiRouter 工作台 `providerWithFetchedModelCatalog()` 和向导 `mergeFetchedModelsIntoWizardProvider()` 在自动刷新 `/models` 时把远端全量模型追加回 `modelCatalog.models`，把用户保留列表反向污染成发现列表。
+- 状态源边界：普通 provider 编辑页的“获取模型列表”是显式编辑/发现入口，可以让用户重新看到全量模型；MultiRouter 工作台和设置向导的自动刷新属于路由构建链路，`modelCatalog.models` 必须按“用户保留/暴露列表”解释。已有目录只更新匹配模型的 context window 等元数据，空目录才用远端 `/models` 初始化。
+- 子 Agent 候选必须跟随同一保留列表：向导刷新 provider 时会剪掉不在当前 `modelCatalog.models` 内的 `modelCatalog.spawnAgentModels`，工作台刷新继续通过 `normalizeCodexSpawnAgentModels()` 剪枝；已保存 MultiRouter plan 仍由 `syncCodexMultiRouterPlanWithProviders()` 重建 route/catalog/spawnAgentModels。
+- 回归覆盖：`mergeFetchedModelsIntoWizardProvider(..., { preserveExistingSelection: true })` 保留 alias/upstream 并只更新已保留模型；向导刷新不会把 extra upstream model 写回 provider；工作台 routes 自动刷新不会恢复 provider 已删除模型，并会把 stale plan route/catalog/spawnAgentModels 同步剪掉；AgentPlan 在线获取能力保留在“空目录初始化”场景。
+
 ## 2026-07-04 MiniMax Native Responses Function Arguments Strictness
 
 - 用户截图报错：`CC Switch local proxy failed while handling Codex endpoint /responses. Provider: MiniMax; model: MiniMax-M3; upstream_status: HTTP 400; cause: invalid params, invalid function arguments json string, tool_call_id: call_function_... (2013)`。这不是本地日志缺失问题，也不是 MiniMax preset 选错；错误来自 MiniMax native Responses 上游重新解析历史 `function_call.arguments` 时发现 JSON 字符串非法。

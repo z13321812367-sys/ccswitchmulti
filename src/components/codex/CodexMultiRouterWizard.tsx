@@ -178,7 +178,8 @@ const STEPS: WizardStep[] = [
   {
     key: "fetchModels",
     title: "获取模型列表",
-    description: "自动调用 /models，把模型写入每个 provider 的 modelCatalog。",
+    description:
+      "自动调用 /models，空目录用于初始化，已有目录只刷新保留模型的元数据。",
     icon: RefreshCw,
   },
   {
@@ -1254,8 +1255,8 @@ export function CodexMultiRouterWizard({
               ? {
                   status: "loading",
                   message: config.volcengineModelListAction
-                    ? "正在读取火山 OpenAPI 模型列表并准备写回 modelCatalog"
-                    : "正在读取 /models 并准备写回 modelCatalog",
+                    ? "正在读取火山 OpenAPI 模型列表并刷新保留目录"
+                    : "正在读取 /models 并刷新保留目录",
                   modelCount: existingCount,
                 }
               : {
@@ -1331,6 +1332,7 @@ export function CodexMultiRouterWizard({
           const nextProvider = mergeFetchedModelsIntoWizardProvider(
             provider,
             fetchedModels,
+            { preserveExistingSelection: true },
           );
           const afterModels = readWizardModelCatalog(nextProvider);
           const diff = diffWizardModelCatalog(beforeModels, afterModels);

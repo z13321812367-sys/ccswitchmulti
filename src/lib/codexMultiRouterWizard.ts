@@ -243,38 +243,73 @@ export function getWizardConfigIssues(
     }));
 }
 
-// 把 /models 返回值合并进 provider modelCatalog；保留已有用户手写字段和 upstreamModel。
+export interface MergeFetchedWizardModelsOptions {
+  preserveExistingSelection?: boolean;
+}
+
+// 把 /models 返回值合并进 provider modelCatalog；可选择把已有目录当作用户保留列表，只刷新元数据不追加已删除模型。
 export function mergeFetchedModelsIntoWizardProvider(
   provider: Provider,
   fetchedModels: FetchedModel[],
+  options: MergeFetchedWizardModelsOptions = {},
 ): Provider {
   const existingModels = readWizardModelCatalog(provider);
   const byModel = new Map<string, CodexCatalogModel>();
+  const byFetchedModel = new Map<string, string>();
   for (const model of existingModels) {
     byModel.set(model.model, model);
+    const visibleModel = model.model?.trim();
+    if (visibleModel) {
+      byFetchedModel.set(visibleModel, model.model);
+    }
+    const upstreamModel = (
+      model.upstreamModel ??
+      model.upstream_model ??
+      model.model
+    )?.trim();
+    if (upstreamModel) {
+      byFetchedModel.set(upstreamModel, model.model);
+    }
   }
+  const shouldAppendFetchedModels =
+    !options.preserveExistingSelection || existingModels.length === 0;
   for (const fetched of fetchedModels) {
     const modelId = fetched.id.trim();
     if (!modelId) continue;
-    const existing = byModel.get(modelId);
-    byModel.set(modelId, {
+    const visibleModelId = byFetchedModel.get(modelId) ?? modelId;
+    const existing = byModel.get(visibleModelId);
+    if (!existing && !shouldAppendFetchedModels) continue;
+    byModel.set(visibleModelId, {
       ...(existing ?? {}),
-      model: modelId,
+      model: visibleModelId,
       upstreamModel:
         existing?.upstreamModel ?? existing?.upstream_model ?? modelId,
-      displayName: existing?.displayName ?? modelId,
+      displayName: existing?.displayName ?? visibleModelId,
       ...(fetched.contextWindow
         ? { contextWindow: fetched.contextWindow }
         : {}),
     });
   }
+  const models = Array.from(byModel.values());
+  const allowedModels = new Set(models.map((model) => model.model));
+  const rawSpawnAgentModels =
+    provider.settingsConfig?.modelCatalog?.spawnAgentModels;
+  const spawnAgentModels = Array.isArray(rawSpawnAgentModels)
+    ? rawSpawnAgentModels
+        .filter(
+          (model): model is string =>
+            typeof model === "string" && allowedModels.has(model),
+        )
+        .slice(0, 5)
+    : undefined;
   return {
     ...provider,
     settingsConfig: {
       ...provider.settingsConfig,
       modelCatalog: {
         ...(provider.settingsConfig?.modelCatalog ?? {}),
-        models: Array.from(byModel.values()),
+        models,
+        ...(spawnAgentModels ? { spawnAgentModels } : {}),
       },
     },
   };

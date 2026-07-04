@@ -222,6 +222,52 @@ describe("CodexMultiRouterWizard", () => {
     expect(providersApi.update).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps provider curated models when wizard refresh sees extra upstream models", async () => {
+    vi.mocked(fetchModelsForConfig).mockResolvedValueOnce([
+      { id: "deepseek-chat", ownedBy: null, contextWindow: 128000 },
+      { id: "deepseek-reasoner", ownedBy: null, contextWindow: 64000 },
+    ]);
+    vi.mocked(providersApi.update).mockResolvedValueOnce(true);
+
+    renderWithQueryClient(
+      <CodexMultiRouterWizard
+        open
+        providers={[
+          provider({
+            settingsConfig: {
+              base_url: "https://api.deepseek.com/v1",
+              auth: { OPENAI_API_KEY: "sk-test" },
+              modelCatalog: {
+                models: [{ model: "deepseek-chat" }],
+                spawnAgentModels: ["deepseek-chat", "deepseek-reasoner"],
+              },
+            },
+          }),
+        ]}
+        onOpenChange={vi.fn()}
+        onCreateProvider={vi.fn()}
+        onOpenWorkspace={vi.fn()}
+        onEnablePlan={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "自动获取并写入模型列表" }),
+    );
+
+    await waitFor(() => expect(providersApi.update).toHaveBeenCalledTimes(1));
+    const savedProvider = vi.mocked(providersApi.update).mock.calls[0][0];
+    expect(
+      savedProvider.settingsConfig.modelCatalog.models.map(
+        (model: { model: string }) => model.model,
+      ),
+    ).toEqual(["deepseek-chat"]);
+    expect(savedProvider.settingsConfig.modelCatalog.spawnAgentModels).toEqual([
+      "deepseek-chat",
+    ]);
+  });
+
   it("falls back to data-plane models for AgentPlan without AK/SK when API Key exists", async () => {
     vi.mocked(fetchModelsForConfig).mockResolvedValueOnce([
       { id: "ark-code-latest", ownedBy: "volcengine" },
@@ -272,7 +318,9 @@ describe("CodexMultiRouterWizard", () => {
       );
       expect(providersApi.update).toHaveBeenCalledTimes(1);
     });
-    expect(await screen.findByText(/已写入 2 个模型/)).toBeInTheDocument();
+    expect(
+      await screen.findByText("读取成功，无模型列表更新，仍为 1 个模型。"),
+    ).toBeInTheDocument();
   });
 
   it("skips AgentPlan model fetch when both inference key and AK/SK are missing", async () => {
@@ -376,10 +424,12 @@ describe("CodexMultiRouterWizard", () => {
       );
       expect(providersApi.update).toHaveBeenCalledTimes(1);
     });
-    expect(await screen.findByText(/已写入 2 个模型/)).toBeInTheDocument();
+    expect(
+      await screen.findByText("读取成功，无模型列表更新，仍为 1 个模型。"),
+    ).toBeInTheDocument();
   });
 
-  it("keeps previous model selections while appending newly fetched models", async () => {
+  it("keeps previous model selections without re-adding newly fetched provider models", async () => {
     vi.mocked(fetchModelsForConfig).mockResolvedValueOnce([
       { id: "model-a", ownedBy: null },
       { id: "model-b", ownedBy: null },
@@ -422,13 +472,13 @@ describe("CodexMultiRouterWizard", () => {
       screen.getByRole("button", { name: "自动获取并写入模型列表" }),
     );
 
-    expect(await screen.findByText("有模型列表更新")).toBeInTheDocument();
-    expect(screen.getByText(/新增 1: model-c/)).toBeInTheDocument();
+    expect(await screen.findByText("无模型列表更新")).toBeInTheDocument();
+    expect(screen.queryByText(/新增 1: model-c/)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "整理模型" }));
     expect(screen.getByLabelText("保留 model-a")).toBeChecked();
     expect(screen.getByLabelText("保留 model-b")).not.toBeChecked();
-    expect(screen.getByLabelText("保留 model-c")).toBeChecked();
+    expect(screen.queryByLabelText("保留 model-c")).not.toBeInTheDocument();
   });
 
   it("opens a provider config page from the model fetch cards", () => {

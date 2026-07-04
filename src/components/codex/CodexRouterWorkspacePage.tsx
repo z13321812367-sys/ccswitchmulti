@@ -544,7 +544,7 @@ function getProviderModelFetchConfig(
   };
 }
 
-/// 将远端 /models 结果写回普通 provider 的 modelCatalog，供 MultiRouter 候选和 spawn_agent 直接消费。
+/// 将远端 /models 结果写回普通 provider 的 modelCatalog；已有目录视为用户保留列表，只刷新元数据，空目录才初始化。
 function providerWithFetchedModelCatalog(
   provider: Provider,
   fetchedModels: FetchedModel[],
@@ -591,6 +591,7 @@ function providerWithFetchedModelCatalog(
       byFetchedModel.set(upstreamModel, index);
     }
   }
+  const shouldAppendFetchedModels = currentCatalog.models.length === 0;
 
   for (const fetched of fetchedModels) {
     const id = fetched.id.trim();
@@ -609,6 +610,7 @@ function providerWithFetchedModelCatalog(
       };
       continue;
     }
+    if (!shouldAppendFetchedModels) continue;
     const nextModel: CodexCatalogModelDraft = {
       model: id,
       upstreamModel: id,
@@ -2444,8 +2446,11 @@ export function CodexRouterWorkspacePage({
             ...current,
             [provider.id]: {
               status: "success",
-              message: `已读取并更新 ${result.models.length} 个模型。`,
-              modelCount: result.models.length,
+              message: `已读取并更新 ${
+                readCodexModelCatalog(result.nextProvider).models.length
+              } 个模型。`,
+              modelCount: readCodexModelCatalog(result.nextProvider).models
+                .length,
             },
           }));
           await queryClient.invalidateQueries({
