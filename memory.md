@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-07-04 MiniMax Native Responses Function Arguments Strictness
+
+- 用户截图报错：`CC Switch local proxy failed while handling Codex endpoint /responses. Provider: MiniMax; model: MiniMax-M3; upstream_status: HTTP 400; cause: invalid params, invalid function arguments json string, tool_call_id: call_function_... (2013)`。这不是本地日志缺失问题，也不是 MiniMax preset 选错；错误来自 MiniMax native Responses 上游重新解析历史 `function_call.arguments` 时发现 JSON 字符串非法。
+- 外部同类案例和本地既有代码都指向同一类根因：严格上游（MiniMax 已确认）会拒绝空字符串、被截断的 `{` / `...[truncated]` 等非法 JSON arguments；宽松上游可能静默接受。此前 `json_canonical::canonicalize_tool_arguments` 已修复 Responses->Chat 转换路径，但第三方 native Responses passthrough 只提升 system/developer 控制消息，没有清理 `type=function_call` 的 `arguments`。
+- 修复边界：`openai_compat.rs::normalize_codex_responses_passthrough_request` 现在同时调用 `normalize_codex_responses_function_call_arguments`，仅对 `input[*].type == "function_call"` 规整 `arguments`：缺失/空字符串转 `{}`，合法 JSON 做 canonical 输出，非法非空片段包进 `{"raw_arguments":"..."}`。不改 route、不把 MiniMax 改成 Chat、不全局删除 Responses 字段。
+- 回归测试：`codex_responses_passthrough_normalizes_function_call_arguments` 覆盖 MiniMax-M3 native Responses 历史中空 arguments 和 `{` 片段；同时复跑 `codex_responses_passthrough`、`codex_oauth_responses_normalizer` 和 `responses_request_to_chat_sanitizes*`，确认第三方 passthrough、official OAuth、Responses->Chat 三条链路都未回退。
+
 ## 2026-07-03 Xiaomi MiMo Codex Native Responses Preset Boundary
 
 - GitHub issue `BigStrongSun/ccswitchmulti#8` 反馈 `v3.16.4-11` 下非 Token Plan 小米 MiMo `mimo-v2.5-pro` 在 Codex 编码任务中途停下、需要手动“继续”。这不是 MultiRouter GPT 错路由或 official OAuth cleanup 问题；当前 MiMo Codex preset 是 native Responses 直连，核心差异是 preset 只用了通用 `generateThirdPartyConfig`，漏掉了小米官方 Codex 示例要求的 Codex 层字段。
