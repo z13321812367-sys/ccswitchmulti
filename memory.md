@@ -1,5 +1,11 @@
 # CC Switch Repository Memory
 
+## 2026-07-04 Codex Local Routing Active Notice
+
+- App 顶层用 `useCodexLocalRoutingNotice(Boolean(isProxyRunning && takeoverStatus?.codex))` 监听 Codex 本地路由真实启用状态；触发条件是 CCSwitchMulti 本地代理正在运行且 Codex 接管已开启，而不是当前页面是否停留在 Codex。
+- 提示弹窗文案为：`您正在使用本地路由功能，将由 ccsm 接管所有 codex 流量，所以不要在使用 codex 时关闭本软件。` Hook 只监听 `false -> true` 边沿；用户点“我知道了”后不因状态轮询重复弹，只有本地路由先关闭再重新开启时再次提醒。
+- 回归测试：`tests/hooks/useCodexLocalRoutingNotice.test.tsx` 覆盖首次开启弹出、确认后保持开启不重复弹、关闭后重新开启再次弹。
+
 ## 2026-07-04 Codex MultiRouter Provider Catalog Selection Sync
 
 - 用户反馈在普通 Codex provider 里删减保留模型后，进入 MultiRouter 配置或设置向导时远端 catalog 又全量出现。根因不是 provider 保存后的 `syncCodexMultiRouterPlanWithProviders()` 没跑，而是 MultiRouter 工作台 `providerWithFetchedModelCatalog()` 和向导 `mergeFetchedModelsIntoWizardProvider()` 在自动刷新 `/models` 时把远端全量模型追加回 `modelCatalog.models`，把用户保留列表反向污染成发现列表。

@@ -50,6 +50,7 @@ import { useAutoCompact } from "@/hooks/useAutoCompact";
 import { useUsageCacheBridge } from "@/hooks/useUsageCacheBridge";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
 import { useLastValidValue } from "@/hooks/useLastValidValue";
+import { useCodexLocalRoutingNotice } from "@/hooks/useCodexLocalRoutingNotice";
 import { useScanUnmanagedSkills } from "@/hooks/useSkills";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import { isTextEditableTarget } from "@/utils/domUtils";
@@ -317,6 +318,9 @@ function App() {
     );
     return target?.provider_id;
   }, [proxyStatus?.active_targets]);
+  const codexLocalRoutingNotice = useCodexLocalRoutingNotice(
+    Boolean(isProxyRunning && takeoverStatus?.codex),
+  );
 
   const { data, isLoading, refetch } = useProvidersQuery(activeApp, {
     isProxyRunning,
@@ -2005,6 +2009,31 @@ function App() {
         }}
         onCancel={() => setLaunchDashboardOpen(false)}
       />
+
+      <Dialog
+        open={codexLocalRoutingNotice.isOpen}
+        onOpenChange={(open) => {
+          if (!open) {
+            codexLocalRoutingNotice.dismiss();
+          }
+        }}
+      >
+        <DialogContent className="max-w-md" zIndex="alert">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Shield className="h-5 w-5 text-amber-500" />
+              Codex 本地路由已开启
+            </DialogTitle>
+            <DialogDescription className="leading-6">
+              您正在使用本地路由功能，将由 ccsm 接管所有 codex
+              流量，所以不要在使用 codex 时关闭本软件。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button onClick={codexLocalRoutingNotice.dismiss}>我知道了</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <DeepLinkImportDialog />
       <FirstRunNoticeDialog />
