@@ -18,6 +18,7 @@ use crate::store::AppState;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::env;
 use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use std::process::Command;
@@ -521,6 +522,7 @@ pub async fn diagnose_codex_multirouter(
             ),
         ],
     ));
+    checks.push(codex_network_proxy_diagnostic_check());
     checks.push(codex_check(
         "recent_router_error",
         "近期路由错误",
@@ -1658,6 +1660,13 @@ fn codex_router_log_protocol_from_path(value: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod codex_router_log_diagnostics_tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    /// 返回测试专用的环境变量锁，避免并行测试互相污染代理变量。
+    fn proxy_env_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn filters_router_log_to_selected_multirouter_provider() {
@@ -1849,6 +1858,64 @@ mod codex_router_log_diagnostics_tests {
         );
     }
 
+    #[test]
+    fn proxy_environment_entries_mask_credentials() {
+        let _guard = proxy_env_test_lock().lock().unwrap();
+        let old_http_proxy = env::var("HTTP_PROXY").ok();
+        let old_https_proxy = env::var("HTTPS_PROXY").ok();
+        let old_all_proxy = env::var("ALL_PROXY").ok();
+        let old_no_proxy = env::var("NO_PROXY").ok();
+
+        env::remove_var("HTTPS_PROXY");
+        env::remove_var("ALL_PROXY");
+        env::set_var("HTTP_PROXY", "http://user:secret@127.0.0.1:7890");
+        env::set_var("NO_PROXY", "localhost,127.0.0.1");
+
+        let proxy_entries = proxy_environment_entries();
+        let no_proxy_entries = no_proxy_environment_entries();
+
+        restore_env("HTTP_PROXY", old_http_proxy);
+        restore_env("HTTPS_PROXY", old_https_proxy);
+        restore_env("ALL_PROXY", old_all_proxy);
+        restore_env("NO_PROXY", old_no_proxy);
+
+        assert!(proxy_entries
+            .iter()
+            .any(|entry| entry == "HTTP_PROXY=http://127.0.0.1:7890"));
+        assert!(proxy_entries.iter().all(|entry| !entry.contains("secret")));
+        assert!(no_proxy_entries
+            .iter()
+            .any(|entry| entry == "NO_PROXY=localhost,127.0.0.1"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn parse_reg_query_value_extracts_dword_and_string_values() {
+        let dword = r#"
+HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings
+    ProxyEnable    REG_DWORD    0x1
+"#;
+        let string = r#"
+HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings
+    ProxyServer    REG_SZ    http=127.0.0.1:7890;https=127.0.0.1:7890
+"#;
+
+        assert_eq!(parse_reg_query_value(dword).as_deref(), Some("0x1"));
+        assert_eq!(
+            parse_reg_query_value(string).as_deref(),
+            Some("http=127.0.0.1:7890;https=127.0.0.1:7890")
+        );
+    }
+
+    /// 恢复测试前的环境变量，避免影响其它网络相关测试。
+    fn restore_env(key: &str, value: Option<String>) {
+        if let Some(value) = value {
+            env::set_var(key, value);
+        } else {
+            env::remove_var(key);
+        }
+    }
+
     fn test_live_config_for_provider(provider: Option<&str>) -> CodexLiveConfigDiagnostics {
         CodexLiveConfigDiagnostics {
             path: "config.toml".to_string(),
@@ -1878,6 +1945,208 @@ mod codex_router_log_diagnostics_tests {
             points_to_local_proxy: true,
         }
     }
+}
+
+/// 生成 Codex 502 排障用的出站代理/VPN 环境诊断。
+///
+/// 这项检查不发起网络请求，只读取 CC Switch 显式全局代理、当前进程代理环境变量和
+/// Windows 用户/WinHTTP 代理摘要，用来区分“请求没到 15721”和“进入 15721 后出站失败”。
+fn codex_network_proxy_diagnostic_check() -> CodexDiagnosticCheck {
+    let explicit_proxy = crate::proxy::http_client::get_current_proxy_url();
+    let env_proxy_entries = proxy_environment_entries();
+    let no_proxy_entries = no_proxy_environment_entries();
+    let windows_user_proxy = windows_user_proxy_summary();
+    let windows_winhttp_proxy = windows_winhttp_proxy_summary();
+
+    let has_env_proxy = !env_proxy_entries.is_empty();
+    let has_windows_proxy = windows_user_proxy.as_deref().is_some_and(|summary| {
+        !summary.contains("ProxyEnable=0") && !summary.contains("unavailable")
+    });
+
+    let mut evidence = Vec::new();
+    evidence.push(format!(
+        "ccswitch_global_proxy={}",
+        explicit_proxy
+            .as_deref()
+            .map(crate::proxy::http_client::mask_url)
+            .unwrap_or_else(|| "direct".to_string())
+    ));
+    evidence.push(format!(
+        "process_proxy_env={}",
+        if has_env_proxy {
+            env_proxy_entries.join(",")
+        } else {
+            "none".to_string()
+        }
+    ));
+    evidence.push(format!(
+        "process_no_proxy={}",
+        if no_proxy_entries.is_empty() {
+            "none".to_string()
+        } else {
+            no_proxy_entries.join(",")
+        }
+    ));
+    if let Some(summary) = windows_user_proxy {
+        evidence.push(format!("windows_user_proxy={summary}"));
+    }
+    if let Some(summary) = windows_winhttp_proxy {
+        evidence.push(format!("winhttp_proxy={summary}"));
+    }
+
+    let (status, detail) = if explicit_proxy.is_some() {
+        (
+            CodexDiagnosticStatus::Pass,
+            "CC Switch 已显式配置全局代理；进入 15721 后的 reqwest 出站请求会优先使用该代理。若仍 502，请看近期 router 日志里的 upstream_url 和 upstream_send_error。",
+        )
+    } else if has_env_proxy || has_windows_proxy {
+        (
+            CodexDiagnosticStatus::Warn,
+            "CC Switch 未显式配置全局代理，但检测到进程或 Windows 代理线索。规则代理可能不覆盖 CC Switch/Codex 进程，或把 127.0.0.1:15721 错误送进代理；请确认代理绕过 localhost，必要时改用全局代理或 TUN 模式。",
+        )
+    } else {
+        (
+            CodexDiagnosticStatus::Info,
+            "CC Switch 当前未显式配置全局代理，也未检测到当前进程代理环境变量。若日志显示 upstream_send_error，问题更可能在系统 TUN/fake-ip/上游链路，而不是 MultiRouter 规则。",
+        )
+    };
+
+    codex_check(
+        "outbound_proxy_environment",
+        "出站代理 / VPN 环境",
+        status,
+        detail,
+        evidence,
+    )
+}
+
+/// 收集当前进程继承到的 HTTP/SOCKS 代理环境变量，并对 URL 做脱敏。
+fn proxy_environment_entries() -> Vec<String> {
+    const KEYS: [&str; 6] = [
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ];
+
+    KEYS.iter()
+        .filter_map(|key| env::var(key).ok().map(|value| (*key, value)))
+        .map(|(key, value)| (key, value.trim().to_string()))
+        .filter(|(_, value)| !value.is_empty())
+        .map(|(key, value)| format!("{key}={}", crate::proxy::http_client::mask_url(&value)))
+        .collect()
+}
+
+/// 收集当前进程继承到的 NO_PROXY/no_proxy 规则。
+fn no_proxy_environment_entries() -> Vec<String> {
+    ["NO_PROXY", "no_proxy"]
+        .iter()
+        .filter_map(|key| env::var(key).ok().map(|value| (*key, value)))
+        .map(|(key, value)| (key, value.trim().to_string()))
+        .filter(|(_, value)| !value.is_empty())
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect()
+}
+
+/// 读取 Windows 当前用户 WinINET 代理摘要，供 Codex Desktop 本地端口被代理拦截时排障。
+#[cfg(windows)]
+fn windows_user_proxy_summary() -> Option<String> {
+    let output = Command::new("reg")
+        .args([
+            "query",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+            "/v",
+            "ProxyEnable",
+        ])
+        .output()
+        .ok()?;
+    let proxy_enable = parse_reg_query_value(&String::from_utf8_lossy(&output.stdout))
+        .unwrap_or_else(|| "unknown".to_string());
+    let proxy_server = windows_reg_value(
+        r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+        "ProxyServer",
+    )
+    .map(|value| crate::proxy::http_client::mask_url(&value))
+    .unwrap_or_else(|| "none".to_string());
+    let auto_config = windows_reg_value(
+        r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+        "AutoConfigURL",
+    )
+    .map(|value| crate::proxy::http_client::mask_url(&value))
+    .unwrap_or_else(|| "none".to_string());
+
+    Some(format!(
+        "ProxyEnable={proxy_enable}; ProxyServer={proxy_server}; AutoConfigURL={auto_config}"
+    ))
+}
+
+/// 非 Windows 平台没有 WinINET 用户代理，返回 None 避免误导。
+#[cfg(not(windows))]
+fn windows_user_proxy_summary() -> Option<String> {
+    None
+}
+
+/// 读取 Windows WinHTTP 代理摘要；该值常用于服务/命令行排障，与 WinINET 用户代理分开显示。
+#[cfg(windows)]
+fn windows_winhttp_proxy_summary() -> Option<String> {
+    let output = Command::new("netsh")
+        .args(["winhttp", "show", "proxy"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let summary = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(3)
+        .collect::<Vec<_>>()
+        .join(" | ");
+    if summary.is_empty() {
+        None
+    } else {
+        Some(summary)
+    }
+}
+
+/// 非 Windows 平台没有 WinHTTP 代理，返回 None 避免误导。
+#[cfg(not(windows))]
+fn windows_winhttp_proxy_summary() -> Option<String> {
+    None
+}
+
+/// 读取单个 Windows 注册表值，失败时返回 None。
+#[cfg(windows)]
+fn windows_reg_value(key_path: &str, value_name: &str) -> Option<String> {
+    let output = Command::new("reg")
+        .args(["query", key_path, "/v", value_name])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_reg_query_value(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// 从 `reg query` 输出里提取最后一列值，兼容 REG_DWORD 和 REG_SZ。
+#[cfg(windows)]
+fn parse_reg_query_value(output: &str) -> Option<String> {
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .find_map(|line| {
+            let parts = line.split_whitespace().collect::<Vec<_>>();
+            let value_index = parts
+                .iter()
+                .position(|part| part.starts_with("REG_"))
+                .map(|index| index + 1)?;
+            if value_index >= parts.len() {
+                return None;
+            }
+            Some(parts[value_index..].join(" "))
+        })
 }
 
 /// 根据失败/告警项生成最短下一步动作。
