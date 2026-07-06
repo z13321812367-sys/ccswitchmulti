@@ -752,8 +752,6 @@ jobs:
 
           ---
 
-          🌐 **Only Official Website / 唯一官方网站 / 唯一の公式サイト**: [ccswitch.io](https://ccswitch.io)
-
           macOS DMG 在仓库配置 Apple 签名和公证密钥时会签名并公证；未配置时发布 Tauri 生成的未签名 DMG、updater tarball 和 app zip。
           EOF
           } > release-body.md

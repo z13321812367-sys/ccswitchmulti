@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-07-06 GitHub Page Copy Cleanup Before Fork Detach
+
+- 按用户要求降低仓库首页对官网和原项目的显式导流：GitHub repository `homepage` 已清空，description 改为 `CCSwitchMulti: Codex 多模型路由，把 OpenAI 订阅与 DeepSeek/Qwen/本地/第三方 OpenAI-compatible 模型合并到 Codex。`，topics 移除了 `cc-switch`。
+- 四个 README 顶部都改为 `CCSwitchMulti` / Codex MultiRouter 自身定位，release/download badge 指向 `BigStrongSun/ccswitchmulti`，删除 `ccswitch.io` 官网行和 `farion1231/cc-switch` 的 Trendshift/star-history 顶部徽章；底部 star-history 仍保留但已改为当前仓库 `BigStrongSun/ccswitchmulti`。
+- 主 README 分支说明去掉原项目链接，改为 CCSwitchMulti 自身能力说明；issue templates 的 FAQ、existing issues、Security Advisories、Discussions 链接全部改到 `BigStrongSun/ccswitchmulti`；release workflow 自动正文不再追加官网链接。
+- 边界：GitHub API 仍显示 `parent=farion1231/cc-switch`，这是 fork network 元数据，不能通过 README/metadata 文案清理去掉；只有 GitHub Support detach fork network 或重建独立仓库后才会消失。
+
 ## 2026-07-06 GitHub Discoverability Low-Risk Optimization
 
 - 在不改变 fork network 的前提下，已把 `BigStrongSun/ccswitchmulti` 的 GitHub description 改成同时包含 `CCSwitchMulti`、`Codex`、`OpenAI-compatible`、`DeepSeek`、`Qwen`、`CC Switch` 等中英文关键词；homepage 保持 `https://ccswitch.io`。
