@@ -47,6 +47,35 @@ interface UsageReadingHintProps {
   tone: "ok" | "warn" | "info";
 }
 
+/** 页面级配色：每个 surface 都显式维护 light 与 dark 两套颜色，避免主题切换时只继承单套颜色。 */
+const USAGE_PAGE_COLORS = {
+  shell:
+    "border-slate-200 bg-white text-slate-950 dark:border-slate-700/80 dark:bg-slate-950/30 dark:text-slate-100",
+  header:
+    "bg-gradient-to-r from-sky-50 via-white to-emerald-50 dark:from-blue-950/45 dark:via-slate-900 dark:to-emerald-950/30",
+  chip: "border-slate-200 bg-white/80 text-slate-600 dark:border-slate-700/80 dark:bg-slate-950/40 dark:text-slate-300",
+  guide:
+    "border-sky-200 bg-sky-50/80 text-sky-950 dark:border-blue-700/40 dark:bg-blue-950/15 dark:text-blue-100",
+  guideStep:
+    "border-sky-200 bg-white/90 text-slate-950 dark:border-blue-700/40 dark:bg-slate-950/40 dark:text-slate-100",
+  card: "border-slate-200 bg-white text-slate-950 dark:border-slate-700/80 dark:bg-slate-950/30 dark:text-slate-100",
+  inset:
+    "border-slate-200 bg-slate-50 text-slate-950 dark:border-slate-700/70 dark:bg-slate-950/40 dark:text-slate-100",
+  progressTrack: "bg-slate-200 dark:bg-slate-800",
+  warning:
+    "border-amber-200 bg-amber-50 text-amber-950 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100",
+  warningButton:
+    "border-amber-300 bg-white text-amber-950 hover:bg-amber-100 dark:border-amber-700 dark:bg-slate-950/40 dark:text-amber-100 dark:hover:bg-amber-900/40",
+  resetSummary: "bg-sky-100 text-sky-800 dark:bg-sky-500/10 dark:text-sky-300",
+};
+
+/** 读数提示卡配色：ok/warn/info 各自维护浅色和深色配色。 */
+const READING_HINT_COLORS: Record<UsageReadingHintProps["tone"], string> = {
+  ok: "border-emerald-200 bg-emerald-50 text-emerald-950 dark:border-emerald-700/40 dark:bg-emerald-950/20 dark:text-emerald-100",
+  warn: "border-amber-200 bg-amber-50 text-amber-950 dark:border-amber-700/40 dark:bg-amber-950/20 dark:text-amber-100",
+  info: "border-sky-200 bg-sky-50 text-sky-950 dark:border-blue-700/40 dark:bg-blue-950/20 dark:text-blue-100",
+};
+
 /** 将百分比限制在进度条可安全渲染的 0-100 区间。 */
 function clampPercent(value: number): number {
   if (!Number.isFinite(value)) return 0;
@@ -164,8 +193,10 @@ function getVisibleTiers(quota: SubscriptionQuota | undefined): QuotaTier[] {
 
 /** 引导步骤条目：说明从哪里进入页面以及读数顺序。 */
 const GuideStep: React.FC<GuideStepProps> = ({ index, title, detail }) => (
-  <div className="flex gap-3 rounded-lg border border-blue-200 bg-card p-3 text-sm dark:border-blue-700/40 dark:bg-slate-950/40">
-    <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-blue-600 text-xs font-semibold text-white">
+  <div
+    className={`flex gap-3 rounded-lg border p-3 text-sm ${USAGE_PAGE_COLORS.guideStep}`}
+  >
+    <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-sky-600 text-xs font-semibold text-white dark:bg-blue-500">
       {index}
     </div>
     <div className="min-w-0">
@@ -183,15 +214,8 @@ const UsageReadingHint: React.FC<UsageReadingHintProps> = ({
   detail,
   tone,
 }) => {
-  const toneClass =
-    tone === "ok"
-      ? "border-emerald-200 bg-emerald-50/70 text-emerald-900 dark:border-emerald-700/40 dark:bg-emerald-950/20 dark:text-emerald-100"
-      : tone === "warn"
-        ? "border-amber-200 bg-amber-50/70 text-amber-900 dark:border-amber-700/40 dark:bg-amber-950/20 dark:text-amber-100"
-        : "border-blue-200 bg-blue-50/70 text-blue-900 dark:border-blue-700/40 dark:bg-blue-950/20 dark:text-blue-100";
-
   return (
-    <div className={`rounded-lg border px-3 py-2 ${toneClass}`}>
+    <div className={`rounded-lg border px-3 py-2 ${READING_HINT_COLORS[tone]}`}>
       <div className="text-xs font-semibold">{title}</div>
       <div className="mt-1 text-xs leading-5 opacity-80">{detail}</div>
     </div>
@@ -200,8 +224,8 @@ const UsageReadingHint: React.FC<UsageReadingHintProps> = ({
 
 /** 页面引导区：补齐入口、刷新和读数判断，避免用户只看到一组静态数字。 */
 const UsageGuidePanel: React.FC = () => (
-  <section className="rounded-lg border border-blue-200 bg-blue-50/70 p-4 dark:border-blue-700/40 dark:bg-blue-950/15">
-    <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-blue-900 dark:text-blue-100">
+  <section className={`rounded-lg border p-4 ${USAGE_PAGE_COLORS.guide}`}>
+    <div className="mb-3 flex items-center gap-2 text-sm font-semibold">
       <Info className="h-4 w-4" />
       使用引导
     </div>
@@ -249,7 +273,7 @@ const UsageWindowCard: React.FC<UsageWindowCardProps> = ({ tier }) => {
   const label = TIER_LABELS[tier.name] ?? tier.name;
 
   return (
-    <section className="rounded-lg border border-border bg-card p-4 dark:border-slate-700/80 dark:bg-slate-950/30">
+    <section className={`rounded-lg border p-4 ${USAGE_PAGE_COLORS.card}`}>
       <div className="mb-4 flex items-start justify-between gap-3">
         <div>
           <div className="text-sm font-semibold text-foreground">{label}</div>
@@ -265,7 +289,9 @@ const UsageWindowCard: React.FC<UsageWindowCardProps> = ({ tier }) => {
         </div>
       </div>
 
-      <div className="h-2 overflow-hidden rounded-full bg-muted dark:bg-slate-800">
+      <div
+        className={`h-2 overflow-hidden rounded-full ${USAGE_PAGE_COLORS.progressTrack}`}
+      >
         <div
           className={`h-full rounded-full transition-all ${capacityBarTone(used)}`}
           style={{ width: `${used}%` }}
@@ -287,7 +313,9 @@ const ResetCreditRow: React.FC<ResetCreditRowProps> = ({ credit, index }) => {
   const urgency = resetCreditUrgency(credit.expiresAt);
 
   return (
-    <div className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 rounded-lg border border-border bg-background px-3 py-2 text-sm dark:border-slate-700/70 dark:bg-slate-950/40">
+    <div
+      className={`grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 rounded-lg border px-3 py-2 text-sm ${USAGE_PAGE_COLORS.inset}`}
+    >
       <div className="min-w-0">
         <div className="truncate font-medium text-foreground">
           {credit.title || `Reset ${index + 1}`}
@@ -314,7 +342,9 @@ function renderQuotaProblem(
 ): React.ReactNode {
   if (loading && !quota) {
     return (
-      <div className="rounded-lg border border-border bg-card p-6 text-sm text-muted-foreground dark:border-slate-700/80 dark:bg-slate-950/30">
+      <div
+        className={`rounded-lg border p-6 text-sm text-muted-foreground ${USAGE_PAGE_COLORS.card}`}
+      >
         正在读取本机 Codex 登录状态...
       </div>
     );
@@ -336,19 +366,21 @@ function renderQuotaProblem(
     "请确认 Codex Desktop / CLI 已登录，然后刷新。";
 
   return (
-    <section className="rounded-lg border border-amber-200 bg-amber-50 p-5 text-sm text-amber-900 shadow-sm dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100">
+    <section
+      className={`rounded-lg border p-5 text-sm shadow-sm ${USAGE_PAGE_COLORS.warning}`}
+    >
       <div className="mb-3 flex items-center gap-2 font-semibold">
         <AlertCircle className="h-4 w-4" />
         {title}
       </div>
-      <p className="mb-4 text-amber-800 dark:text-amber-200">{detail}</p>
+      <p className="mb-4 opacity-90">{detail}</p>
       <Button
         type="button"
         onClick={refetch}
         disabled={loading}
         size="sm"
         variant="outline"
-        className="gap-2 border-amber-300 hover:bg-amber-100 dark:border-amber-700 dark:hover:bg-amber-900/40"
+        className={`gap-2 ${USAGE_PAGE_COLORS.warningButton}`}
       >
         <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
         重新刷新
@@ -377,11 +409,15 @@ export const CodexUsagePage: React.FC = () => {
 
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-4 px-6 py-6">
-      <section className="overflow-hidden rounded-lg border border-border bg-card dark:border-slate-700/80 dark:bg-slate-950/30">
-        <div className="flex flex-col gap-4 bg-gradient-to-r from-blue-50 via-background to-emerald-50 px-4 py-3 dark:from-blue-950/45 dark:via-slate-900 dark:to-emerald-950/30 lg:flex-row lg:items-center lg:justify-between">
+      <section
+        className={`overflow-hidden rounded-lg border ${USAGE_PAGE_COLORS.shell}`}
+      >
+        <div
+          className={`flex flex-col gap-4 px-4 py-3 lg:flex-row lg:items-center lg:justify-between ${USAGE_PAGE_COLORS.header}`}
+        >
           <div className="min-w-0 space-y-2">
             <div className="flex items-center gap-2 text-base font-semibold">
-              <Gauge className="h-4 w-4 text-blue-600 dark:text-blue-300" />
+              <Gauge className="h-4 w-4 text-sky-600 dark:text-blue-300" />
               Codex 用量与重置额度
             </div>
             <p className="max-w-4xl text-xs leading-5 text-muted-foreground dark:text-slate-400">
@@ -390,22 +426,30 @@ export const CodexUsagePage: React.FC = () => {
               配置。
             </p>
             <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-              <span className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1 dark:border-slate-700/80 dark:bg-slate-950/40">
+              <span
+                className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 ${USAGE_PAGE_COLORS.chip}`}
+              >
                 Codex 工具栏
                 <ArrowRight className="h-3 w-3" />
                 柱状图按钮
               </span>
-              <span className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1 dark:border-slate-700/80 dark:bg-slate-950/40">
+              <span
+                className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 ${USAGE_PAGE_COLORS.chip}`}
+              >
                 只读查询
               </span>
-              <span className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1 dark:border-slate-700/80 dark:bg-slate-950/40">
+              <span
+                className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 ${USAGE_PAGE_COLORS.chip}`}
+              >
                 自动 5 分钟刷新
               </span>
             </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-3 text-sm">
-            <div className="inline-flex items-center gap-2 rounded-lg border border-border bg-background px-3 py-2 text-muted-foreground dark:border-slate-700/80 dark:bg-slate-950/40">
+            <div
+              className={`inline-flex items-center gap-2 rounded-lg border px-3 py-2 ${USAGE_PAGE_COLORS.chip}`}
+            >
               <Clock className="h-4 w-4" />
               {formatCheckedAt(quota?.queriedAt)}
             </div>
@@ -414,7 +458,7 @@ export const CodexUsagePage: React.FC = () => {
               onClick={() => void refetch()}
               disabled={isFetching}
               size="sm"
-              className="gap-2 bg-blue-600 hover:bg-blue-500"
+              className="gap-2 bg-sky-600 hover:bg-sky-500 dark:bg-blue-600 dark:hover:bg-blue-500"
             >
               <RefreshCw
                 className={`h-4 w-4 ${isFetching ? "animate-spin" : ""}`}
@@ -436,13 +480,17 @@ export const CodexUsagePage: React.FC = () => {
               <UsageWindowCard key={tier.name} tier={tier} />
             ))}
             {visibleTiers.length === 0 && (
-              <section className="rounded-lg border border-border bg-card p-5 text-sm text-muted-foreground dark:border-slate-700/80 dark:bg-slate-950/30 lg:col-span-2">
+              <section
+                className={`rounded-lg border p-5 text-sm text-muted-foreground lg:col-span-2 ${USAGE_PAGE_COLORS.card}`}
+              >
                 Codex 没有返回 5 小时或每周用量窗口。
               </section>
             )}
           </div>
 
-          <section className="rounded-lg border border-border bg-card p-5 dark:border-slate-700/80 dark:bg-slate-950/30">
+          <section
+            className={`rounded-lg border p-5 ${USAGE_PAGE_COLORS.card}`}
+          >
             <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex items-center gap-2">
                 <RotateCcw className="h-4 w-4 text-sky-600 dark:text-sky-400" />
@@ -450,7 +498,9 @@ export const CodexUsagePage: React.FC = () => {
                   已存 reset 额度
                 </h3>
               </div>
-              <div className="inline-flex items-center gap-2 rounded-lg bg-sky-500/10 px-3 py-2 text-sm font-semibold text-sky-700 dark:text-sky-300">
+              <div
+                className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold ${USAGE_PAGE_COLORS.resetSummary}`}
+              >
                 <TimerReset className="h-4 w-4" />
                 {availableCount} 个可用
               </div>
@@ -466,21 +516,27 @@ export const CodexUsagePage: React.FC = () => {
                   />
                 ))}
                 {missingExpiryCount > 0 && (
-                  <div className="rounded-lg border border-dashed border-border bg-background px-3 py-2 text-sm text-muted-foreground dark:border-slate-700/70 dark:bg-slate-950/40">
+                  <div
+                    className={`rounded-lg border border-dashed px-3 py-2 text-sm text-muted-foreground ${USAGE_PAGE_COLORS.inset}`}
+                  >
                     还有 {missingExpiryCount} 个可用 reset
                     没有返回可展示的到期明细。
                   </div>
                 )}
               </div>
             ) : (
-              <div className="flex items-center gap-2 rounded-lg border border-border bg-background px-3 py-3 text-sm text-muted-foreground dark:border-slate-700/70 dark:bg-slate-950/40">
+              <div
+                className={`flex items-center gap-2 rounded-lg border px-3 py-3 text-sm text-muted-foreground ${USAGE_PAGE_COLORS.inset}`}
+              >
                 <CheckCircle2 className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
                 当前没有已存 reset 额度。
               </div>
             )}
 
             {quota.resetCreditsError && (
-              <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-200">
+              <div
+                className={`mt-3 rounded-lg border px-3 py-2 text-sm ${USAGE_PAGE_COLORS.warning}`}
+              >
                 Reset credit 明细读取不完整：{quota.resetCreditsError}
               </div>
             )}
