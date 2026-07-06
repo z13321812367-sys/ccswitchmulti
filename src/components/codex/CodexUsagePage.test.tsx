@@ -61,8 +61,12 @@ describe("CodexUsagePage", () => {
     render(<CodexUsagePage />);
 
     expect(screen.getByText("Codex 用量与重置额度")).toBeInTheDocument();
+    expect(screen.getByText("使用引导")).toBeInTheDocument();
+    expect(screen.getByText("从 Codex 工具栏进入")).toBeInTheDocument();
+    expect(screen.getByText("按窗口和到期时间决策")).toBeInTheDocument();
     expect(screen.getByText("5 小时窗口")).toBeInTheDocument();
     expect(screen.getByText("每周窗口")).toBeInTheDocument();
+    expect(screen.getByText("已存 reset 额度")).toBeInTheDocument();
     expect(screen.getByText("2 个可用")).toBeInTheDocument();
     expect(screen.getByText("Banked reset")).toBeInTheDocument();
     expect(screen.getByText(/Reset credit 明细读取不完整/)).toBeInTheDocument();
