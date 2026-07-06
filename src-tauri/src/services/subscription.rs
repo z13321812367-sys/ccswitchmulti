@@ -51,6 +51,30 @@ pub struct ExtraUsage {
     pub currency: Option<String>,
 }
 
+/// Codex 已存储的重置额度。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetCredits {
+    /// 可用重置额度数量，来自官方响应的 `available_count` 或可用条目回退统计。
+    pub available_count: i64,
+    /// 已脱敏的重置额度明细。不会向前端暴露 credit id 或 raw response。
+    pub credits: Vec<ResetCreditInfo>,
+}
+
+/// 单个 Codex 重置额度的安全展示字段。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetCreditInfo {
+    /// 额度类型，例如 rate_limit；未知时保留 None。
+    pub reset_type: Option<String>,
+    /// 官方状态，例如 available / redeemed / expired。
+    pub status: Option<String>,
+    /// ISO 8601 到期时间；官方未返回时为 None，前端用缺失行提示。
+    pub expires_at: Option<String>,
+    /// 官方展示标题；不包含 credit id。
+    pub title: Option<String>,
+}
+
 /// 订阅额度查询结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -61,6 +85,8 @@ pub struct SubscriptionQuota {
     pub success: bool,
     pub tiers: Vec<QuotaTier>,
     pub extra_usage: Option<ExtraUsage>,
+    pub reset_credits: Option<ResetCredits>,
+    pub reset_credits_error: Option<String>,
     pub error: Option<String>,
     pub queried_at: Option<i64>,
 }
@@ -74,6 +100,8 @@ impl SubscriptionQuota {
             success: false,
             tiers: vec![],
             extra_usage: None,
+            reset_credits: None,
+            reset_credits_error: None,
             error: None,
             queried_at: None,
         }
@@ -87,6 +115,8 @@ impl SubscriptionQuota {
             success: false,
             tiers: vec![],
             extra_usage: None,
+            reset_credits: None,
+            reset_credits_error: None,
             error: Some(message),
             queried_at: Some(now_millis()),
         }
@@ -436,6 +466,8 @@ async fn query_claude_quota(access_token: &str) -> SubscriptionQuota {
         success: true,
         tiers,
         extra_usage,
+        reset_credits: None,
+        reset_credits_error: None,
         error: None,
         queried_at: Some(now_millis()),
     }
@@ -620,6 +652,8 @@ struct CodexRateLimitWindow {
 
 #[derive(Deserialize)]
 struct CodexRateLimit {
+    allowed: Option<bool>,
+    limit_reached: Option<bool>,
     primary_window: Option<CodexRateLimitWindow>,
     secondary_window: Option<CodexRateLimitWindow>,
 }
@@ -627,6 +661,12 @@ struct CodexRateLimit {
 #[derive(Deserialize)]
 struct CodexUsageResponse {
     rate_limit: Option<CodexRateLimit>,
+    rate_limit_reset_credits: Option<CodexResetCreditCount>,
+}
+
+#[derive(Deserialize)]
+struct CodexResetCreditCount {
+    available_count: Option<serde_json::Value>,
 }
 
 /// 根据窗口秒数映射到 tier 名称（与 Claude 的命名兼容以复用前端 i18n）
@@ -645,9 +685,133 @@ fn window_seconds_to_tier_name(secs: i64) -> String {
     }
 }
 
-/// Unix 时间戳（秒）转 ISO 8601 字符串
+/// Unix 时间戳（秒或毫秒）转 ISO 8601 字符串。
+///
+/// Codex `/wham/usage` 的 `reset_at` 在不同版本中可能是秒或毫秒；这里先归一
+/// 到秒，并拒绝明显不可信的纪元值，避免前端显示 51398 年之类的错误日期。
 fn unix_ts_to_iso(ts: i64) -> Option<String> {
-    chrono::DateTime::from_timestamp(ts, 0).map(|dt| dt.to_rfc3339())
+    let secs = if ts > 10_000_000_000 { ts / 1000 } else { ts };
+    const EARLIEST_PLAUSIBLE_RESET_EPOCH: i64 = 1_577_836_800; // 2020-01-01
+    const LATEST_PLAUSIBLE_RESET_EPOCH: i64 = 4_102_444_800; // 2100-01-01
+    if !(EARLIEST_PLAUSIBLE_RESET_EPOCH..=LATEST_PLAUSIBLE_RESET_EPOCH).contains(&secs) {
+        return None;
+    }
+    chrono::DateTime::from_timestamp(secs, 0).map(|dt| dt.to_rfc3339())
+}
+
+/// 从宽松 JSON 字段中解析整数。
+///
+/// 官方内部接口可能把 `available_count` 返回为数字或字符串；这里集中做容错，
+/// 防止单个字段类型变化导致整次额度查询失败。
+fn flexible_i64(value: &serde_json::Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|v| i64::try_from(v).ok()))
+        .or_else(|| {
+            value
+                .as_f64()
+                .filter(|v| v.is_finite() && v.fract() == 0.0)
+                .map(|v| v as i64)
+        })
+        .or_else(|| value.as_str()?.trim().parse::<i64>().ok())
+}
+
+/// 从宽松 JSON 字段中解析字符串。
+fn flexible_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) if !s.trim().is_empty() => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+/// 解析并脱敏 Codex reset credits 响应。
+///
+/// 只保留展示需要的字段，不保留 credit id、账号 id、user id 或 raw JSON。
+fn parse_codex_reset_credits(body: serde_json::Value) -> ResetCredits {
+    let raw_credits = body
+        .get("credits")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let credits: Vec<ResetCreditInfo> = raw_credits
+        .iter()
+        .filter_map(|credit| {
+            let obj = credit.as_object()?;
+            let status = obj.get("status").and_then(flexible_string);
+            Some(ResetCreditInfo {
+                reset_type: obj.get("reset_type").and_then(flexible_string),
+                status,
+                expires_at: obj.get("expires_at").and_then(flexible_string),
+                title: obj.get("title").and_then(flexible_string),
+            })
+        })
+        .collect();
+
+    let available_count = body
+        .get("available_count")
+        .and_then(flexible_i64)
+        .unwrap_or_else(|| {
+            credits
+                .iter()
+                .filter(|credit| {
+                    credit
+                        .status
+                        .as_deref()
+                        .map(|status| status.eq_ignore_ascii_case("available"))
+                        .unwrap_or(false)
+                })
+                .count() as i64
+        });
+
+    ResetCredits {
+        available_count,
+        credits,
+    }
+}
+
+/// 查询 Codex banked reset credits。
+///
+/// 该接口只读：只查询可用重置额度和到期时间，不兑换、不修改账号状态。
+async fn query_codex_reset_credits(
+    access_token: &str,
+    account_id: Option<&str>,
+    expired_message: &str,
+) -> Result<ResetCredits, String> {
+    let client = crate::proxy::http_client::get();
+    let mut req = client
+        .get("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits")
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("User-Agent", "codex-cli")
+        .header("originator", "Codex Desktop")
+        .header("OAI-Product-Sku", "CODEX")
+        .header("Accept", "application/json");
+
+    if let Some(id) = account_id {
+        req = req.header("ChatGPT-Account-Id", id);
+    }
+
+    let resp = req
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("Reset credits network error: {e}"))?;
+    let status = resp.status();
+
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(format!("Reset credits {expired_message} (HTTP {status})"));
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Reset credits API error (HTTP {status}): {body}"));
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse reset credits response: {e}"))?;
+    Ok(parse_codex_reset_credits(body))
 }
 
 /// 查询 Codex / ChatGPT 反代订阅额度
@@ -667,6 +831,8 @@ pub(crate) async fn query_codex_quota(
         .get("https://chatgpt.com/backend-api/wham/usage")
         .header("Authorization", format!("Bearer {access_token}"))
         .header("User-Agent", "codex-cli")
+        .header("originator", "Codex Desktop")
+        .header("OAI-Product-Sku", "CODEX")
         .header("Accept", "application/json");
 
     if let Some(id) = account_id {
@@ -716,7 +882,14 @@ pub(crate) async fn query_codex_quota(
 
     let mut tiers = Vec::new();
 
+    let usage_reset_count = body
+        .rate_limit_reset_credits
+        .as_ref()
+        .and_then(|count| count.available_count.as_ref())
+        .and_then(flexible_i64);
+
     if let Some(rate_limit) = body.rate_limit {
+        let _blocked = rate_limit.allowed == Some(false) || rate_limit.limit_reached == Some(true);
         for window in [rate_limit.primary_window, rate_limit.secondary_window]
             .into_iter()
             .flatten()
@@ -736,6 +909,18 @@ pub(crate) async fn query_codex_quota(
         }
     }
 
+    let (reset_credits, reset_credits_error) =
+        match query_codex_reset_credits(access_token, account_id, expired_message).await {
+            Ok(credits) => (Some(credits), None),
+            Err(error) => {
+                let fallback = usage_reset_count.map(|available_count| ResetCredits {
+                    available_count,
+                    credits: Vec::new(),
+                });
+                (fallback, Some(error))
+            }
+        };
+
     SubscriptionQuota {
         tool: tool_label.to_string(),
         credential_status: CredentialStatus::Valid,
@@ -743,6 +928,8 @@ pub(crate) async fn query_codex_quota(
         success: true,
         tiers,
         extra_usage: None,
+        reset_credits,
+        reset_credits_error,
         error: None,
         queried_at: Some(now_millis()),
     }
@@ -1210,6 +1397,8 @@ async fn query_gemini_quota(access_token: &str) -> SubscriptionQuota {
         success: true,
         tiers,
         extra_usage: None,
+        reset_credits: None,
+        reset_credits_error: None,
         error: None,
         queried_at: Some(now_millis()),
     }
@@ -1339,4 +1528,55 @@ fn now_millis() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_codex_reset_credits, unix_ts_to_iso};
+
+    /// Codex reset credits 解析必须只保留展示字段，避免把 credit id 泄露给前端。
+    #[test]
+    fn codex_reset_credits_parser_redacts_ids_and_accepts_string_count() {
+        let body = serde_json::json!({
+            "available_count": "2",
+            "credits": [
+                {
+                    "id": "credit-sensitive",
+                    "reset_type": "rate_limit",
+                    "status": "available",
+                    "expires_at": "2026-07-11T21:13:00Z",
+                    "title": "One free rate limit reset"
+                },
+                {
+                    "id": "credit-redeemed",
+                    "reset_type": "rate_limit",
+                    "status": "redeemed"
+                }
+            ]
+        });
+
+        let parsed = parse_codex_reset_credits(body);
+
+        assert_eq!(parsed.available_count, 2);
+        assert_eq!(parsed.credits.len(), 2);
+        assert_eq!(parsed.credits[0].status.as_deref(), Some("available"));
+        let serialized = serde_json::to_string(&parsed).expect("serialize reset credits");
+        assert!(!serialized.contains("credit-sensitive"));
+        assert!(!serialized.contains("credit-redeemed"));
+    }
+
+    /// Codex usage 的 reset_at 可能是毫秒，解析层必须归一化到正确日期。
+    #[test]
+    fn codex_reset_at_accepts_millisecond_epoch() {
+        assert_eq!(
+            unix_ts_to_iso(1_800_000_000_000).as_deref(),
+            Some("2027-01-15T08:00:00+00:00")
+        );
+    }
+
+    /// 明显不可信的 reset_at 应丢弃，避免 UI 显示超远未来日期。
+    #[test]
+    fn codex_reset_at_rejects_implausible_epoch() {
+        assert!(unix_ts_to_iso(99_999_999_999_999).is_none());
+    }
 }

@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-07-06 Codex 127.0.0.1:15721 502 VPN/Proxy Boundary
+
+- 用户截图里的 `unexpected status 502 Bad Gateway: Unknown error, url: http://127.0.0.1:15721/v1/responses` 不能直接归因到 MultiRouter route miss。需要先区分两条边界：如果 `codex-router.log` 同时间没有 `route_resolved/request_prepared/upstream_send_error`，请求可能被 Codex Desktop 自身的系统代理/VPN/规则代理在到达 `127.0.0.1:15721` 前拦截；如果日志有 `upstream_send_error`，说明请求已进入 CC Switch，失败在 CC Switch 到真实上游的出站链路。
+- 代码边界：Codex 到本地 `15721` 是入站 TCP，不读 CC Switch 的 `http_client`；CC Switch 出站分为 reqwest 和 hyper 路径。`src-tauri/src/proxy/http_client.rs` 未显式设置全局代理时会跟随当前进程可见的系统/环境代理线索，但只会对指向 CC Switch 自己端口的 loopback 代理做防自环跳过；`hyper_client.rs` 原始 TCP 路径不读代理环境变量。
+- 产品侧修复点：`diagnose_codex_multirouter` 新增「出站代理 / VPN 环境」检查，只读展示 CC Switch 显式全局代理、当前进程 `HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY`、Windows WinINET 用户代理和 WinHTTP 摘要；FAQ 增加 `502 Bad Gateway: 127.0.0.1:15721/v1/responses` 排障流程，提示用户通过 router 日志区分“请求未到本地代理”和“进入本地代理后上游出站失败”，并在规则代理失败时尝试 localhost 绕过、全局代理或 TUN 模式。
+- 后续遇到同类反馈时，先让用户运行 Codex MultiRouter Debug 检查并导出 `~/.cc-switch/logs/codex-router.log` 同时间窗口；不要只根据 UI 里的 `Unknown error` 断定是 provider 配置、OAuth 或模型转换问题。
+
 ## 2026-07-06 GitHub Page Copy Cleanup Before Fork Detach
 
 - 按用户要求降低仓库首页对官网和原项目的显式导流：GitHub repository `homepage` 已清空，description 改为 `CCSwitchMulti: Codex 多模型路由，把 OpenAI 订阅与 DeepSeek/Qwen/本地/第三方 OpenAI-compatible 模型合并到 Codex。`，topics 移除了 `cc-switch`。
@@ -1768,3 +1775,12 @@
 - Diff-derived version summary: `v3.16.4-5` adds Codex Desktop OAuth login preservation during snapshot/backup restore, official same-account vs cross-account auth handling, MultiRouter wizard naming/model-selection/spawn-agent steps, provider-edit-to-MultiRouter catalog/route/spawn-agent synchronization, concurrent Codex protocol probing, release workflow hardening, and OAuth/request-shape diagnostics. `v3.16.4-6` only fixes official Codex OAuth Responses input items by removing invalid `content` from non-message/non-reasoning items. `v3.16.4-7` fixes MultiRouter duplicate GPT aliases, empty target catalogs wiping relay routes, non-routable aggregate catalog models, Volcengine AgentPlan model listing via `ListArkAgentPlanModel`, sensitive image retry, and Codex Responses control-message promotion.
 - Release note rule learned: write this release as a cumulative `v3.16.4-4 -> v3.16.4-7` user-facing changelog grouped by impact, then include a short per-version section for traceability. Do not list `memory.md`, docs-only release files, function visibility changes, `parse_context_tokens` cleanup, or log wording changes as product updates.
 - Evidence files used for the rewrite: `src/lib/codexMultiRouterSync.ts`, `src/components/codex/CodexMultiRouterWizard.tsx`, `src/components/codex/CodexRouterWorkspacePage.tsx`, `src-tauri/src/codex_config.rs`, `src-tauri/src/services/provider/live.rs`, `src-tauri/src/services/proxy.rs`, `src-tauri/src/proxy/providers/openai_compat.rs`, `src-tauri/src/proxy/forwarder.rs`, `src-tauri/src/proxy/media_sanitizer.rs`, `src-tauri/src/services/model_fetch.rs`, `src/utils/codexPlanModelFetch.ts`, and `.github/workflows/release.yml`.
+
+## 2026-07-06 Codex reset credits watcher integration
+
+- `jordan-edai/codex-reset-watcher` is useful as a reference for Codex banked reset credits, but its macOS SwiftUI/MenuBar layer should not be copied. The portable core is: read the same Codex OAuth login context, call `GET https://chatgpt.com/backend-api/wham/usage` and `GET https://chatgpt.com/backend-api/wham/rate-limit-reset-credits`, and keep the feature strictly read-only.
+- CCSwitchMulti already had cross-platform Codex quota plumbing in `src-tauri/src/services/subscription.rs`: macOS can read Keychain `Codex Auth`, while Windows/Linux fall back to `~/.codex/auth.json` through `codex_config::get_codex_auth_path()`. The correct integration point is extending `SubscriptionQuota`, not adding a macOS-specific watcher clone.
+- The implemented reset-credit response intentionally exposes only safe display fields: available count, reset type, status, expiry, and title. Do not surface raw endpoint JSON, credit ids, account ids, user ids, access tokens, refresh tokens, or auth file paths in frontend state, logs, or saved snapshots.
+- Codex `/wham/usage` `reset_at` can be seconds or milliseconds. `unix_ts_to_iso` now normalizes millisecond epochs and rejects implausible dates outside 2020-2100; keep this guard if endpoint parsing is refactored.
+- Partial failure rule: if `/wham/rate-limit-reset-credits` fails but `/wham/usage` succeeds, quota should remain successful and may fall back to `rate_limit_reset_credits.available_count` from the usage response while exposing a reset-credit-specific error. Do not mark the whole quota query failed unless the primary usage query fails or credentials are invalid.
+- Verification for this integration: `cargo test --manifest-path src-tauri\Cargo.toml codex_reset_ --lib`, `cargo check --manifest-path src-tauri\Cargo.toml`, `cargo fmt --manifest-path src-tauri\Cargo.toml --check`, and `pnpm typecheck`.

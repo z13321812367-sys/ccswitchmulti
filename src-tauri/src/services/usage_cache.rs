@@ -97,6 +97,8 @@ mod tests {
             success: true,
             tiers: vec![],
             extra_usage: None,
+            reset_credits: None,
+            reset_credits_error: None,
             error: None,
             queried_at: Some(0),
         }
