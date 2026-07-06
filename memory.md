@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-07-06 Codex Usage Reset Credits Page Entry
+
+- 参考 `jordan-edai/codex-reset-watcher` 时，真正可复用的产品边界不是 macOS 菜单栏，而是跨平台的只读 Codex 用量面板：5 小时窗口、每周窗口、banked reset credits、到期紧迫度、部分明细失败提示和手动刷新。CCSwitchMulti 里不要把这类信息只藏在 provider footer。
+- 前端已新增 Codex 专属工具页 `src/components/codex/CodexUsagePage.tsx`，数据源复用 `useSubscriptionQuota("codex", true, true, 5)`，仍读取本机 Codex 登录状态，不兑换 reset、不修改账号、不新增平台限定逻辑。
+- 入口在主界面切到 Codex 后的顶部工具栏：`Codex 多模型路由` 图标旁边的 `Codex 用量与重置额度`（柱状图）按钮。`src/App.tsx` 的 `codexUsage` view 已加入 `VALID_VIEWS`，但切到非 Codex app 时会回退 providers，避免 Codex 专属工具跨 app 残留。
+- 回归覆盖：`tests/integration/App.test.tsx` 固定 Codex 工具栏入口能打开 `CodexUsagePage`；`src/components/codex/CodexUsagePage.test.tsx` 固定成功数据、banked reset credits、reset 明细部分失败和无凭据状态不会空白。
+
 ## 2026-07-06 Codex 127.0.0.1:15721 502 VPN/Proxy Boundary
 
 - 用户截图里的 `unexpected status 502 Bad Gateway: Unknown error, url: http://127.0.0.1:15721/v1/responses` 不能直接归因到 MultiRouter route miss。需要先区分两条边界：如果 `codex-router.log` 同时间没有 `route_resolved/request_prepared/upstream_send_error`，请求可能被 Codex Desktop 自身的系统代理/VPN/规则代理在到达 `127.0.0.1:15721` 前拦截；如果日志有 `upstream_send_error`，说明请求已进入 CC Switch，失败在 CC Switch 到真实上游的出站链路。

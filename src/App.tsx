@@ -113,6 +113,7 @@ import {
   isRoutingPlan,
   type WorkspaceTab,
 } from "@/components/codex/CodexRouterWorkspacePage";
+import { CodexUsagePage } from "@/components/codex/CodexUsagePage";
 import { CodexMultiRouterWizard } from "@/components/codex/CodexMultiRouterWizard";
 
 type View =
@@ -131,6 +132,7 @@ type View =
   | "openclawAgents"
   | "hermesMemory"
   | "codexRouter"
+  | "codexUsage"
   | "openaiApi";
 
 interface SyncStatusUpdatedPayload {
@@ -177,6 +179,8 @@ const VALID_VIEWS: View[] = [
   "openclawTools",
   "openclawAgents",
   "hermesMemory",
+  "codexRouter",
+  "codexUsage",
   "openaiApi",
 ];
 
@@ -224,6 +228,16 @@ function App() {
   useEffect(() => {
     localStorage.setItem(VIEW_STORAGE_KEY, currentView);
   }, [currentView]);
+
+  // Codex 专属工具页只在 Codex 应用语境下保留，避免切到其他应用后还停留在 Codex 工具。
+  useEffect(() => {
+    if (
+      activeApp !== "codex" &&
+      (currentView === "codexRouter" || currentView === "codexUsage")
+    ) {
+      setCurrentView("providers");
+    }
+  }, [activeApp, currentView]);
 
   const { data: settingsData } = useSettingsQuery();
   const useAppWindowControls =
@@ -1147,6 +1161,8 @@ function App() {
               onRuntimeReady={handleCodexMultiRouterReady}
             />
           );
+        case "codexUsage":
+          return <CodexUsagePage />;
         case "skills":
           return (
             <UnifiedSkillsPanel
@@ -1441,6 +1457,7 @@ function App() {
                     t("openclaw.agents.title")}
                   {currentView === "hermesMemory" && t("hermes.memory.title")}
                   {currentView === "codexRouter" && "Codex 多模型路由"}
+                  {currentView === "codexUsage" && "Codex 用量与重置额度"}
                   {currentView === "openaiApi" && "第三方 Agent API"}
                 </h1>
               </div>
@@ -1752,17 +1769,28 @@ function App() {
                           ) : (
                             <>
                               {activeApp === "codex" && (
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={() =>
-                                    openCodexRouterWorkspace(null, "status")
-                                  }
-                                  className="text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5 w-8 px-2"
-                                  title="Codex 多模型路由"
-                                >
-                                  <RouteIcon className="w-4 h-4" />
-                                </Button>
+                                <>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() =>
+                                      openCodexRouterWorkspace(null, "status")
+                                    }
+                                    className="text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5 w-8 px-2"
+                                    title="Codex 多模型路由"
+                                  >
+                                    <RouteIcon className="w-4 h-4" />
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => setCurrentView("codexUsage")}
+                                    className="text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5 w-8 px-2"
+                                    title="Codex 用量与重置额度"
+                                  >
+                                    <BarChart2 className="w-4 h-4" />
+                                  </Button>
+                                </>
                               )}
                               <Button
                                 variant="ghost"
