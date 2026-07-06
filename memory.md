@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-07-06 Codex Temperature Default Boundary
+
+- 本轮排查的结论是不要在 CCSwitchMulti 收到 Codex `/v1/responses` 请求缺省 `temperature` 时全局补 `temperature=0`。外部检索和代码链路都显示：OpenAI Chat/Responses 的 `temperature` 是可选参数；GPT-5/o3 等 reasoning 模型公开反馈更多是“传了非默认 temperature 会 400”；Kimi/Roo-Code 反馈则是 `kimi-for-coding` 需要固定 `temperature=0.6`，默认补 0 反而会失败。因此“缺省补 0”不是通用修复。
+- official Codex OAuth 路径必须继续不带 temperature：`src-tauri/src/proxy/providers/openai_compat.rs::normalize_codex_oauth_responses_request` 会删除 `temperature/top_p/max_output_tokens`，`src-tauri/src/proxy/providers/transform_responses.rs` 也在 `is_codex_oauth=true` 时删除这些字段；这是因为 ChatGPT Codex 反代后端不接受这些公开 OpenAI API sampling 字段。
+- 第三方 Chat Completions 转换路径 `src-tauri/src/proxy/providers/transform_codex_chat.rs::responses_to_chat_completions_with_reasoning_text_only_and_cache` 的正确规则是：请求里已有 `temperature` 才透传；缺省时不自动补。若后续某个 provider/model 确认必须固定 temperature，应通过 provider/model 级 override 或显式配置注入特定值，而不是全局默认。
+- 回归护栏：`responses_request_without_temperature_does_not_default_temperature` 固定缺省不补；`responses_request_with_temperature_preserves_explicit_temperature` 固定显式值原样透传。后续若要改 temperature 策略，必须同时考虑 OpenAI reasoning 模型拒绝该字段和 Kimi coding 固定 0.6 这两个反例。
+
 ## 2026-07-06 CCSwitchMulti v3.16.4-14 GitHub Release Verification
 
 - `v3.16.4-14` 已作为 `BigStrongSun/ccswitchmulti` 正式 release 发布：`https://github.com/BigStrongSun/ccswitchmulti/releases/tag/v3.16.4-14`。Release 为 `draft=false`、`prerelease=false`，GitHub latest API 返回 `tag_name=v3.16.4-14`，发布时间为 `2026-07-06T03:04:19Z`。

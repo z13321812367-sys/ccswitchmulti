@@ -1991,6 +1991,39 @@ mod tests {
     }
 
     #[test]
+    fn responses_request_without_temperature_does_not_default_temperature() {
+        // OpenAI-compatible 上游对 temperature 的约束不一致：OpenAI reasoning/GPT-5
+        // 类模型可能拒绝该字段，Kimi coding 类模型又可能要求非 0 固定值。
+        // 因此 Codex 缺省不带 temperature 时，转换层必须保持缺省，让上游或用户配置决定。
+        let input = json!({
+            "model": "kimi-k2.6",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+
+        assert!(
+            result.get("temperature").is_none(),
+            "缺省 temperature 不能被自动补成 0 或其它值"
+        );
+    }
+
+    #[test]
+    fn responses_request_with_temperature_preserves_explicit_temperature() {
+        // 用户或 provider override 显式给出的 temperature 代表有意的上游参数，
+        // 转换层只负责忠实透传，不改写为自己的默认值。
+        let input = json!({
+            "model": "qwen3.5-coder",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+            "temperature": 0.6
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+
+        assert_eq!(result["temperature"], json!(0.6));
+    }
+
+    #[test]
     fn responses_request_merges_include_usage_into_existing_stream_options() {
         let input = json!({
             "model": "kimi-k2.6",
