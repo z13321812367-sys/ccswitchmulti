@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-07-08 CCSwitchMulti Release Asset Name Branding Repair
+
+- 用户问“为什么最新的 release 里应用名的 multi 没了”。事实边界：GitHub latest release `v3.16.4-15` 的标题是 `CCSwitchMulti v3.16.4-15`，但远端资产名和下载说明是 `CC-Switch-v3.16.4-15-*`；本地固定目录 `C:\Users\sunda\Documents\LLMservice\最新版ccswitchmulti` 的 Windows 导出仍是 `CCSwitchMulti_3.16.4-15_x64-setup.exe`。
+- 根因不在 Tauri 产品配置：`v3.16.4-15` 的 `src-tauri/tauri.conf.json` 仍为 `productName: "CCSwitchMulti"`、`identifier: "com.ccswitchmulti.desktop"`，`package.json` 仍为 `cc-switch-multi`。根因在 `.github/workflows/release.yml` 的 release stage 手写资产重命名模板，沿用了上游 `CC-Switch-${VERSION}-...`、`CC Switch.app` 和 `CC Switch` DMG volname。
+- 历史修复分支 `d78622ed chore: update release asset names` 只存在于 `fork/codex/codex-icon-refresh`，不是 `main` 祖先。不要直接 cherry-pick 它的全部内容，因为它把 Windows portable 搜索路径改为 `ccswitchmulti.exe`；当前 Cargo/Tauri 内部二进制名仍是 `cc-switch.exe`，正确做法是从 `cc-switch.exe` 复制，但在 portable zip 内重命名为 `CCSwitchMulti.exe`。
+- 本次修复把 GitHub workflow 的 macOS tar/zip/dmg、DMG stage app/volname、Windows setup/MSI/portable、Linux AppImage/deb/rpm、release body 下载说明全部改成 `CCSwitchMulti-*` 外显命名；同时把 `src/i18n/locales/{en,ja,zh,zh-TW}.json` 顶层 `app.title` 改成 `CCSwitchMulti`，修掉窗口/document 标题的旧品牌残留。
+- 验证通过：Prettier check 覆盖 workflow 和四个 locale、PowerShell `ConvertFrom-Json` 解析四个 locale、`pnpm typecheck`、`git diff --check`，以及 `rg 'CC-Switch|CC Switch' .github/workflows/release.yml` 无旧 release 外显命名残留。本机没有 `actionlint`，所以未做 workflow actionlint 验证。
+
 ## 2026-07-08 Codex Subagent Official Token Zero Repair
 
 - 用户反馈 MultiRouter 的“今日子 Agent 会话流量”里 official/gpt 模型 token 没统计进去或显示 0。根因在 `src-tauri/src/services/usage_stats.rs::build_codex_subagent_usage_stats_from_history`：统计先聚合 `_codex_session` 数据库行，旧逻辑只有在某个子 Agent 完全没有 DB 用量行时才回退解析 rollout JSONL。official Codex OAuth/proxy 行可能已经有请求数但 token 字段全为 0，于是回退被阻断，真实 `token_count` 里的累计 token 没进入子 Agent 表。
