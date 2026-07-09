@@ -12,6 +12,7 @@
 - Codex Desktop、Codex CLI 和 app-server 要分层处理：大写 `Codex.exe` 是 Desktop/Electron shell，用于 renderer/CDP 模型菜单解锁；小写 `codex.exe` 是 CLI/app-server，`codex app-server` 是 JSON-RPC 协议服务，不能当成 Desktop renderer 可执行文件。
 - CLI catalog 验证和 Desktop 模型菜单解锁是两条路径：`codex debug models` / `/v1/models` 用来证明 CLI 或 app-server 能看到原始模型目录；Desktop 菜单仍可能被 renderer/Statsig/React cache 过滤，需要 CDP 注入白名单。修 issue #10 时两边都要看，但不要把 CLI 成功等同于 Desktop 菜单已解锁。
 - Codex Desktop 自动发现应由后端完成：优先复用正在运行的大写 `Codex.exe`，再通过 WindowsApps 包目录和 `Get-AppxPackage -Name OpenAI.Codex` 的 `InstallLocation` 查找 MSIX 安装位置；错误文案必须明确提示安装/启动 Codex Windows app，并说明 CLI/app-server `codex.exe` 不能解锁 Desktop renderer。
+- API Key 登录不会让 MultiRouter 路由或 CDP 注入本身失效：第三方 key 应放在 provider-scoped `config.toml` token/本地代理占位符里，`auth.json` 的 ChatGPT OAuth 登录态应被保留；接管生成的本地 provider 继续带 `requires_openai_auth=true`，注入脚本还会把 renderer auth context 临时修成 `chatgpt`。但如果用户从未有官方 ChatGPT/OAuth 登录态，或 Codex Desktop 后续登录/刷新重建 renderer 状态，原生模型菜单仍可能重新回到“自定义”，需要完全退出 Desktop 后再次点“解锁模型菜单”。不要把这种展示层回退误判成上游 API Key 不能中转。
 
 ## 2026-07-09 OpenClaw Default Model Catalog Canonicalization
 
