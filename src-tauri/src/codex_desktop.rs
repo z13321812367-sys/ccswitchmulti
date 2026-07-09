@@ -61,6 +61,24 @@ struct CdpTarget {
 /// - 若发现已开放 CDP 的 Codex renderer，会注入本地脚本；
 /// - 若未发现 CDP 且 Codex 未运行，会以 remote debugging 参数启动 Codex。
 pub async fn unlock_codex_model_picker() -> Result<CodexModelPickerUnlockResult, String> {
+    unlock_codex_model_picker_with_executable(None).await
+}
+
+/// 使用调用方提供的 Codex Desktop 可执行文件路径尝试解锁模型菜单。
+///
+/// 便携版 zip 不一定在 WindowsApps 或 `%LOCALAPPDATA%\OpenAI\Codex` 下；前端可以先
+/// 从普通运行中的 Codex 进程记住 `Codex.exe`，或让用户手动选择该路径，再走这里启动。
+pub async fn unlock_codex_model_picker_with_executable_path(
+    executable: PathBuf,
+) -> Result<CodexModelPickerUnlockResult, String> {
+    let executable = validate_codex_desktop_executable_path(executable)?;
+    unlock_codex_model_picker_with_executable(Some(executable)).await
+}
+
+/// 共用模型菜单解锁流程；显式路径只替换 Desktop 启动位置，CDP 探测与注入逻辑保持一致。
+async fn unlock_codex_model_picker_with_executable(
+    explicit_executable: Option<PathBuf>,
+) -> Result<CodexModelPickerUnlockResult, String> {
     let catalog = load_cc_switch_model_catalog_projection()?;
     let attempted_ports = candidate_debug_ports(DEFAULT_CODEX_DEBUG_PORT);
 
@@ -85,7 +103,8 @@ pub async fn unlock_codex_model_picker() -> Result<CodexModelPickerUnlockResult,
         });
     }
 
-    let executable = resolve_codex_executable()
+    let executable = explicit_executable
+        .or_else(resolve_codex_executable)
         .ok_or_else(|| "Codex Desktop executable was not found".to_string())?;
     launch_codex_with_debug_port(&executable, DEFAULT_CODEX_DEBUG_PORT)?;
 
@@ -836,6 +855,32 @@ fn resolve_codex_executable() -> Option<PathBuf> {
         .or_else(find_latest_windows_codex_executable)
 }
 
+/// 校验用户选择或前端记住的 Desktop 可执行文件，避免把 CLI/app-server `codex.exe` 当成 Electron 主程序。
+fn validate_codex_desktop_executable_path(path: PathBuf) -> Result<PathBuf, String> {
+    if !path.exists() {
+        return Err(format!(
+            "Selected Codex Desktop executable does not exist: {}",
+            path.display()
+        ));
+    }
+    if !path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "Codex.exe")
+    {
+        return Err(format!(
+            "Selected file is not Codex Desktop's Codex.exe: {}",
+            path.display()
+        ));
+    }
+    path.canonicalize().map_err(|error| {
+        format!(
+            "Failed to resolve selected Codex Desktop executable {}: {error}",
+            path.display()
+        )
+    })
+}
+
 /// 在 WindowsApps 中选择版本最新的 Codex Desktop。
 #[cfg(target_os = "windows")]
 fn find_latest_windows_codex_executable() -> Option<PathBuf> {
@@ -991,6 +1036,23 @@ mod tests {
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name == "codex.exe")
         }));
+    }
+
+    #[test]
+    fn selected_codex_desktop_executable_must_be_desktop_binary() {
+        let desktop_dir = tempfile::tempdir().expect("create desktop temp dir");
+        let desktop = desktop_dir.path().join("Codex.exe");
+        std::fs::write(&desktop, "").expect("write desktop exe");
+        let resolved = validate_codex_desktop_executable_path(desktop.clone())
+            .expect("uppercase Desktop Codex.exe should be accepted");
+        assert!(resolved.ends_with("Codex.exe"));
+
+        let cli_dir = tempfile::tempdir().expect("create cli temp dir");
+        let cli = cli_dir.path().join("codex.exe");
+        std::fs::write(&cli, "").expect("write cli exe");
+        let error = validate_codex_desktop_executable_path(cli)
+            .expect_err("lowercase CLI codex.exe should be rejected");
+        assert!(error.contains("not Codex Desktop"));
     }
 
     #[test]

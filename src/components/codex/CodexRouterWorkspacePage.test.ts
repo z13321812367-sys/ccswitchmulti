@@ -31,6 +31,14 @@ const requestLogsFixture = vi.hoisted(() => ({
   },
 }));
 
+const dialogFixture = vi.hoisted(() => ({
+  open: vi.fn(),
+}));
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: dialogFixture.open,
+}));
+
 vi.mock("@/lib/api/proxy", () => ({
   proxyApi: {
     getGlobalProxyConfig: vi.fn().mockResolvedValue({
@@ -131,7 +139,9 @@ function createCodexProxyLog(overrides: Partial<RequestLog> = {}): RequestLog {
 
 beforeEach(() => {
   requestLogsFixture.value = { data: [], isLoading: false };
+  window.localStorage.removeItem("ccswitch.codexDesktopExecutablePath");
   vi.mocked(fetchModelsForConfig).mockReset();
+  dialogFixture.open.mockReset();
   vi.mocked(proxyApi.unlockCodexModelPicker).mockReset();
   vi.mocked(providersApi.add).mockResolvedValue(true);
   vi.mocked(providersApi.update).mockResolvedValue(true);
@@ -2139,6 +2149,161 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         "模型菜单仍只显示“自定义”时，先完全退出 Codex Desktop，再点击“解锁模型菜单”。",
       ),
     ).not.toBeInTheDocument();
+  });
+
+  it("remembers the detected portable Codex.exe path for the next unlock attempt", async () => {
+    const source: Provider = {
+      id: "codex-portable-unlock-source",
+      name: "Portable Unlock Source",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "portable-model" }],
+        },
+      },
+    };
+    const plan = createDraftRoutingPlan([source], [source]);
+    const codexExecutable = "C:\\Tools\\CodexPortable\\Codex.exe";
+    vi.mocked(proxyApi.unlockCodexModelPicker)
+      .mockResolvedValueOnce({
+        attemptedPorts: [9229],
+        debugPort: null,
+        targetId: null,
+        targetTitle: null,
+        targetUrl: null,
+        modelCount: 1,
+        modelNames: ["portable-model"],
+        injected: false,
+        launched: false,
+        codexExecutable,
+        message:
+          "Codex Desktop is already running without an injectable CDP port.",
+      })
+      .mockResolvedValueOnce({
+        attemptedPorts: [9229],
+        debugPort: 9229,
+        targetId: "portable-target",
+        targetTitle: "Codex",
+        targetUrl: "app://codex",
+        modelCount: 1,
+        modelNames: ["portable-model"],
+        injected: true,
+        launched: true,
+        codexExecutable,
+        message: "Codex Desktop model picker whitelist patch was injected.",
+      });
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [source, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "status",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "解锁模型菜单" }));
+
+    await waitFor(() =>
+      expect(screen.getByText("模型菜单白名单尚未注入")).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/已记住 Codex\.exe 路径/)).toBeInTheDocument();
+    expect(
+      window.localStorage.getItem("ccswitch.codexDesktopExecutablePath"),
+    ).toBe(codexExecutable);
+
+    await user.click(screen.getByRole("button", { name: "解锁模型菜单" }));
+
+    await waitFor(() =>
+      expect(proxyApi.unlockCodexModelPicker).toHaveBeenNthCalledWith(
+        2,
+        codexExecutable,
+      ),
+    );
+    expect(screen.getByText("模型菜单白名单已注入")).toBeInTheDocument();
+  });
+
+  it("lets users select a portable Codex.exe after unlock cannot auto-locate Desktop", async () => {
+    const source: Provider = {
+      id: "codex-portable-select-source",
+      name: "Portable Select Source",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "selected-portable-model" }],
+        },
+      },
+    };
+    const plan = createDraftRoutingPlan([source], [source]);
+    const selectedExecutable = "C:\\PortableApps\\Codex\\Codex.exe";
+    vi.mocked(proxyApi.unlockCodexModelPicker)
+      .mockRejectedValueOnce(
+        new Error("Codex Desktop executable was not found"),
+      )
+      .mockResolvedValueOnce({
+        attemptedPorts: [9229],
+        debugPort: 9229,
+        targetId: "selected-portable-target",
+        targetTitle: "Codex",
+        targetUrl: "app://codex",
+        modelCount: 1,
+        modelNames: ["selected-portable-model"],
+        injected: true,
+        launched: true,
+        codexExecutable: selectedExecutable,
+        message: "Codex Desktop model picker whitelist patch was injected.",
+      });
+    dialogFixture.open.mockResolvedValueOnce(selectedExecutable);
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [source, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "status",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "解锁模型菜单" }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/模型菜单解锁失败/)).toBeInTheDocument(),
+    );
+    expect(
+      window.localStorage.getItem("ccswitch.codexDesktopExecutablePath"),
+    ).toBeNull();
+
+    await user.click(
+      screen.getByRole("button", { name: "选择 Codex.exe 后解锁" }),
+    );
+
+    await waitFor(() =>
+      expect(proxyApi.unlockCodexModelPicker).toHaveBeenNthCalledWith(
+        2,
+        selectedExecutable,
+      ),
+    );
+    expect(dialogFixture.open).toHaveBeenCalledWith({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "Codex Desktop", extensions: ["exe"] }],
+    });
+    expect(
+      window.localStorage.getItem("ccswitch.codexDesktopExecutablePath"),
+    ).toBe(selectedExecutable);
+    expect(screen.getByText("模型菜单白名单已注入")).toBeInTheDocument();
   });
 
   // onRuntimeReady 负向测试：即使最近一条 Codex 代理日志成功，只要它没有命中当前
