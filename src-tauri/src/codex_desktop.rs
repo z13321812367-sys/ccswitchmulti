@@ -15,8 +15,6 @@ const CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
 const MODEL_PICKER_PATCH_KEY: &str = "__ccSwitchCodexModelPickerUnlockV3";
 const REMEMBERED_CODEX_DESKTOP_EXECUTABLE_FILENAME: &str = "codex-desktop-executable.json";
-const CODEX_DESKTOP_EXECUTABLE_NOT_FOUND_MESSAGE: &str = "Codex Desktop executable was not found. CCSwitchMulti checked the running Desktop process, remembered Desktop path, MSIX/Appx package metadata and manifest, App Paths registry entries, PATH commands, and common local install folders. Install or start the Codex Windows app once. The Desktop menu unlock flow will not launch CLI/app-server codex.exe as an Electron shell; Codex CLI/app-server is still supported through live config.toml, model_catalog_json, the local /v1/models endpoint, and MultiRouter request routing.";
-
 /// Codex Desktop 模型菜单解锁命令的执行结果。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -94,8 +92,8 @@ pub async fn unlock_codex_model_picker() -> Result<CodexModelPickerUnlockResult,
         });
     }
 
-    let executable = resolve_codex_executable()
-        .ok_or_else(|| CODEX_DESKTOP_EXECUTABLE_NOT_FOUND_MESSAGE.to_string())?;
+    let executable =
+        resolve_codex_executable().ok_or_else(codex_desktop_executable_not_found_message)?;
     launch_codex_with_debug_port(&executable, DEFAULT_CODEX_DEBUG_PORT)?;
 
     let mut last_result = None;
@@ -140,6 +138,22 @@ pub async fn unlock_codex_model_picker() -> Result<CodexModelPickerUnlockResult,
         message: "Codex was launched, but no injectable renderer target appeared before timeout."
             .to_string(),
     }))
+}
+
+/// 返回当前平台的 Desktop 可执行文件发现失败说明，避免 Windows-only 文案误导 macOS/Linux 用户。
+fn codex_desktop_executable_not_found_message() -> String {
+    let platform_sources = if cfg!(target_os = "windows") {
+        "running Desktop process, remembered Desktop path, MSIX/Appx package metadata and manifest, App Paths registry entries, PATH commands, and common local install folders"
+    } else if cfg!(target_os = "macos") {
+        "running Desktop process, remembered Desktop path, /Applications, ~/Applications, and Spotlight-discovered Codex.app bundles"
+    } else if cfg!(target_os = "linux") {
+        "running Desktop process, remembered Desktop path, PATH entries for Codex/Codex.AppImage, .desktop entries with absolute Exec paths, and common AppImage or /opt install folders"
+    } else {
+        "running Desktop process, remembered Desktop path, and platform-specific install folders"
+    };
+    format!(
+        "Codex Desktop executable was not found. CCSwitchMulti checked {platform_sources}. Install or start the Codex Desktop app once. The Desktop menu unlock flow will not launch CLI/app-server codex as an Electron shell; Codex CLI/app-server is still supported through live config.toml, model_catalog_json, the local /v1/models endpoint, and MultiRouter request routing."
+    )
 }
 
 /// 从 cc-switch 生成的 catalog 中读取模型名和 renderer 需要的最小描述。
@@ -791,12 +805,20 @@ fn launch_codex_with_debug_port(executable: &Path, debug_port: u16) -> Result<()
             running.display()
         ));
     }
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(bundle) = macos_codex_bundle_for_executable(executable) {
+            let mut command = Command::new("open");
+            command.arg(bundle).arg("--args");
+            append_codex_debug_args(&mut command, debug_port);
+            return command
+                .spawn()
+                .map(|_| ())
+                .map_err(|error| format!("failed to launch {}: {error}", executable.display()));
+        }
+    }
     let mut command = Command::new(executable);
-    command
-        .arg(format!("--remote-debugging-port={debug_port}"))
-        .arg(format!(
-            "--remote-allow-origins=http://127.0.0.1:{debug_port}"
-        ));
+    append_codex_debug_args(&mut command, debug_port);
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -806,6 +828,15 @@ fn launch_codex_with_debug_port(executable: &Path, debug_port: u16) -> Result<()
         .spawn()
         .map(|_| ())
         .map_err(|error| format!("failed to launch {}: {error}", executable.display()))
+}
+
+/// 为 Desktop 启动命令追加 Chromium remote-debugging 参数。
+fn append_codex_debug_args(command: &mut Command, debug_port: u16) {
+    command
+        .arg(format!("--remote-debugging-port={debug_port}"))
+        .arg(format!(
+            "--remote-allow-origins=http://127.0.0.1:{debug_port}"
+        ));
 }
 
 /// Windows 下查找 Codex Desktop 主进程的脚本。
@@ -839,7 +870,17 @@ fn detect_running_codex_main_process() -> Option<PathBuf> {
         }
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        detect_running_macos_codex_main_process()
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        detect_running_linux_codex_main_process()
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
         None
     }
@@ -851,7 +892,30 @@ fn resolve_codex_executable() -> Option<PathBuf> {
         .filter(|path| path.exists())
         .and_then(|path| remember_codex_desktop_executable(&path).ok().or(Some(path)))
         .or_else(read_remembered_codex_desktop_executable)
-        .or_else(find_latest_windows_codex_executable)
+        .or_else(find_platform_codex_executable)
+}
+
+/// 按当前操作系统查找 Codex Desktop 主程序，避免把 CLI 路径混进 Desktop/CDP 解锁链路。
+fn find_platform_codex_executable() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        find_latest_windows_codex_executable()
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        find_macos_codex_executable()
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        find_linux_codex_executable()
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
 }
 
 /// 存储最近确认过的大写 `Codex.exe` 路径，支持 Desktop 不在常见安装目录的场景。
@@ -859,7 +923,31 @@ fn remembered_codex_desktop_executable_path() -> PathBuf {
     crate::config::get_app_config_dir().join(REMEMBERED_CODEX_DESKTOP_EXECUTABLE_FILENAME)
 }
 
-/// 校验 Desktop 主程序路径，避免把小写 CLI/app-server `codex.exe` 当成 Electron shell。
+/// 判断路径文件名是否是当前平台的 Desktop shell，而不是小写 CLI/app-server。
+#[cfg(target_os = "windows")]
+fn is_codex_desktop_executable_name(name: &str) -> bool {
+    name == "Codex.exe"
+}
+
+/// 判断路径文件名是否是当前平台的 Desktop shell，而不是小写 CLI/app-server。
+#[cfg(target_os = "macos")]
+fn is_codex_desktop_executable_name(name: &str) -> bool {
+    name == "Codex"
+}
+
+/// 判断路径文件名是否是当前平台的 Desktop shell，而不是小写 CLI/app-server。
+#[cfg(target_os = "linux")]
+fn is_codex_desktop_executable_name(name: &str) -> bool {
+    name == "Codex" || (name.starts_with("Codex") && name.ends_with(".AppImage"))
+}
+
+/// 判断路径文件名是否是当前平台的 Desktop shell，而不是小写 CLI/app-server。
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn is_codex_desktop_executable_name(_name: &str) -> bool {
+    false
+}
+
+/// 校验 Desktop 主程序路径，避免把小写 CLI/app-server `codex` 当成 Electron shell。
 ///
 /// 这不是禁用 CLI 支持；CLI/app-server 修复走 `config.toml`、`model_catalog_json`
 /// 和 `/v1/models`，而不是 Desktop renderer 的 CDP 注入入口。
@@ -873,10 +961,10 @@ fn canonical_codex_desktop_executable_path(path: &Path) -> Result<PathBuf, Strin
     if !path
         .file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| name == "Codex.exe")
+        .is_some_and(is_codex_desktop_executable_name)
     {
         return Err(format!(
-            "Detected file is not Codex Desktop's Codex.exe: {}",
+            "Detected file is not Codex Desktop's platform shell executable: {}",
             path.display()
         ));
     }
@@ -888,7 +976,7 @@ fn canonical_codex_desktop_executable_path(path: &Path) -> Result<PathBuf, Strin
     })
 }
 
-/// 读取上次从运行中 Desktop 捕获到的 portable `Codex.exe` 路径。
+/// 读取上次从运行中 Desktop 捕获到的已校验主程序路径。
 fn read_remembered_codex_desktop_executable() -> Option<PathBuf> {
     read_remembered_codex_desktop_executable_from(&remembered_codex_desktop_executable_path())
 }
@@ -931,6 +1019,248 @@ fn remember_codex_desktop_executable_at(
         )
     })?;
     Ok(executable)
+}
+
+/// macOS 上通过 System Events 找到运行中的 Codex.app，再解析 bundle 内部二进制。
+#[cfg(target_os = "macos")]
+fn detect_running_macos_codex_main_process() -> Option<PathBuf> {
+    let script = r#"
+tell application "System Events"
+  set matches to application processes whose name is "Codex"
+  if (count of matches) is 0 then return ""
+  try
+    return POSIX path of (application file of item 1 of matches)
+  end try
+end tell
+"#;
+    if let Some(bundle) = command_stdout_trimmed(Command::new("osascript").arg("-e").arg(script))
+        .filter(|path| !path.is_empty())
+    {
+        let executable = macos_codex_bundle_executable(Path::new(&bundle));
+        if let Ok(executable) = canonical_codex_desktop_executable_path(&executable) {
+            return Some(executable);
+        }
+    }
+
+    let mut saw_codex_process = false;
+    for pid in command_stdout_lines(Command::new("pgrep").args(["-x", "Codex"])) {
+        saw_codex_process = true;
+        let path = command_stdout_trimmed(Command::new("ps").args(["-p", &pid, "-o", "comm="]));
+        let Some(path) = path.filter(|path| !path.is_empty()) else {
+            continue;
+        };
+        if let Ok(executable) = canonical_codex_desktop_executable_path(Path::new(&path)) {
+            return Some(executable);
+        }
+    }
+    if saw_codex_process {
+        return find_macos_codex_executable();
+    }
+    None
+}
+
+/// Linux 上通过 `/proc/<pid>/exe` 找到运行中的大写 Desktop/AppImage 主进程。
+#[cfg(target_os = "linux")]
+fn detect_running_linux_codex_main_process() -> Option<PathBuf> {
+    let entries = std::fs::read_dir("/proc").ok()?;
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(pid) = file_name
+            .to_str()
+            .filter(|pid| pid.as_bytes().iter().all(|byte| byte.is_ascii_digit()))
+        else {
+            continue;
+        };
+        let Ok(executable) = std::fs::read_link(Path::new("/proc").join(pid).join("exe")) else {
+            continue;
+        };
+        if let Ok(executable) = canonical_codex_desktop_executable_path(&executable) {
+            return Some(executable);
+        }
+    }
+    None
+}
+
+/// 查找 macOS 常见 Codex.app 安装位置和 Spotlight 索引结果。
+#[cfg(target_os = "macos")]
+fn find_macos_codex_executable() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    for bundle in macos_codex_common_bundle_candidates() {
+        push_codex_desktop_executable_candidate(
+            &mut candidates,
+            Vec::new(),
+            macos_codex_bundle_executable(&bundle),
+        );
+    }
+    for bundle in command_stdout_lines(
+        Command::new("mdfind")
+            .arg("kMDItemFSName == 'Codex.app' || kMDItemCFBundleIdentifier == 'com.openai.codex'"),
+    ) {
+        push_codex_desktop_executable_candidate(
+            &mut candidates,
+            Vec::new(),
+            macos_codex_bundle_executable(Path::new(&bundle)),
+        );
+    }
+
+    candidates.pop().map(|(_, executable)| executable)
+}
+
+/// macOS 常见应用目录候选，覆盖系统级和用户级安装。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn macos_codex_common_bundle_candidates() -> Vec<PathBuf> {
+    let mut bundles = vec![PathBuf::from("/Applications/Codex.app")];
+    if let Some(home) = std::env::var_os("HOME") {
+        bundles.push(PathBuf::from(home).join("Applications").join("Codex.app"));
+    }
+    bundles
+}
+
+/// 从 macOS `.app` bundle 路径推导 Desktop 主二进制路径。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn macos_codex_bundle_executable(bundle: &Path) -> PathBuf {
+    bundle.join("Contents").join("MacOS").join("Codex")
+}
+
+/// 如果路径位于 Codex.app 内部，返回对应 bundle 路径，便于使用 macOS `open` 启动。
+#[cfg(target_os = "macos")]
+fn macos_codex_bundle_for_executable(executable: &Path) -> Option<PathBuf> {
+    let mut current = executable.parent();
+    while let Some(path) = current {
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == "Codex.app")
+        {
+            return Some(path.to_path_buf());
+        }
+        current = path.parent();
+    }
+    None
+}
+
+/// 查找 Linux 常见 Desktop/AppImage 安装位置，避免把小写 CLI `codex` 当成 Desktop。
+#[cfg(target_os = "linux")]
+fn find_linux_codex_executable() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    for binary in ["Codex", "Codex.AppImage"] {
+        for path in command_stdout_lines(Command::new("which").args(["-a", binary])) {
+            push_codex_desktop_executable_candidate(
+                &mut candidates,
+                Vec::new(),
+                PathBuf::from(path),
+            );
+        }
+    }
+    for path in linux_codex_common_executable_candidates() {
+        push_codex_desktop_executable_candidate(&mut candidates, Vec::new(), path);
+    }
+    for path in linux_desktop_entry_executable_candidates() {
+        push_codex_desktop_executable_candidate(&mut candidates, Vec::new(), path);
+    }
+
+    candidates.pop().map(|(_, executable)| executable)
+}
+
+/// Linux 常见安装目录候选，覆盖 PATH 之外的 AppImage 和 `/opt` 安装。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_codex_common_executable_candidates() -> Vec<PathBuf> {
+    let mut paths = vec![
+        PathBuf::from("/usr/local/bin/Codex"),
+        PathBuf::from("/usr/bin/Codex"),
+        PathBuf::from("/opt/Codex/Codex"),
+        PathBuf::from("/opt/OpenAI/Codex/Codex"),
+    ];
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        paths.extend([
+            home.join(".local").join("bin").join("Codex"),
+            home.join(".local").join("bin").join("Codex.AppImage"),
+            home.join("Applications").join("Codex"),
+            home.join("Applications").join("Codex.AppImage"),
+        ]);
+    }
+    paths
+}
+
+/// 从 Linux `.desktop` 文件中提取绝对路径 Exec 候选。
+#[cfg(target_os = "linux")]
+fn linux_desktop_entry_executable_candidates() -> Vec<PathBuf> {
+    let mut roots = vec![PathBuf::from("/usr/share/applications")];
+    if let Some(home) = std::env::var_os("HOME") {
+        roots.push(
+            PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join("applications"),
+        );
+    }
+
+    let mut candidates = Vec::new();
+    for root in roots {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.to_ascii_lowercase().contains("codex"))
+            {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            candidates.extend(
+                linux_desktop_entry_exec_values(&text)
+                    .into_iter()
+                    .map(PathBuf::from),
+            );
+        }
+    }
+    candidates
+}
+
+/// 解析 `.desktop` 文件中的绝对路径 Exec 值，忽略 flatpak/snap 包装命令。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_desktop_entry_exec_values(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| line.strip_prefix("Exec="))
+        .filter_map(|exec| exec.split_whitespace().next())
+        .filter(|path| path.starts_with('/'))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+/// 运行命令并返回非空输出行，供平台探测脚本复用。
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn command_stdout_lines(command: &mut Command) -> Vec<String> {
+    command_stdout_trimmed(command)
+        .map(|text| {
+            text.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 运行命令并返回去空白后的标准输出，命令失败时按无结果处理。
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn command_stdout_trimmed(command: &mut Command) -> Option<String> {
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 /// 在 WindowsApps 中选择版本最新的 Codex Desktop。
@@ -1276,6 +1606,24 @@ fn version_tuple_from_package_name(name: &str) -> Vec<u32> {
 mod tests {
     use super::*;
 
+    /// 返回当前测试平台的 Desktop 主程序文件名。
+    fn desktop_test_executable_name() -> &'static str {
+        if cfg!(target_os = "windows") {
+            "Codex.exe"
+        } else {
+            "Codex"
+        }
+    }
+
+    /// 返回当前测试平台应被拒绝的小写 CLI/app-server 文件名。
+    fn cli_test_executable_name() -> &'static str {
+        if cfg!(target_os = "windows") {
+            "codex.exe"
+        } else {
+            "codex"
+        }
+    }
+
     #[test]
     fn catalog_projection_accepts_model_and_slug_fields() {
         let value = json!({
@@ -1313,13 +1661,12 @@ mod tests {
     /// 验证 Desktop 可执行文件缺失时，错误信息不会被误读成不支持 CLI/app-server。
     #[test]
     fn desktop_executable_missing_message_preserves_cli_support_boundary() {
-        assert!(CODEX_DESKTOP_EXECUTABLE_NOT_FOUND_MESSAGE.contains("Desktop menu unlock flow"));
-        assert!(CODEX_DESKTOP_EXECUTABLE_NOT_FOUND_MESSAGE
-            .contains("will not launch CLI/app-server codex.exe as an Electron shell"));
-        assert!(CODEX_DESKTOP_EXECUTABLE_NOT_FOUND_MESSAGE
-            .contains("Codex CLI/app-server is still supported"));
-        assert!(CODEX_DESKTOP_EXECUTABLE_NOT_FOUND_MESSAGE.contains("model_catalog_json"));
-        assert!(CODEX_DESKTOP_EXECUTABLE_NOT_FOUND_MESSAGE.contains("/v1/models"));
+        let message = codex_desktop_executable_not_found_message();
+        assert!(message.contains("Desktop menu unlock flow"));
+        assert!(message.contains("will not launch CLI/app-server codex as an Electron shell"));
+        assert!(message.contains("Codex CLI/app-server is still supported"));
+        assert!(message.contains("model_catalog_json"));
+        assert!(message.contains("/v1/models"));
     }
 
     #[test]
@@ -1394,21 +1741,21 @@ mod tests {
         assert!(version_tuple_from_package_name("Other.Package.Without.Version").is_empty());
     }
 
-    /// 验证只接受大写 Desktop shell，避免把 CLI/app-server `codex.exe` 用于 renderer 解锁。
+    /// 验证只接受平台 Desktop shell，避免把 CLI/app-server `codex` 用于 renderer 解锁。
     #[test]
     fn codex_desktop_executable_validation_rejects_cli_launcher() {
         let desktop_dir = tempfile::tempdir().expect("create desktop temp dir");
-        let desktop = desktop_dir.path().join("Codex.exe");
+        let desktop = desktop_dir.path().join(desktop_test_executable_name());
         std::fs::write(&desktop, "").expect("write desktop exe");
         let resolved = canonical_codex_desktop_executable_path(&desktop)
-            .expect("uppercase Desktop Codex.exe should be accepted");
-        assert!(resolved.ends_with("Codex.exe"));
+            .expect("platform Desktop executable should be accepted");
+        assert!(resolved.ends_with(desktop_test_executable_name()));
 
         let cli_dir = tempfile::tempdir().expect("create cli temp dir");
-        let cli = cli_dir.path().join("codex.exe");
+        let cli = cli_dir.path().join(cli_test_executable_name());
         std::fs::write(&cli, "").expect("write cli exe");
         let error = canonical_codex_desktop_executable_path(&cli)
-            .expect_err("lowercase CLI codex.exe should be rejected");
+            .expect_err("lowercase CLI codex should be rejected");
         assert!(error.contains("not Codex Desktop"));
     }
 
@@ -1425,7 +1772,7 @@ mod tests {
     #[test]
     fn remembered_codex_desktop_executable_round_trips_confirmed_path() {
         let desktop_dir = tempfile::tempdir().expect("create confirmed desktop temp dir");
-        let desktop = desktop_dir.path().join("Codex.exe");
+        let desktop = desktop_dir.path().join(desktop_test_executable_name());
         std::fs::write(&desktop, "").expect("write desktop exe");
         let state_dir = tempfile::tempdir().expect("create state temp dir");
         let state_path = state_dir
@@ -1438,7 +1785,25 @@ mod tests {
             .expect("read remembered desktop path");
 
         assert_eq!(loaded, remembered);
-        assert!(loaded.ends_with("Codex.exe"));
+        assert!(loaded.ends_with(desktop_test_executable_name()));
+    }
+
+    /// 验证 macOS `.app` bundle 会解析到内部 Desktop 主二进制。
+    #[test]
+    fn macos_codex_bundle_candidate_points_to_internal_binary() {
+        assert_eq!(
+            macos_codex_bundle_executable(Path::new("/Applications/Codex.app")),
+            PathBuf::from("/Applications/Codex.app/Contents/MacOS/Codex")
+        );
+    }
+
+    /// 验证 Linux desktop entry 只提取绝对路径 Exec，忽略包装命令。
+    #[test]
+    fn linux_desktop_entry_exec_parser_keeps_absolute_exec_paths() {
+        let values = linux_desktop_entry_exec_values(
+            "Name=Codex\nExec=/opt/Codex/Codex --no-sandbox %U\nExec=flatpak run com.openai.Codex\n",
+        );
+        assert_eq!(values, vec!["/opt/Codex/Codex"]);
     }
 
     #[test]
