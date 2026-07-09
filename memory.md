@@ -1,8 +1,14 @@
 # CC Switch Repository Memory
 
+## 2026-07-09 Codex Responses Missing Output Budget Semantics
+
+- 最新纠偏：这不是 Qwen/vLLM 专用问题，而是 Codex Responses -> Chat Completions 转换必须保留“未声明输出上限”的通用语义。Codex 原生 Responses 请求当前通常不写 `max_output_tokens/max_tokens/max_completion_tokens`；CCSwitchMulti 只有在原请求显式携带这些字段、provider 显式配置 `defaultOutputTokens`、或 Anthropic thinking-budget 错误重试整流时，才应让上游 Chat 请求出现 max token 字段。
+- 当前 live 日志样本里，Qwen route 的 `request_shape.top_keys` 没有 `max_tokens/max_completion_tokens/max_output_tokens`，因此该样本不能再归因为“CCSM 当前自动补 32768 导致截断”。历史自动写入 `defaultOutputTokens=32768` 的代码路径确实会改变缺省语义，已改为不再由 Qwen/vLLM 推断或前端保存自动生成。
+- 正确验证口径：当 Codex 没发输出预算且 provider 没有显式 `defaultOutputTokens` 时，转换后的 Chat 请求也不应出现 `max_tokens` 或 `max_completion_tokens`；`minOutputTokens` 只允许抬高已经存在且过小的显式预算。若 live 日志仍显示旧 `thinking` / `reasoning_effort` 形态，要单独判断是运行二进制未更新、DB 旧 meta 未被合并修正，还是该上游本身接受该字段，不能混同为输出上限截断。
+
 ## 2026-07-09 Retire Qwen vLLM Implicit Output Cap
 
-- 用户指出 `Codex 没发输出长度，vLLM 也没要求输出长度` 时，CCSwitchMulti 自动补 `defaultOutputTokens=32768` 会把本应由 vLLM 决定的长输出截断。该判断成立：`defaultOutputTokens` 不应作为 Qwen/vLLM 推断默认值，只应保留为高级用户显式配置能力。
+- 用户指出 `Codex 没发输出长度，vLLM 也没要求输出长度` 时，CCSwitchMulti 自动补 `defaultOutputTokens=32768` 会把本应由上游决定的输出长度截断。更准确地说：这是历史自动默认值会改变 Codex 缺省语义的风险，不应作为 Qwen/vLLM 推断默认值，只应保留为高级用户显式配置能力。
 - 修复边界：Qwen + vLLM/matrixminecraft 推断仍设置 `thinkingParam=enable_thinking`、`effortParam=none` 和 `minOutputTokens=2048`，但 `minOutputTokens` 只抬高已经存在且过小的 `max_tokens/max_completion_tokens`，请求完全缺省时不再注入任何输出预算字段。
 - 旧版自动写入的 Qwen/vLLM `defaultOutputTokens=32768` 现在视为废弃自动值，在运行时合并 Qwen/vLLM reasoning meta 时清掉；显式非 32768 的 `defaultOutputTokens` 继续保留。前端 ProviderForm 保存 Qwen/vLLM meta 时也不再自动写 `defaultOutputTokens=32768`。
 
@@ -23,7 +29,7 @@
 - 仍不把 catalog 级 `max_output_tokens` 纳入本次修复：当前证据是上游 `/models` 未给可靠输出上限，CCSM schema 也未承载；如后续要做，应作为独立模型能力 schema 任务处理。
 - 更正：`minOutputTokens` 只能解决“Codex 明确传了过小输出预算”的截断；当 Codex 子 Agent 请求完全没有 `max_tokens/max_completion_tokens/max_output_tokens` 时，CCSwitchMulti 不应代填 `max_tokens`。Qwen + vLLM/matrixminecraft 推断不再写 `defaultOutputTokens=32768`，旧版自动值会在运行时清掉；显式小预算仍由 `minOutputTokens=2048` 抬高，显式非 32768 的 `defaultOutputTokens` 保持不覆盖。
 - Qwen 子 Agent 的 `reasoning_effort=low` 根因是 CCSwitchMulti 托管 `~/.codex/agents/qwen-local.toml`/`ccswitch-qwen-local.toml` 曾经硬编码 `model_reasoning_effort = "low"`，会覆盖 catalog 的 `defaultReasoningEffort` 和用户后来在 Codex 配置里调的 high/xhigh。新生成的 Qwen 托管 role 不再写 `model_reasoning_effort`，让 Codex 按当前会话/模型默认继承；Spark/DeepSeek 等角色仍按各自语义写 low/medium/high。
-- `codex-router.log` 的 `request_shape` 现在会显式记录 `max_tokens/max_completion_tokens/max_output_tokens` 字段形态；修复后验证 Qwen live 请求应看到 `enable_thinking=bool` 且 `max_tokens=number`。如果日志仍显示 `enable_thinking=absent`、`thinking=object(keys=[type])` 且 top_keys 无 `max_tokens`，说明运行中的 CCSwitchMulti 二进制/服务还没重启到新代码。
+- `codex-router.log` 的 `request_shape` 现在会显式记录 `max_tokens/max_completion_tokens/max_output_tokens` 字段形态；修复后验证缺省 Codex live 请求时，不应看到 `max_tokens` 或 `max_completion_tokens`，除非原请求或 provider 显式配置了输出预算。如果日志仍显示 `enable_thinking=absent`、`thinking=object(keys=[type])`，需要单独排查运行中的 CCSwitchMulti 二进制/服务是否已重启到新代码或 DB 旧 meta 是否被合并修正。
 
 ## 2026-07-09 Codex Desktop Model Picker And Managed Subagent Roles
 

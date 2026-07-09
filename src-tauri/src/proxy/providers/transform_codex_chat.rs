@@ -463,10 +463,11 @@ fn has_output_token_limit(result: &Value) -> bool {
     result.get("max_tokens").is_some() || result.get("max_completion_tokens").is_some()
 }
 
-/// 在 Codex 请求没有任何输出预算时，为 Chat 上游写入 provider 声明的默认输出上限。
+/// 在 Codex 请求没有任何输出预算时，按 provider 的显式配置写入默认输出上限。
 ///
-/// vLLM 默认会把剩余上下文窗口都作为输出预算，Qwen reasoning 可能因此长时间没有正文
-/// 或 tool call；这里仅补“缺省上限”，不覆盖 Codex 或用户显式传入的 token 字段。
+/// Codex 原生 Responses 请求经常不声明输出 token 上限；这个缺省语义应默认透传给
+/// Chat 上游。只有当 provider 明确配置了 `default_output_tokens` 时，才把它当作
+/// 用户/路由策略写入请求，且不覆盖 Codex 或用户显式传入的 token 字段。
 fn apply_default_output_tokens(
     result: &mut Value,
     model: &str,
@@ -2882,7 +2883,7 @@ mod tests {
     }
 
     #[test]
-    fn responses_request_to_chat_applies_default_output_tokens_when_missing() {
+    fn responses_request_to_chat_applies_explicit_default_output_tokens_when_missing() {
         let input = json!({
             "model": "qwen3.6",
             "input": "hello",
