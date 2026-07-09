@@ -65,7 +65,7 @@ describe("ProviderForm Codex catalog helpers", () => {
     });
   });
 
-  it("applies Qwen vLLM Codex Chat safety defaults when saving provider meta", () => {
+  it("applies Qwen vLLM Codex Chat defaults without implicit output cap", () => {
     expect(
       normalizeCodexChatReasoningForSave(
         {
@@ -87,8 +87,23 @@ describe("ProviderForm Codex catalog helpers", () => {
       thinkingParam: "enable_thinking",
       effortParam: "none",
       minOutputTokens: 2048,
-      defaultOutputTokens: 32768,
       outputFormat: "reasoning_content",
     });
+    expect(
+      normalizeCodexChatReasoningForSave(
+        {
+          supportsThinking: true,
+          supportsEffort: false,
+          thinkingParam: "thinking",
+          effortParam: "none",
+          outputFormat: "reasoning_content",
+        },
+        {
+          providerName: "Qwen Local",
+          baseUrl: "https://www.matrixminecraft.cn:24443/vllm/v1",
+          models: [{ model: "qwen3.6" }],
+        },
+      ),
+    ).not.toHaveProperty("defaultOutputTokens");
   });
 });

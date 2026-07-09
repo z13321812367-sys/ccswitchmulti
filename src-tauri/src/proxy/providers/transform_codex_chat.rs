@@ -483,10 +483,11 @@ fn apply_default_output_tokens(
     result[token_field] = json!(default_output_tokens);
 }
 
-/// 根据 provider/route 声明抬高 Chat 上游的最小输出预算。
+/// 根据 provider/route 声明抬高 Chat 上游的显式最小输出预算。
 ///
 /// 某些 Chat 兼容上游在小 `max_tokens` 请求下会先生成内部思考并直接触发 length，
-/// 导致 Codex 侧看不到正文。该函数只在显式配置 `minOutputTokens` 时生效。
+/// 导致 Codex 侧看不到正文。该函数只在请求已经携带输出预算时生效，避免把
+/// Codex/vLLM 双方都没有要求的缺省请求变成有限制请求。
 fn apply_min_output_tokens(
     result: &mut Value,
     model: &str,
@@ -497,12 +498,10 @@ fn apply_min_output_tokens(
     };
     let token_field = chat_output_token_field(model);
 
-    let should_raise = result
-        .get(token_field)
-        .and_then(|value| value.as_u64())
-        .map(|current| current < min_output_tokens)
-        .unwrap_or(true);
-    if should_raise {
+    let Some(current) = result.get(token_field).and_then(|value| value.as_u64()) else {
+        return;
+    };
+    if current < min_output_tokens {
         result[token_field] = json!(min_output_tokens);
     }
 }
@@ -2903,6 +2902,32 @@ mod tests {
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
 
         assert_eq!(result["max_tokens"], 32_768);
+        assert_eq!(result["enable_thinking"], true);
+        assert!(result.get("thinking").is_none());
+    }
+
+    #[test]
+    fn responses_request_to_chat_keeps_missing_output_budget_unbounded_by_minimum() {
+        let input = json!({
+            "model": "qwen3.6",
+            "input": "hello",
+            "reasoning": {"effort": "medium"}
+        });
+        let config = CodexChatReasoningConfig {
+            supports_thinking: Some(true),
+            supports_effort: Some(false),
+            thinking_param: Some("enable_thinking".to_string()),
+            effort_param: Some("none".to_string()),
+            effort_value_mode: None,
+            min_output_tokens: Some(2048),
+            default_output_tokens: None,
+            output_format: Some("reasoning_content".to_string()),
+        };
+
+        let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
+
+        assert!(result.get("max_tokens").is_none());
+        assert!(result.get("max_completion_tokens").is_none());
         assert_eq!(result["enable_thinking"], true);
         assert!(result.get("thinking").is_none());
     }

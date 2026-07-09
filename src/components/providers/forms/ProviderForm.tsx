@@ -263,7 +263,6 @@ type CodexChatReasoningSaveContext = {
 };
 
 const QWEN_VLLM_MIN_OUTPUT_TOKENS = 2048;
-const QWEN_VLLM_DEFAULT_OUTPUT_TOKENS = 32768;
 
 // 把表单里的最小输出预算收敛为正整数；空值或非法值保持未配置。
 const normalizeCodexOutputTokensForSave = (
@@ -274,7 +273,7 @@ const normalizeCodexOutputTokensForSave = (
   return Number.isFinite(normalized) && normalized > 0 ? normalized : undefined;
 };
 
-// 判断当前 provider 是否是 Qwen + vLLM 兼容端点，保存时需要沿用后端同一组安全默认值。
+// 判断当前 provider 是否是 Qwen + vLLM 兼容端点，保存时需要沿用后端同一组思考参数默认值。
 const shouldApplyQwenVllmReasoningDefaults = (
   context?: CodexChatReasoningSaveContext,
 ): boolean => {
@@ -337,9 +336,7 @@ export const normalizeCodexChatReasoningForSave = (
   const safeMinOutputTokens = useQwenVllmDefaults
     ? Math.max(minOutputTokens ?? 0, QWEN_VLLM_MIN_OUTPUT_TOKENS)
     : minOutputTokens;
-  const safeDefaultOutputTokens = useQwenVllmDefaults
-    ? Math.max(defaultOutputTokens ?? 0, QWEN_VLLM_DEFAULT_OUTPUT_TOKENS)
-    : defaultOutputTokens;
+  const safeDefaultOutputTokens = defaultOutputTokens;
 
   return {
     supportsThinking,

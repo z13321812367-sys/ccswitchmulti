@@ -21,7 +21,7 @@ const CODEX_ROUTER_PARENT_PROVIDER_NAME: &str = "codexRouterParentProviderName";
 const CODEX_RESOLVED_TARGET_PROVIDER_ID: &str = "codexResolvedTargetProviderId";
 const CODEX_RESOLVED_UPSTREAM_MODEL_OVERRIDE: &str = "codexResolvedUpstreamModelOverride";
 const QWEN_VLLM_MIN_OUTPUT_TOKENS: u64 = 2_048;
-const QWEN_VLLM_DEFAULT_OUTPUT_TOKENS: u64 = 32_768;
+const RETIRED_QWEN_VLLM_DEFAULT_OUTPUT_TOKENS: u64 = 32_768;
 
 /// 官方 Codex 客户端 User-Agent 正则
 #[allow(dead_code)]
@@ -1444,12 +1444,12 @@ fn normalize_codex_chat_reasoning_config(
     config
 }
 
-/// 合并 Qwen/vLLM 的运行时安全默认值。
+/// 合并 Qwen/vLLM 的运行时兼容默认值。
 ///
 /// 历史 provider 可能已经持久化了 `thinkingParam=thinking` 且没有
-/// `minOutputTokens/defaultOutputTokens` 的显式 meta；这会阻断 Qwen/vLLM 推断分支。
-/// 只有当推断结果明确识别为 Qwen/vLLM 时，才纠正过时字段并补齐预算边界，避免
-/// 影响 DeepSeek、OpenRouter 等需要完整显式覆盖的平台。
+/// `minOutputTokens` 的显式 meta；这会阻断 Qwen/vLLM 推断分支。只有当推断结果
+/// 明确识别为 Qwen/vLLM 时，才纠正过时字段和过小显式预算，避免影响 DeepSeek、
+/// OpenRouter 等需要完整显式覆盖的平台。
 fn merge_qwen_vllm_reasoning_defaults(
     mut explicit: CodexChatReasoningConfig,
     inferred: CodexChatReasoningConfig,
@@ -1501,6 +1501,11 @@ fn merge_qwen_vllm_reasoning_defaults(
             explicit.default_output_tokens = Some(inferred_default_output_tokens);
         }
     }
+    if explicit.default_output_tokens == Some(RETIRED_QWEN_VLLM_DEFAULT_OUTPUT_TOKENS)
+        && inferred.default_output_tokens.is_none()
+    {
+        explicit.default_output_tokens = None;
+    }
 
     normalize_codex_chat_reasoning_config(explicit)
 }
@@ -1510,7 +1515,7 @@ fn is_qwen_vllm_reasoning_defaults(config: &CodexChatReasoningConfig) -> bool {
     config.thinking_param.as_deref() == Some("enable_thinking")
         && config.effort_param.as_deref() == Some("none")
         && config.min_output_tokens == Some(QWEN_VLLM_MIN_OUTPUT_TOKENS)
-        && config.default_output_tokens == Some(QWEN_VLLM_DEFAULT_OUTPUT_TOKENS)
+        && config.output_format.as_deref() == Some("reasoning_content")
 }
 
 fn infer_codex_chat_reasoning_config(
@@ -1604,9 +1609,9 @@ fn infer_codex_chat_reasoning_config(
         });
     }
 
-    // 本地 / vLLM 托管的 Qwen 兼容端点会先输出 reasoning；
-    // Codex 小 `max_output_tokens` 请求容易被思考内容吃满，而完全缺省时 vLLM 会把剩余
-    // 上下文都当输出预算。这里同时声明小预算下限和缺省上限，避免正文/tool call 长时间不可见。
+    // 本地 / vLLM 托管的 Qwen 兼容端点会先输出 reasoning；Codex 小
+    // `max_output_tokens` 请求容易被思考内容吃满，因此只声明显式预算的最小下限。
+    // Codex 完全缺省时应继续交给 vLLM 自身默认策略，不能在路由层强行截断输出长度。
     if haystack.contains("qwen")
         && (haystack.contains("vllm") || haystack.contains("matrixminecraft"))
     {
@@ -1617,7 +1622,7 @@ fn infer_codex_chat_reasoning_config(
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             min_output_tokens: Some(QWEN_VLLM_MIN_OUTPUT_TOKENS),
-            default_output_tokens: Some(QWEN_VLLM_DEFAULT_OUTPUT_TOKENS),
+            default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
         });
     }
@@ -2602,10 +2607,7 @@ experimental_bearer_token = "PROXY_MANAGED"
         assert_eq!(config.thinking_param.as_deref(), Some("enable_thinking"));
         assert_eq!(config.effort_param.as_deref(), Some("none"));
         assert_eq!(config.min_output_tokens, Some(QWEN_VLLM_MIN_OUTPUT_TOKENS));
-        assert_eq!(
-            config.default_output_tokens,
-            Some(QWEN_VLLM_DEFAULT_OUTPUT_TOKENS)
-        );
+        assert_eq!(config.default_output_tokens, None);
     }
 
     #[test]
@@ -2650,7 +2652,7 @@ experimental_bearer_token = "PROXY_MANAGED"
     }
 
     #[test]
-    fn test_qwen_vllm_route_infers_thinking_with_bounded_output_budget() {
+    fn test_qwen_vllm_route_infers_thinking_without_default_output_budget() {
         let provider = create_provider(json!({
             "modelRoutes": [
                 {
@@ -2673,10 +2675,7 @@ experimental_bearer_token = "PROXY_MANAGED"
         assert_eq!(config.thinking_param.as_deref(), Some("enable_thinking"));
         assert_eq!(config.effort_param.as_deref(), Some("none"));
         assert_eq!(config.min_output_tokens, Some(QWEN_VLLM_MIN_OUTPUT_TOKENS));
-        assert_eq!(
-            config.default_output_tokens,
-            Some(QWEN_VLLM_DEFAULT_OUTPUT_TOKENS)
-        );
+        assert_eq!(config.default_output_tokens, None);
     }
 
     #[test]
@@ -2714,10 +2713,42 @@ wire_api = "chat"
         assert_eq!(config.thinking_param.as_deref(), Some("enable_thinking"));
         assert_eq!(config.effort_param.as_deref(), Some("none"));
         assert_eq!(config.min_output_tokens, Some(QWEN_VLLM_MIN_OUTPUT_TOKENS));
-        assert_eq!(
-            config.default_output_tokens,
-            Some(QWEN_VLLM_DEFAULT_OUTPUT_TOKENS)
-        );
+        assert_eq!(config.default_output_tokens, None);
+    }
+
+    #[test]
+    fn test_qwen_vllm_retired_auto_default_budget_is_cleared() {
+        let mut provider = create_provider(json!({
+            "config": r#"
+model_provider = "qwen_local"
+model = "qwen3.6"
+
+[model_providers.qwen_local]
+name = "Qwen Local"
+base_url = "https://www.matrixminecraft.cn:24443/vllm/v1"
+wire_api = "chat"
+"#
+        }));
+        provider.meta = Some(crate::provider::ProviderMeta {
+            codex_chat_reasoning: Some(CodexChatReasoningConfig {
+                supports_thinking: Some(true),
+                supports_effort: Some(false),
+                thinking_param: Some("thinking".to_string()),
+                effort_param: Some("none".to_string()),
+                effort_value_mode: None,
+                min_output_tokens: Some(QWEN_VLLM_MIN_OUTPUT_TOKENS),
+                default_output_tokens: Some(RETIRED_QWEN_VLLM_DEFAULT_OUTPUT_TOKENS),
+                output_format: Some("reasoning_content".to_string()),
+            }),
+            ..Default::default()
+        });
+
+        let config = resolve_codex_chat_reasoning_config(&provider, &json!({ "model": "qwen3.6" }))
+            .expect("qwen vllm reasoning config");
+
+        assert_eq!(config.thinking_param.as_deref(), Some("enable_thinking"));
+        assert_eq!(config.min_output_tokens, Some(QWEN_VLLM_MIN_OUTPUT_TOKENS));
+        assert_eq!(config.default_output_tokens, None);
     }
 
     #[test]
