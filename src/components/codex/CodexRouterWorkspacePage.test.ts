@@ -5,6 +5,7 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { providersApi } from "@/lib/api";
 import { fetchModelsForConfig, type FetchedModel } from "@/lib/api/model-fetch";
+import { proxyApi } from "@/lib/api/proxy";
 import type { Provider } from "@/types";
 import type { PaginatedLogs, RequestLog } from "@/types/usage";
 import {
@@ -131,6 +132,7 @@ function createCodexProxyLog(overrides: Partial<RequestLog> = {}): RequestLog {
 beforeEach(() => {
   requestLogsFixture.value = { data: [], isLoading: false };
   vi.mocked(fetchModelsForConfig).mockReset();
+  vi.mocked(proxyApi.unlockCodexModelPicker).mockReset();
   vi.mocked(providersApi.add).mockResolvedValue(true);
   vi.mocked(providersApi.update).mockResolvedValue(true);
 });
@@ -2070,6 +2072,73 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         screen.getByText("已刷新校验状态，请查看链路卡片和最近转发表。"),
       ).toBeInTheDocument(),
     );
+  });
+
+  // 解锁模型菜单是 issue #10 的关键人工动作，必须同时固定提示文案和真实 API 调用。
+  it("explains and triggers the Codex model picker unlock action", async () => {
+    const source: Provider = {
+      id: "codex-unlock-source",
+      name: "Unlock Source",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "unlock-model" }],
+        },
+      },
+    };
+    const plan = createDraftRoutingPlan([source], [source]);
+    vi.mocked(proxyApi.unlockCodexModelPicker).mockResolvedValueOnce({
+      attemptedPorts: [9222],
+      debugPort: 9222,
+      targetId: "target-1",
+      targetTitle: "Codex",
+      targetUrl: "app://codex",
+      modelCount: 1,
+      modelNames: ["unlock-model"],
+      injected: true,
+      launched: false,
+      codexExecutable: null,
+      message: "已注入模型菜单白名单",
+    });
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [source, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "status",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    expect(
+      screen.getByText(
+        "模型菜单仍只显示“自定义”时，先完全退出 Codex Desktop，再点击“解锁模型菜单”。",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTitle(
+        /当 Codex Desktop 模型菜单只显示“自定义”或看不到 MultiRouter 模型时使用。/,
+      ),
+    ).toBeInTheDocument();
+
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "解锁模型菜单" }));
+
+    await waitFor(() =>
+      expect(proxyApi.unlockCodexModelPicker).toHaveBeenCalledTimes(1),
+    );
+    expect(screen.getByText("模型菜单白名单已注入")).toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        "模型菜单仍只显示“自定义”时，先完全退出 Codex Desktop，再点击“解锁模型菜单”。",
+      ),
+    ).not.toBeInTheDocument();
   });
 
   // onRuntimeReady 负向测试：即使最近一条 Codex 代理日志成功，只要它没有命中当前

@@ -53,6 +53,12 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { providersApi } from "@/lib/api";
 import { fetchModelsForConfig, type FetchedModel } from "@/lib/api/model-fetch";
 import { proxyApi } from "@/lib/api/proxy";
@@ -108,6 +114,14 @@ export type WorkspaceTab =
 type StatusView = "link" | "protocol" | "debug" | "providers" | "traffic";
 
 type SpawnAgentCandidateView = "selected" | "routed" | "priority" | "all";
+
+// 模型菜单解锁只处理 Codex Desktop renderer 白名单，不改变 MultiRouter 路由或凭据。
+const MODEL_PICKER_UNLOCK_TOOLTIP =
+  "当 Codex Desktop 模型菜单只显示“自定义”或看不到 MultiRouter 模型时使用。它会用 remote debugging 启动或连接 Codex Desktop，并注入 renderer 模型白名单补丁；不会改变路由规则、API Key 或模型目录。若 Codex 已普通启动，请先完全退出再点击。";
+
+// 链路页需要给出明确下一步，避免用户只看到诊断异常却不知道要触发解锁。
+const MODEL_PICKER_UNLOCK_HINT =
+  "模型菜单仍只显示“自定义”时，先完全退出 Codex Desktop，再点击“解锁模型菜单”。";
 
 type CodexRoute = {
   id?: string;
@@ -5254,20 +5268,38 @@ function StatusTab({
                   )}
                   协议探测
                 </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={unlockModelPicker}
-                  disabled={isUnlockingModelPicker}
-                  className="gap-2 border-indigo-300 bg-background/70 text-indigo-700 hover:bg-indigo-50 dark:border-indigo-500/50 dark:bg-indigo-500/10 dark:text-indigo-100 dark:hover:bg-indigo-500/20"
-                >
-                  {isUnlockingModelPicker ? (
-                    <RefreshCw className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Wand2 className="h-4 w-4" />
-                  )}
-                  解锁模型菜单
-                </Button>
+                <TooltipProvider delayDuration={200}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span
+                        className="inline-flex"
+                        title={MODEL_PICKER_UNLOCK_TOOLTIP}
+                      >
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={unlockModelPicker}
+                          disabled={isUnlockingModelPicker}
+                          className="gap-2 border-indigo-300 bg-background/70 text-indigo-700 hover:bg-indigo-50 dark:border-indigo-500/50 dark:bg-indigo-500/10 dark:text-indigo-100 dark:hover:bg-indigo-500/20"
+                        >
+                          {isUnlockingModelPicker ? (
+                            <RefreshCw className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Wand2 className="h-4 w-4" />
+                          )}
+                          解锁模型菜单
+                        </Button>
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent
+                      side="bottom"
+                      align="end"
+                      className="max-w-80 whitespace-normal text-left leading-5"
+                    >
+                      {MODEL_PICKER_UNLOCK_TOOLTIP}
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
                 {selectedPlan ? (
                   <>
                     <Button
@@ -5354,6 +5386,11 @@ function StatusTab({
           {validationRefreshMessage ? (
             <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs leading-5 text-slate-700 dark:border-slate-600/50 dark:bg-slate-900/60 dark:text-slate-200">
               {validationRefreshMessage}
+            </div>
+          ) : null}
+          {!modelPickerUnlockResult ? (
+            <div className="mt-3 rounded-lg border border-indigo-200 bg-indigo-50 p-3 text-xs leading-5 text-indigo-800 dark:border-indigo-700/50 dark:bg-indigo-950/25 dark:text-indigo-100">
+              {MODEL_PICKER_UNLOCK_HINT}
             </div>
           ) : null}
           {modelPickerUnlockError ? (
