@@ -937,7 +937,6 @@ const CODEX_SUBAGENT_USAGE_SESSION_CHUNK: usize = 500;
 #[allow(clippy::too_many_arguments)]
 fn add_codex_subagent_usage_sample(
     session_buckets: &mut HashMap<String, HashMap<String, CodexSubagentUsageBucket>>,
-    model_buckets: &mut HashMap<String, (CodexSubagentUsageBucket, HashSet<String>)>,
     session_id: String,
     model: String,
     request_count: u64,
@@ -975,17 +974,67 @@ fn add_codex_subagent_usage_sample(
             bucket.last_used_at = bucket.last_used_at.max(sample.last_used_at);
         })
         .or_insert_with(|| sample.clone());
+}
 
-    let (bucket, agents) = model_buckets.entry(model).or_default();
-    bucket.request_count += request_count;
-    bucket.input_tokens += input_tokens;
-    bucket.output_tokens += output_tokens;
-    bucket.cache_read_tokens += cache_read_tokens;
-    bucket.cache_creation_tokens += cache_creation_tokens;
-    bucket.total_tokens += total_tokens;
-    bucket.total_cost += total_cost;
-    bucket.last_used_at = bucket.last_used_at.max(last_used_at);
-    agents.insert(session_id);
+/// 把已经修正后的子 Agent 用量桶写入按模型聚合的统计。
+fn add_codex_subagent_model_bucket(
+    model_buckets: &mut HashMap<String, (CodexSubagentUsageBucket, HashSet<String>)>,
+    session_id: &str,
+    model: &str,
+    sample: &CodexSubagentUsageBucket,
+) {
+    let (bucket, agents) = model_buckets.entry(model.to_string()).or_default();
+    bucket.request_count += sample.request_count;
+    bucket.input_tokens += sample.input_tokens;
+    bucket.output_tokens += sample.output_tokens;
+    bucket.cache_read_tokens += sample.cache_read_tokens;
+    bucket.cache_creation_tokens += sample.cache_creation_tokens;
+    bucket.total_tokens += sample.total_tokens;
+    bucket.total_cost += sample.total_cost;
+    bucket.last_used_at = bucket.last_used_at.max(sample.last_used_at);
+    agents.insert(session_id.to_string());
+}
+
+/// 判断一个用量桶是否已经包含真实 token。
+fn codex_subagent_bucket_has_tokens(bucket: &CodexSubagentUsageBucket) -> bool {
+    bucket.total_tokens > 0
+        || bucket.input_tokens > 0
+        || bucket.output_tokens > 0
+        || bucket.cache_read_tokens > 0
+        || bucket.cache_creation_tokens > 0
+}
+
+/// 用 rollout token_count 修正数据库中只有请求数、没有 token 的子 Agent 用量。
+fn merge_codex_subagent_rollout_usage(
+    usage_by_model: &mut HashMap<String, CodexSubagentUsageBucket>,
+    rollout_usage: HashMap<String, CodexSubagentUsageBucket>,
+) {
+    for (model, rollout_bucket) in rollout_usage {
+        usage_by_model
+            .entry(model)
+            .and_modify(|db_bucket| {
+                if codex_subagent_bucket_has_tokens(db_bucket)
+                    || !codex_subagent_bucket_has_tokens(&rollout_bucket)
+                {
+                    return;
+                }
+
+                // official Codex OAuth 的代理请求行可能只能统计请求数，真实 token
+                // 留在本地 JSONL 的 token_count 事件里；这里只替换 0-token 桶，
+                // 避免第三方模型已经同步成功时被 rollout 再次累加。
+                db_bucket.request_count = db_bucket.request_count.max(rollout_bucket.request_count);
+                db_bucket.input_tokens = rollout_bucket.input_tokens;
+                db_bucket.output_tokens = rollout_bucket.output_tokens;
+                db_bucket.cache_read_tokens = rollout_bucket.cache_read_tokens;
+                db_bucket.cache_creation_tokens = rollout_bucket.cache_creation_tokens;
+                db_bucket.total_tokens = rollout_bucket.total_tokens;
+                if db_bucket.total_cost <= 0.0 {
+                    db_bucket.total_cost = rollout_bucket.total_cost;
+                }
+                db_bucket.last_used_at = db_bucket.last_used_at.max(rollout_bucket.last_used_at);
+            })
+            .or_insert(rollout_bucket);
+    }
 }
 
 /// 判断历史摘要是否明确来自 Codex 子 Agent。
@@ -1111,7 +1160,6 @@ fn build_codex_subagent_usage_stats_from_history(
                 })?;
                 add_codex_subagent_usage_sample(
                     &mut session_buckets,
-                    &mut model_buckets,
                     session_id,
                     model,
                     request_count.max(0) as u64,
@@ -1130,27 +1178,22 @@ fn build_codex_subagent_usage_stats_from_history(
         .into_iter()
         .map(|item| {
             let mut usage_by_model = session_buckets.remove(&item.id).unwrap_or_default();
-            if usage_by_model.is_empty()
-                && codex_subagent_history_may_overlap_range(&item, start_date, end_date)
-            {
-                usage_by_model = parse_codex_subagent_usage_from_rollout(
+            if codex_subagent_history_may_overlap_range(&item, start_date, end_date) {
+                let rollout_usage = parse_codex_subagent_usage_from_rollout(
                     conn,
                     item.rollout_path.as_deref(),
                     start_date,
                     end_date,
                 );
-                for (model, bucket) in &usage_by_model {
-                    let (model_bucket, agents) = model_buckets.entry(model.clone()).or_default();
-                    model_bucket.request_count += bucket.request_count;
-                    model_bucket.input_tokens += bucket.input_tokens;
-                    model_bucket.output_tokens += bucket.output_tokens;
-                    model_bucket.cache_read_tokens += bucket.cache_read_tokens;
-                    model_bucket.cache_creation_tokens += bucket.cache_creation_tokens;
-                    model_bucket.total_tokens += bucket.total_tokens;
-                    model_bucket.total_cost += bucket.total_cost;
-                    model_bucket.last_used_at = model_bucket.last_used_at.max(bucket.last_used_at);
-                    agents.insert(item.id.clone());
-                }
+                merge_codex_subagent_rollout_usage(&mut usage_by_model, rollout_usage);
+            }
+            for (model, bucket) in &usage_by_model {
+                add_codex_subagent_model_bucket(
+                    &mut model_buckets,
+                    &item.id,
+                    model.as_str(),
+                    bucket,
+                );
             }
             let mut models: Vec<String> = usage_by_model.keys().cloned().collect();
             models.sort();
@@ -3305,6 +3348,109 @@ mod tests {
         assert_eq!(stats.model_stats[0].agent_count, 1);
         assert_eq!(stats.model_stats[0].request_count, 2);
         assert_eq!(stats.model_stats[0].total_tokens, 225);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_codex_subagent_usage_stats_repairs_zero_token_db_rows_from_rollout(
+    ) -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let conn = lock_conn!(db.conn);
+        let temp_dir = tempfile::tempdir().map_err(|e| AppError::Config(e.to_string()))?;
+        let rollout_path = temp_dir
+            .path()
+            .join("rollout-2026-07-08T12-00-00-019f4000-1111-7000-8000-000000000001.jsonl");
+        let lines = [
+            serde_json::json!({
+                "type": "session_meta",
+                "payload": {
+                    "session_id": "parent-thread",
+                    "source": {
+                        "subagent": {
+                            "thread_spawn": {
+                                "parent_thread_id": "parent-thread",
+                                "agent_nickname": "Official Worker",
+                                "agent_role": "codex-spark-worker"
+                            }
+                        }
+                    }
+                }
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "turn_context",
+                "payload": { "model": "gpt-5.5" }
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "event_msg",
+                "timestamp": "2026-07-08T04:00:10Z",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "model": "gpt-5.5",
+                        "total_token_usage": {
+                            "input_tokens": 1000,
+                            "cached_input_tokens": 250,
+                            "output_tokens": 300
+                        }
+                    }
+                }
+            })
+            .to_string(),
+        ];
+        std::fs::write(&rollout_path, lines.join("\n"))
+            .map_err(|e| AppError::Config(e.to_string()))?;
+
+        let ts = local_ts(2026, 7, 8, 12, 0, 0);
+        conn.execute(
+            "INSERT INTO proxy_request_logs (
+                request_id, provider_id, app_type, model, request_model,
+                input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                total_cost_usd, latency_ms, status_code, created_at, data_source, session_id
+            ) VALUES
+                ('official-zero-1', '_codex_session', 'codex', 'gpt-5.5', 'gpt-5.5', 0, 0, 0, 0, '0', 0, 200, ?1, 'codex_session', 'sub-official'),
+                ('official-zero-2', '_codex_session', 'codex', 'gpt-5.5', 'gpt-5.5', 0, 0, 0, 0, '0', 0, 200, ?1, 'codex_session', 'sub-official')",
+            params![ts],
+        )?;
+
+        let history = CodexHistorySessionListOutcome {
+            codex_home: "C:/Users/test/.codex".to_string(),
+            state_db_path: Some("C:/Users/test/.codex/state_5.sqlite".to_string()),
+            active_db_kind: Some("test".to_string()),
+            items: vec![CodexHistorySessionSummary {
+                id: "sub-official".to_string(),
+                title: "Official worker".to_string(),
+                thread_source: Some("subagent".to_string()),
+                updated_at_ms: ts * 1000,
+                updated_at: Some("2026-07-08T04:00:10Z".to_string()),
+                rollout_path: Some(rollout_path.to_string_lossy().to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let stats = build_codex_subagent_usage_stats_from_history(
+            &conn,
+            history,
+            Some(local_ts(2026, 7, 8, 0, 0, 0)),
+            Some(local_ts(2026, 7, 8, 23, 59, 59)),
+            10,
+        )?;
+
+        assert_eq!(stats.total_agents, 1);
+        assert_eq!(stats.agents[0].request_count, 2);
+        assert_eq!(stats.agents[0].input_tokens, 1000);
+        assert_eq!(stats.agents[0].cache_read_tokens, 250);
+        assert_eq!(stats.agents[0].output_tokens, 300);
+        assert_eq!(stats.agents[0].total_tokens, 1550);
+        assert_eq!(stats.agents[0].models, vec!["gpt-5.5".to_string()]);
+        assert_eq!(stats.model_stats.len(), 1);
+        assert_eq!(stats.model_stats[0].model, "gpt-5.5");
+        assert_eq!(stats.model_stats[0].agent_count, 1);
+        assert_eq!(stats.model_stats[0].request_count, 2);
+        assert_eq!(stats.model_stats[0].total_tokens, 1550);
 
         Ok(())
     }

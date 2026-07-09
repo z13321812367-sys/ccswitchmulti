@@ -50,6 +50,7 @@ import { useAutoCompact } from "@/hooks/useAutoCompact";
 import { useUsageCacheBridge } from "@/hooks/useUsageCacheBridge";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
 import { useLastValidValue } from "@/hooks/useLastValidValue";
+import { useCodexLocalRoutingNotice } from "@/hooks/useCodexLocalRoutingNotice";
 import { useScanUnmanagedSkills } from "@/hooks/useSkills";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import { isTextEditableTarget } from "@/utils/domUtils";
@@ -112,6 +113,7 @@ import {
   isRoutingPlan,
   type WorkspaceTab,
 } from "@/components/codex/CodexRouterWorkspacePage";
+import { CodexUsagePage } from "@/components/codex/CodexUsagePage";
 import { CodexMultiRouterWizard } from "@/components/codex/CodexMultiRouterWizard";
 
 type View =
@@ -130,6 +132,7 @@ type View =
   | "openclawAgents"
   | "hermesMemory"
   | "codexRouter"
+  | "codexUsage"
   | "openaiApi";
 
 interface SyncStatusUpdatedPayload {
@@ -176,6 +179,8 @@ const VALID_VIEWS: View[] = [
   "openclawTools",
   "openclawAgents",
   "hermesMemory",
+  "codexRouter",
+  "codexUsage",
   "openaiApi",
 ];
 
@@ -223,6 +228,16 @@ function App() {
   useEffect(() => {
     localStorage.setItem(VIEW_STORAGE_KEY, currentView);
   }, [currentView]);
+
+  // Codex 专属工具页只在 Codex 应用语境下保留，避免切到其他应用后还停留在 Codex 工具。
+  useEffect(() => {
+    if (
+      activeApp !== "codex" &&
+      (currentView === "codexRouter" || currentView === "codexUsage")
+    ) {
+      setCurrentView("providers");
+    }
+  }, [activeApp, currentView]);
 
   const { data: settingsData } = useSettingsQuery();
   const useAppWindowControls =
@@ -317,6 +332,9 @@ function App() {
     );
     return target?.provider_id;
   }, [proxyStatus?.active_targets]);
+  const codexLocalRoutingNotice = useCodexLocalRoutingNotice(
+    Boolean(isProxyRunning && takeoverStatus?.codex),
+  );
 
   const { data, isLoading, refetch } = useProvidersQuery(activeApp, {
     isProxyRunning,
@@ -1143,6 +1161,8 @@ function App() {
               onRuntimeReady={handleCodexMultiRouterReady}
             />
           );
+        case "codexUsage":
+          return <CodexUsagePage />;
         case "skills":
           return (
             <UnifiedSkillsPanel
@@ -1437,6 +1457,7 @@ function App() {
                     t("openclaw.agents.title")}
                   {currentView === "hermesMemory" && t("hermes.memory.title")}
                   {currentView === "codexRouter" && "Codex 多模型路由"}
+                  {currentView === "codexUsage" && "Codex 用量与重置额度"}
                   {currentView === "openaiApi" && "第三方 Agent API"}
                 </h1>
               </div>
@@ -1748,17 +1769,28 @@ function App() {
                           ) : (
                             <>
                               {activeApp === "codex" && (
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={() =>
-                                    openCodexRouterWorkspace(null, "status")
-                                  }
-                                  className="text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5 w-8 px-2"
-                                  title="Codex 多模型路由"
-                                >
-                                  <RouteIcon className="w-4 h-4" />
-                                </Button>
+                                <>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() =>
+                                      openCodexRouterWorkspace(null, "status")
+                                    }
+                                    className="text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5 w-8 px-2"
+                                    title="Codex 多模型路由"
+                                  >
+                                    <RouteIcon className="w-4 h-4" />
+                                  </Button>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => setCurrentView("codexUsage")}
+                                    className="text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5 w-8 px-2"
+                                    title="Codex 用量与重置额度"
+                                  >
+                                    <BarChart2 className="w-4 h-4" />
+                                  </Button>
+                                </>
                               )}
                               <Button
                                 variant="ghost"
@@ -2005,6 +2037,31 @@ function App() {
         }}
         onCancel={() => setLaunchDashboardOpen(false)}
       />
+
+      <Dialog
+        open={codexLocalRoutingNotice.isOpen}
+        onOpenChange={(open) => {
+          if (!open) {
+            codexLocalRoutingNotice.dismiss();
+          }
+        }}
+      >
+        <DialogContent className="max-w-md" zIndex="alert">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Shield className="h-5 w-5 text-amber-500" />
+              Codex 本地路由已开启
+            </DialogTitle>
+            <DialogDescription className="leading-6">
+              您正在使用本地路由功能，将由 ccsm 接管所有 codex
+              流量，所以不要在使用 codex 时关闭本软件。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button onClick={codexLocalRoutingNotice.dismiss}>我知道了</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <DeepLinkImportDialog />
       <FirstRunNoticeDialog />

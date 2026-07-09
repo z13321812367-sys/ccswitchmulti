@@ -1582,21 +1582,29 @@ fn codex_agent_description_for_model(model: &str) -> String {
 }
 
 /// 根据模型能力选择 custom agent 的默认 reasoning effort。
-fn codex_agent_reasoning_effort_for_model(model: &str) -> &'static str {
+///
+/// Qwen 这类用户本地/中转模型不在 role 文件里钉死 effort，避免覆盖用户在当前
+/// Codex 会话或模型目录里选择的 high/xhigh；Spark/DeepSeek 保留有明确角色语义的默认值。
+fn codex_agent_reasoning_effort_for_model(model: &str) -> Option<&'static str> {
     let lower = model.to_ascii_lowercase();
-    if lower.starts_with("qwen") || lower.contains("spark") {
-        "low"
+    if lower.starts_with("qwen") {
+        return None;
+    }
+    if lower.contains("spark") {
+        Some("low")
     } else if lower.contains("pro") {
-        "high"
+        Some("high")
     } else {
-        "medium"
+        Some("medium")
     }
 }
 
 /// 为 role 文件写入更可读的昵称候选。
 fn codex_agent_nickname_candidates_for_role(role: &str) -> Vec<&'static str> {
+    if role.ends_with("qwen-local") {
+        return vec!["Qwen Local", "Qwen Scout", "Local Worker"];
+    }
     match role {
-        "qwen-local" => vec!["Qwen Local", "Qwen Scout", "Local Worker"],
         "deepseek-flash" => vec!["DeepSeek Flash", "Flash Worker", "Long Context"],
         "deepseek-pro" => vec!["DeepSeek Pro", "Deep Reviewer", "Pro Worker"],
         "codex-spark-worker" => vec!["Spark Worker", "Fast Fix", "Quick Pass"],
@@ -1640,7 +1648,9 @@ fn codex_managed_agent_role_name(
 /// 渲染官方 custom agent TOML。
 fn render_codex_managed_agent_toml(role: &str, spec: &CodexCatalogModelSpec) -> String {
     let description = codex_agent_description_for_model(&spec.model);
-    let effort = codex_agent_reasoning_effort_for_model(&spec.model);
+    let effort_line = codex_agent_reasoning_effort_for_model(&spec.model)
+        .map(|effort| format!("model_reasoning_effort = \"{effort}\"\n"))
+        .unwrap_or_default();
     let nicknames = codex_agent_nickname_candidates_for_role(role)
         .into_iter()
         .map(|name| format!("\"{name}\""))
@@ -1662,8 +1672,7 @@ Do not change unrelated files or override user-owned worktree changes.
 nickname_candidates = [{nicknames}]
 model = "{model}"
 model_provider = "{model_provider}"
-model_reasoning_effort = "{effort}"
-model_context_window = {context_window}
+{effort_line}model_context_window = {context_window}
 "#
     )
 }
@@ -1676,6 +1685,7 @@ fn sync_codex_managed_agent_files(specs: &[CodexCatalogModelSpec]) -> Result<(),
     fs::create_dir_all(&agents_dir).map_err(|e| AppError::io(&agents_dir, e))?;
 
     let mut seen_roles = HashSet::new();
+    let mut desired_paths = HashSet::new();
     for spec in specs.iter().take(5) {
         let base_role = codex_agent_role_name_for_model(&spec.model);
         if base_role.is_empty() {
@@ -1693,9 +1703,36 @@ fn sync_codex_managed_agent_files(specs: &[CodexCatalogModelSpec]) -> Result<(),
         {
             continue;
         }
+        desired_paths.insert(path.clone());
         write_text_file(&path, &render_codex_managed_agent_toml(&role, spec))?;
     }
 
+    prune_stale_codex_managed_agent_files(&agents_dir, &desired_paths)?;
+
+    Ok(())
+}
+
+/// 删除已经不属于当前前五候选窗口的 CCSwitchMulti 托管 agent 文件。
+///
+/// 只清理带托管标记的文件，用户手写 role、旧版未标记文件和其它扩展 agent 都保留。
+fn prune_stale_codex_managed_agent_files(
+    agents_dir: &Path,
+    desired_paths: &HashSet<PathBuf>,
+) -> Result<(), AppError> {
+    if !agents_dir.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(agents_dir).map_err(|e| AppError::io(agents_dir, e))? {
+        let entry = entry.map_err(|e| AppError::io(agents_dir, e))?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
+            continue;
+        }
+        if desired_paths.contains(&path) || !codex_agent_file_is_cc_switch_managed(&path) {
+            continue;
+        }
+        delete_file(&path)?;
+    }
     Ok(())
 }
 
@@ -1827,6 +1864,7 @@ pub fn prepare_codex_config_text_with_model_catalog(
         Ok(config_text)
     } else {
         restore_codex_models_cache_if_cc_switch_owned()?;
+        prune_stale_codex_managed_agent_files(&get_codex_agents_dir(), &HashSet::new())?;
         set_codex_model_catalog_projection_fields(config_text, None, None)
     }
 }
@@ -4932,6 +4970,11 @@ model_provider = "codex_model_router"
         assert!(managed.contains(r#"model_provider = "codex_model_router_v2""#));
         assert!(managed.contains(r#"model = "qwen3.6""#));
         assert!(
+            !managed.contains("model_reasoning_effort"),
+            "managed qwen agents should inherit the user's active effort instead of forcing low"
+        );
+        assert!(managed.contains(r#"nickname_candidates = ["Qwen Local""#));
+        assert!(
             !agents_dir.join("ccswitch-qwen-local.toml").exists(),
             "legacy CC Switch roles should be migrated in place so existing prompts keep working"
         );
@@ -4971,6 +5014,92 @@ model_provider = "custom"
         assert!(managed.contains(CC_SWITCH_MANAGED_AGENT_MARKER));
         assert!(managed.contains(r#"name = "ccswitch-qwen-local""#));
         assert!(managed.contains(r#"model_provider = "codex_model_router_v2""#));
+        assert!(
+            !managed.contains("model_reasoning_effort"),
+            "managed qwen agents should not pin an effort in fallback role files"
+        );
+        assert!(managed.contains(r#"nickname_candidates = ["Qwen Local""#));
+    }
+
+    #[test]
+    #[serial]
+    fn managed_agent_files_prune_stale_cc_switch_roles() {
+        let _guard = TestHomeGuard::new();
+        let agents_dir = get_codex_agents_dir();
+        std::fs::create_dir_all(&agents_dir).expect("create agents dir");
+        let stale_path = agents_dir.join("deepseek-flash.toml");
+        let user_path = agents_dir.join("user-agent.toml");
+        std::fs::write(
+            &stale_path,
+            format!(
+                r#"{CC_SWITCH_MANAGED_AGENT_MARKER}
+name = "deepseek-flash"
+model = "deepseek-v4-flash"
+"#
+            ),
+        )
+        .expect("seed stale managed role");
+        std::fs::write(
+            &user_path,
+            r#"name = "user-agent"
+model = "handwritten"
+"#,
+        )
+        .expect("seed user role");
+        let specs = vec![CodexCatalogModelSpec {
+            model: "qwen3.6".to_string(),
+            upstream_model: None,
+            display_name: "Qwen 3.6".to_string(),
+            context_window: 262_144,
+            text_only: false,
+            is_default: false,
+        }];
+
+        sync_codex_managed_agent_files(&specs).expect("sync managed agents");
+
+        assert!(
+            !stale_path.exists(),
+            "CCSwitchMulti-managed roles outside the current first-five window should be removed"
+        );
+        assert!(
+            agents_dir.join("qwen-local.toml").exists(),
+            "current managed role should be written"
+        );
+        assert!(
+            user_path.exists(),
+            "user-authored agent files without the managed marker must be preserved"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn removing_model_catalog_prunes_managed_agents() {
+        let _guard = TestHomeGuard::new();
+        let agents_dir = get_codex_agents_dir();
+        std::fs::create_dir_all(&agents_dir).expect("create agents dir");
+        let managed_path = agents_dir.join("qwen-local.toml");
+        std::fs::write(
+            &managed_path,
+            format!(
+                r#"{CC_SWITCH_MANAGED_AGENT_MARKER}
+name = "qwen-local"
+model = "qwen3.6"
+"#
+            ),
+        )
+        .expect("seed managed role");
+
+        let prepared = prepare_codex_config_text_with_model_catalog(
+            &json!({}),
+            r#"model_provider = "custom""#,
+        )
+        .expect("prepare empty catalog config");
+
+        assert!(!prepared.contains("model_catalog_json"));
+        assert!(
+            !managed_path.exists(),
+            "clearing the model catalog should remove old CCSwitchMulti-managed agents"
+        );
     }
 
     #[test]

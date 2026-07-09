@@ -391,6 +391,16 @@ pub struct CodexChatReasoningConfig {
     /// 该字段允许 provider/route 声明安全下限，避免 Codex 探测类小预算请求被截断。
     #[serde(rename = "minOutputTokens", skip_serializing_if = "Option::is_none")]
     pub min_output_tokens: Option<u64>,
+    /// Chat Completions 上游在请求没有任何输出预算时写入的默认输出上限。
+    ///
+    /// vLLM 这类上游缺省会把剩余上下文窗口都当成可输出预算；对 Codex 子 Agent 来说，
+    /// 这会让模型长时间只吐 reasoning，直到客户端断开。该字段只在请求没有
+    /// `max_tokens` / `max_completion_tokens` / `max_output_tokens` 时生效。
+    #[serde(
+        rename = "defaultOutputTokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub default_output_tokens: Option<u64>,
     /// 声明性字段：标注上游 reasoning 的回传位置（reasoning_content / reasoning /
     /// reasoning_details / think_tags）。当前响应侧 `extract_reasoning_field_text`
     /// 靠穷举字段提取、并不读取本字段；保留作文档说明与未来按格式分发（如 think_tags）的预留。
@@ -542,6 +552,15 @@ pub struct ProviderMeta {
     /// Codex Responses -> Chat Completions reasoning capability metadata.
     #[serde(rename = "codexChatReasoning", skip_serializing_if = "Option::is_none")]
     pub codex_chat_reasoning: Option<CodexChatReasoningConfig>,
+    /// Codex 单供应商模型目录是否投射为 `/model` 菜单映射。
+    ///
+    /// `modelCatalog` 本身还承担模型目录、上下文窗口、多路路由候选等元数据职责；
+    /// 这个开关只控制是否写出 `model_catalog_json` 以及对应的本地模型名映射。
+    #[serde(
+        rename = "codexLocalModelMapping",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub codex_local_model_mapping: Option<bool>,
     /// Custom User-Agent for local proxy routing.
     #[serde(rename = "customUserAgent", skip_serializing_if = "Option::is_none")]
     pub custom_user_agent: Option<String>,
@@ -596,6 +615,19 @@ impl ProviderMeta {
         self.codex_fast_mode.unwrap_or(false)
     }
 
+    /// 是否把 Codex `modelCatalog` 投射到真实 `config.toml`/模型菜单。
+    ///
+    /// 旧数据没有 `codexLocalModelMapping` 字段，若已经存在 `modelCatalog` 则沿用旧行为继续投射；
+    /// 新数据显式保存 `false` 后，目录仍保留在 DB 里，但不会改写 Codex `/model` 菜单。
+    pub fn codex_model_catalog_projection_enabled(&self, settings_config: &Value) -> bool {
+        if codex_routing_has_enabled_routes(settings_config) {
+            return true;
+        }
+
+        self.codex_local_model_mapping
+            .unwrap_or_else(|| settings_config.get("modelCatalog").is_some())
+    }
+
     /// 经校验的 Provider 级自定义 User-Agent。见 [`parse_custom_user_agent`]。
     pub fn custom_user_agent_header(&self) -> Result<Option<HeaderValue>, InvalidHeaderValue> {
         parse_custom_user_agent(self.custom_user_agent.as_deref())
@@ -619,6 +651,26 @@ impl ProviderMeta {
 
         None
     }
+}
+
+/// 判断 Codex provider 是否启用了多上游路由；多路由需要强制投射模型目录供 Codex 菜单和路由解析使用。
+fn codex_routing_has_enabled_routes(settings_config: &Value) -> bool {
+    let Some(routing) = settings_config.get("codexRouting") else {
+        return false;
+    };
+
+    if routing
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .is_some_and(|enabled| !enabled)
+    {
+        return false;
+    }
+
+    routing
+        .get("routes")
+        .and_then(Value::as_array)
+        .is_some_and(|routes| !routes.is_empty())
 }
 
 impl ProviderManager {
@@ -1073,6 +1125,60 @@ mod tests {
         let overrides = decoded.local_proxy_request_overrides.unwrap();
         assert_eq!(overrides.headers.get("X-Test"), Some(&"yes".to_string()));
         assert_eq!(overrides.body.unwrap()["temperature"], 0.2);
+    }
+
+    #[test]
+    fn provider_meta_roundtrips_codex_local_model_mapping() {
+        let meta = ProviderMeta {
+            codex_local_model_mapping: Some(false),
+            ..ProviderMeta::default()
+        };
+
+        let value = serde_json::to_value(&meta).expect("serialize ProviderMeta");
+        assert_eq!(value["codexLocalModelMapping"], false);
+        assert!(value.get("codex_local_model_mapping").is_none());
+
+        let decoded: ProviderMeta =
+            serde_json::from_value(value).expect("deserialize ProviderMeta");
+        assert_eq!(decoded.codex_local_model_mapping, Some(false));
+    }
+
+    #[test]
+    fn codex_model_catalog_projection_respects_explicit_menu_mapping_flag() {
+        let settings = json!({
+            "modelCatalog": { "models": [{ "model": "gpt-5.5" }] }
+        });
+
+        let disabled = ProviderMeta {
+            codex_local_model_mapping: Some(false),
+            ..ProviderMeta::default()
+        };
+        assert!(
+            !disabled.codex_model_catalog_projection_enabled(&settings),
+            "explicit false means catalog metadata should not be projected into Codex /model"
+        );
+
+        let legacy = ProviderMeta::default();
+        assert!(
+            legacy.codex_model_catalog_projection_enabled(&settings),
+            "legacy providers without the new flag keep the old modelCatalog projection behavior"
+        );
+
+        let routed = json!({
+            "modelCatalog": { "models": [{ "model": "gpt-5.5" }] },
+            "codexRouting": {
+                "enabled": true,
+                "routes": [{
+                    "id": "relay",
+                    "match": { "models": ["gpt-5.5-relay"] },
+                    "upstream": { "apiFormat": "openai_responses" }
+                }]
+            }
+        });
+        assert!(
+            disabled.codex_model_catalog_projection_enabled(&routed),
+            "MultiRouter plans must still project the aggregate catalog even when the single-provider menu flag is false"
+        );
     }
 
     #[test]

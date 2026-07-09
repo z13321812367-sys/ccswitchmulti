@@ -1,5 +1,5 @@
 import React from "react";
-import { RefreshCw, AlertCircle, Clock } from "lucide-react";
+import { RefreshCw, AlertCircle, Clock, RotateCcw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { AppId } from "@/lib/api";
 import { useSubscriptionQuota } from "@/lib/query/subscription";
@@ -89,6 +89,24 @@ function formatRelativeTime(
   if (diff < 86400)
     return t("usage.hoursAgo", { count: Math.floor(diff / 3600) });
   return t("usage.daysAgo", { count: Math.floor(diff / 86400) });
+}
+
+/** 判断 reset credit 是否处于可用状态。 */
+function isAvailableResetCredit(status: string | null | undefined): boolean {
+  return typeof status === "string" && status.toLowerCase() === "available";
+}
+
+/** 格式化 reset credit 到期时间，缺失时返回不可用提示。 */
+function formatResetCreditExpiry(expiresAt: string | null): string {
+  if (!expiresAt) return "expiry unavailable";
+  const date = new Date(expiresAt);
+  if (Number.isNaN(date.getTime())) return "expiry unavailable";
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 /**
@@ -211,7 +229,22 @@ export const SubscriptionQuotaView: React.FC<SubscriptionQuotaViewProps> = ({
   const tiers = (quota.tiers || []).filter(
     (tier) => tier.name in TIER_I18N_KEYS,
   );
-  if (tiers.length === 0) return null;
+  const resetCredits = quota.resetCredits;
+  const availableResetCount = Math.max(resetCredits?.availableCount ?? 0, 0);
+  const availableResetRows = (resetCredits?.credits ?? []).filter((credit) =>
+    isAvailableResetCredit(credit.status),
+  );
+  const missingResetExpiryCount = Math.max(
+    availableResetCount - availableResetRows.length,
+    0,
+  );
+  const visibleResetRows = availableResetRows.slice(0, 4);
+  const hiddenResetRowsCount = Math.max(
+    availableResetRows.length - visibleResetRows.length,
+    0,
+  );
+
+  if (tiers.length === 0 && availableResetCount === 0) return null;
 
   // ── inline 模式：紧凑两行显示 ──
   if (inline) {
@@ -245,6 +278,17 @@ export const SubscriptionQuotaView: React.FC<SubscriptionQuotaViewProps> = ({
             .map((tier) => (
               <TierBadge key={tier.name} tier={tier} t={t} />
             ))}
+          {availableResetCount > 0 && (
+            <div
+              className="flex items-center gap-0.5 text-sky-600 dark:text-sky-400"
+              title={quota.resetCreditsError ?? undefined}
+            >
+              <RotateCcw size={10} />
+              <span className="font-semibold tabular-nums">
+                Reset x{availableResetCount}
+              </span>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -280,6 +324,59 @@ export const SubscriptionQuotaView: React.FC<SubscriptionQuotaViewProps> = ({
           <TierBar key={tier.name} tier={tier} t={t} />
         ))}
       </div>
+
+      {/* Codex banked reset credits */}
+      {availableResetCount > 0 && (
+        <div className="mt-2 pt-2 border-t border-border-default text-xs">
+          <div className="mb-1 flex items-center justify-between gap-2">
+            <span className="font-medium text-gray-500 dark:text-gray-400 flex items-center gap-1.5">
+              <RotateCcw size={12} />
+              Codex reset credits
+            </span>
+            <span className="tabular-nums text-sky-600 dark:text-sky-400 font-semibold">
+              {availableResetCount} banked
+            </span>
+          </div>
+          <div className="flex flex-col gap-1 text-muted-foreground">
+            {visibleResetRows.map((credit, index) => (
+              <div
+                key={`${credit.expiresAt ?? "missing"}-${index}`}
+                className="flex items-center justify-between gap-3"
+              >
+                <span className="truncate">
+                  {credit.title || `Reset ${index + 1}`}
+                </span>
+                <span className="shrink-0 tabular-nums">
+                  {formatResetCreditExpiry(credit.expiresAt)}
+                </span>
+              </div>
+            ))}
+            {hiddenResetRowsCount > 0 && (
+              <div className="flex items-center justify-between gap-3">
+                <span>
+                  {hiddenResetRowsCount} more reset
+                  {hiddenResetRowsCount === 1 ? "" : "s"}
+                </span>
+                <span className="shrink-0">not shown</span>
+              </div>
+            )}
+            {missingResetExpiryCount > 0 && (
+              <div className="flex items-center justify-between gap-3">
+                <span>
+                  {missingResetExpiryCount} reset
+                  {missingResetExpiryCount === 1 ? "" : "s"} without expiry
+                </span>
+                <span className="shrink-0">unavailable</span>
+              </div>
+            )}
+          </div>
+          {quota.resetCreditsError && (
+            <div className="mt-1 text-[10px] text-amber-600 dark:text-amber-400 truncate">
+              {quota.resetCreditsError}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* 超额使用 */}
       {quota.extraUsage?.isEnabled && (

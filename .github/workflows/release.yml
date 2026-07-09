@@ -381,19 +381,19 @@ jobs:
           fi
 
           # 1) Collect .tar.gz (updater artifact)
-          NEW_TAR_GZ="CC-Switch-${VERSION}-macOS.tar.gz"
+          NEW_TAR_GZ="CCSwitchMulti-${VERSION}-macOS.tar.gz"
           cp "$TAR_GZ" "release-assets/$NEW_TAR_GZ"
           [ -f "$TAR_GZ.sig" ] && cp "$TAR_GZ.sig" "release-assets/$NEW_TAR_GZ.sig" || echo ".sig for macOS not found yet"
           echo "macOS updater artifact copied: $NEW_TAR_GZ"
 
           # 2) Collect .app as zip
-          NEW_ZIP="CC-Switch-${VERSION}-macOS.zip"
+          NEW_ZIP="CCSwitchMulti-${VERSION}-macOS.zip"
           ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "release-assets/$NEW_ZIP"
           echo "macOS zip ready: $NEW_ZIP"
 
           # 3) 收集 DMG。没有 Apple 签名时，发布 Tauri 已生成的未签名 DMG，
           # 避免工作流成功但 Release 静默缺少 macOS DMG。
-          NEW_DMG="CC-Switch-${VERSION}-macOS.dmg"
+          NEW_DMG="CCSwitchMulti-${VERSION}-macOS.dmg"
           if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
             DMG_PATH=""
             for path in \
@@ -420,16 +420,16 @@ jobs:
           DMG_STAGE_DIR="$RUNNER_TEMP/dmg-stage"
           rm -rf "$DMG_STAGE_DIR"
           mkdir -p "$DMG_STAGE_DIR"
-          ditto "$APP_PATH" "$DMG_STAGE_DIR/CC Switch.app"
+          ditto "$APP_PATH" "$DMG_STAGE_DIR/CCSwitchMulti.app"
 
           create-dmg \
-            --volname "CC Switch" \
+            --volname "CCSwitchMulti" \
             --background "src-tauri/icons/dmg-background.png" \
             --window-size 660 400 \
             --window-pos 200 120 \
             --icon-size 80 \
-            --icon "CC Switch.app" 180 220 \
-            --hide-extension "CC Switch.app" \
+            --icon "CCSwitchMulti.app" 180 220 \
+            --hide-extension "CCSwitchMulti.app" \
             --app-drop-link 480 220 \
             --codesign "$APPLE_SIGNING_IDENTITY" \
             --no-internet-enable \
@@ -549,7 +549,7 @@ jobs:
 
           $nsis = Get-ChildItem -Path (Join-Path $targetRoot 'bundle/nsis') -Recurse -Include *.exe -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($null -ne $nsis) {
-            $dest = "CC-Switch-$VERSION-Windows$assetSuffix-Setup.exe"
+            $dest = "CCSwitchMulti-$VERSION-Windows$assetSuffix-Setup.exe"
             Copy-Item $nsis.FullName (Join-Path release-assets $dest)
             Write-Host "NSIS installer copied: $dest"
             $sigPath = "$($nsis.FullName).sig"
@@ -575,7 +575,7 @@ jobs:
             $msi = Get-ChildItem -Path (Join-Path $targetRoot 'bundle') -Recurse -Include *.msi -ErrorAction SilentlyContinue | Select-Object -First 1
           }
           if ($null -ne $msi) {
-            $dest = "CC-Switch-$VERSION-Windows$assetSuffix.msi"
+            $dest = "CCSwitchMulti-$VERSION-Windows$assetSuffix.msi"
             Copy-Item $msi.FullName (Join-Path release-assets $dest)
             Write-Host "Installer copied: $dest"
             $sigPath = "$($msi.FullName).sig"
@@ -602,27 +602,27 @@ jobs:
           }
           $exePath = $exeCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
           if ($null -ne $exePath) {
-            $portableDir = 'release-assets/CC-Switch-Portable'
+            $portableDir = 'release-assets/CCSwitchMulti-Portable'
             New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
-            Copy-Item $exePath $portableDir
+            Copy-Item $exePath (Join-Path $portableDir 'CCSwitchMulti.exe')
             $portableIniPath = Join-Path $portableDir 'portable.ini'
             $portableContent = if ($isArm64) {
               @(
-                '# CC Switch portable ARM64 build marker',
+                '# CCSwitchMulti portable ARM64 build marker',
                 'portable=true',
                 'arch=arm64'
               )
             } else {
               @(
-                '# CC Switch portable build marker',
+                '# CCSwitchMulti portable build marker',
                 'portable=true'
               )
             }
             $portableContent | Set-Content -Path $portableIniPath -Encoding UTF8
-            $portableZip = "release-assets/CC-Switch-$VERSION-Windows$assetSuffix-Portable.zip"
+            $portableZip = "release-assets/CCSwitchMulti-$VERSION-Windows$assetSuffix-Portable.zip"
             Compress-Archive -Path "$portableDir/*" -DestinationPath $portableZip -Force
             Remove-Item -Recurse -Force $portableDir
-            Write-Host "Windows portable zip created: CC-Switch-$VERSION-Windows$assetSuffix-Portable.zip"
+            Write-Host "Windows portable zip created: CCSwitchMulti-$VERSION-Windows$assetSuffix-Portable.zip"
           } elseif ($isArm64) {
             throw 'Portable ARM64 exe not found'
           } else {
@@ -640,7 +640,7 @@ jobs:
           # Updater artifact: AppImage（含对应 .sig）
           APPIMAGE=$(find src-tauri/target/release/bundle -name "*.AppImage" | head -1 || true)
           if [ -n "$APPIMAGE" ]; then
-            NEW_APPIMAGE="CC-Switch-${VERSION}-Linux-${ARCH}.AppImage"
+            NEW_APPIMAGE="CCSwitchMulti-${VERSION}-Linux-${ARCH}.AppImage"
             cp "$APPIMAGE" "release-assets/$NEW_APPIMAGE"
             [ -f "$APPIMAGE.sig" ] && cp "$APPIMAGE.sig" "release-assets/$NEW_APPIMAGE.sig" || echo ".sig for AppImage not found"
             echo "AppImage copied: $NEW_APPIMAGE"
@@ -650,16 +650,16 @@ jobs:
           # 额外上传 .deb（用于手动安装，不参与 Updater）
           DEB=$(find src-tauri/target/release/bundle -name "*.deb" | head -1 || true)
           if [ -n "$DEB" ]; then
-            cp "$DEB" "release-assets/CC-Switch-${VERSION}-Linux-${ARCH}.deb"
-            echo "Deb package copied: CC-Switch-${VERSION}-Linux-${ARCH}.deb"
+            cp "$DEB" "release-assets/CCSwitchMulti-${VERSION}-Linux-${ARCH}.deb"
+            echo "Deb package copied: CCSwitchMulti-${VERSION}-Linux-${ARCH}.deb"
           else
             echo "No .deb found (optional)"
           fi
           # 额外上传 .rpm（用于 Fedora/RHEL/openSUSE 等，不参与 Updater）
           RPM=$(find src-tauri/target/release/bundle -name "*.rpm" | head -1 || true)
           if [ -n "$RPM" ]; then
-            cp "$RPM" "release-assets/CC-Switch-${VERSION}-Linux-${ARCH}.rpm"
-            echo "RPM package copied: CC-Switch-${VERSION}-Linux-${ARCH}.rpm"
+            cp "$RPM" "release-assets/CCSwitchMulti-${VERSION}-Linux-${ARCH}.rpm"
+            echo "RPM package copied: CCSwitchMulti-${VERSION}-Linux-${ARCH}.rpm"
           else
             echo "No .rpm found (optional)"
           fi
@@ -742,17 +742,15 @@ jobs:
 
           ## 下载
 
-          - **macOS**: \`CC-Switch-${TAG}-macOS.dmg\`（未配置 Apple 签名时为未签名版）或 \`CC-Switch-${TAG}-macOS.zip\`（解压即用）
-          - **Windows (x86_64)**: \`CC-Switch-${TAG}-Windows-Setup.exe\`（安装版）或 \`CC-Switch-${TAG}-Windows-Portable.zip\`（绿色版）
-          - **Windows (ARM64)**: \`CC-Switch-${TAG}-Windows-arm64-Setup.exe\`（安装版）或 \`CC-Switch-${TAG}-Windows-arm64-Portable.zip\`（绿色版）
-          - **Linux (x86_64)**: \`CC-Switch-${TAG}-Linux-x86_64.AppImage\` / \`.deb\` / \`.rpm\`
-          - **Linux (ARM64)**: \`CC-Switch-${TAG}-Linux-arm64.AppImage\` / \`.deb\` / \`.rpm\`
+          - **macOS**: \`CCSwitchMulti-${TAG}-macOS.dmg\`（未配置 Apple 签名时为未签名版）或 \`CCSwitchMulti-${TAG}-macOS.zip\`（解压即用）
+          - **Windows (x86_64)**: \`CCSwitchMulti-${TAG}-Windows-Setup.exe\`（安装版）或 \`CCSwitchMulti-${TAG}-Windows-Portable.zip\`（绿色版）
+          - **Windows (ARM64)**: \`CCSwitchMulti-${TAG}-Windows-arm64-Setup.exe\`（安装版）或 \`CCSwitchMulti-${TAG}-Windows-arm64-Portable.zip\`（绿色版）
+          - **Linux (x86_64)**: \`CCSwitchMulti-${TAG}-Linux-x86_64.AppImage\` / \`.deb\` / \`.rpm\`
+          - **Linux (ARM64)**: \`CCSwitchMulti-${TAG}-Linux-arm64.AppImage\` / \`.deb\` / \`.rpm\`
 
           > \`.tar.gz\` 为 Tauri updater 自动更新专用，无需手动下载。
 
           ---
-
-          🌐 **Only Official Website / 唯一官方网站 / 唯一の公式サイト**: [ccswitch.io](https://ccswitch.io)
 
           macOS DMG 在仓库配置 Apple 签名和公证密钥时会签名并公证；未配置时发布 Tauri 生成的未签名 DMG、updater tarball 和 app zip。
           EOF

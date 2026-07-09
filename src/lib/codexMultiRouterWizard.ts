@@ -91,20 +91,72 @@ const OPENAI_CODEX_FALLBACK_MODELS: CodexCatalogModel[] = [
   },
 ];
 
-// 判断模型源是否是官方/OAuth 路径；这些 provider 常常不能通过普通 /models 获取目录。
-function isOfficialCodexSource(provider: Provider): boolean {
-  const text = `${provider.id} ${provider.name} ${provider.category ?? ""} ${
-    provider.meta?.providerType ?? ""
-  }`.toLowerCase();
-  const providerType = String(provider.meta?.providerType ?? "").toLowerCase();
+// 读取 provider 上绑定的托管 Codex OAuth 账号；未绑定时交给后端使用默认账号。
+function readWizardCodexOAuthAccountId(provider: Provider): string | undefined {
+  const meta = provider.meta as
+    | (Provider["meta"] & {
+        auth_binding?: { accountId?: string; account_id?: string };
+      })
+    | undefined;
+  const authBinding = (meta?.authBinding ?? meta?.auth_binding) as
+    | { accountId?: string; account_id?: string }
+    | undefined;
+  const accountId = authBinding?.accountId ?? authBinding?.account_id;
+  return typeof accountId === "string" && accountId.trim()
+    ? accountId.trim()
+    : undefined;
+}
+
+// 判断模型源是否是官方 Codex OAuth 路径；这类 provider 使用 ChatGPT 登录，不走 API Key + /models。
+export function isWizardCodexOAuthSource(provider: Provider): boolean {
+  const config = provider.settingsConfig ?? {};
+  const meta = provider.meta as
+    | (Provider["meta"] & {
+        auth_binding?: {
+          source?: string;
+          authProvider?: string;
+          auth_provider?: string;
+        };
+      })
+    | undefined;
+  const providerType = String(
+    meta?.providerType ?? config.providerType ?? "",
+  ).toLowerCase();
+  const authBinding = (meta?.authBinding ?? meta?.auth_binding) as
+    | {
+        source?: string;
+        authProvider?: string;
+        auth_provider?: string;
+      }
+    | undefined;
+  const authSource = String(
+    authBinding?.source ?? config.auth?.source ?? "",
+  ).toLowerCase();
+  const authProvider = String(
+    authBinding?.authProvider ??
+      authBinding?.auth_provider ??
+      config.auth?.authProvider ??
+      config.auth?.auth_provider ??
+      "",
+  ).toLowerCase();
+  const authMode = String(config.auth?.auth_mode ?? "").toLowerCase();
+  const baseUrl = readWizardProviderBaseUrl(provider).toLowerCase();
   const idOrName = `${provider.id} ${provider.name}`.toLowerCase();
   return (
     provider.category === "official" ||
     providerType.includes("codex_oauth") ||
-    text.includes("codex_oauth") ||
+    authSource === "managed_codex_oauth" ||
+    authProvider === "codex_oauth" ||
+    authMode === "chatgpt" ||
+    baseUrl.includes("chatgpt.com/backend-api/codex") ||
     idOrName === "openai openai" ||
     (idOrName.includes("openai") && idOrName.includes("official"))
   );
+}
+
+// 判断模型源是否是官方/OAuth 路径；这些 provider 常常不能通过普通 /models 获取目录。
+function isOfficialCodexSource(provider: Provider): boolean {
+  return isWizardCodexOAuthSource(provider);
 }
 
 // 读取 Codex provider 的模型目录；旧数据缺失或结构异常时返回空目录，避免向导崩溃。
@@ -153,6 +205,7 @@ function readWizardProviderApiKey(provider: Provider): string {
 export function getWizardModelFetchConfig(
   provider: Provider,
 ): WizardModelFetchConfig | null {
+  if (isWizardCodexOAuthSource(provider)) return null;
   const config = provider.settingsConfig ?? {};
   const baseUrl = readWizardProviderBaseUrl(provider);
   const accessKeyId = provider.meta?.usage_script?.accessKeyId;
@@ -230,6 +283,7 @@ export function getWizardConfigIssues(
 ): WizardConfigIssue[] {
   return providers
     .filter((provider) => {
+      if (isWizardCodexOAuthSource(provider)) return false;
       const hasCatalog = hasWizardModelCatalog(provider);
       if (isWizardCatalogOnlyModelSource(provider)) return !hasCatalog;
       return !getWizardModelFetchConfig(provider) && !hasCatalog;
@@ -243,38 +297,73 @@ export function getWizardConfigIssues(
     }));
 }
 
-// 把 /models 返回值合并进 provider modelCatalog；保留已有用户手写字段和 upstreamModel。
+export interface MergeFetchedWizardModelsOptions {
+  preserveExistingSelection?: boolean;
+}
+
+// 把 /models 返回值合并进 provider modelCatalog；可选择把已有目录当作用户保留列表，只刷新元数据不追加已删除模型。
 export function mergeFetchedModelsIntoWizardProvider(
   provider: Provider,
   fetchedModels: FetchedModel[],
+  options: MergeFetchedWizardModelsOptions = {},
 ): Provider {
   const existingModels = readWizardModelCatalog(provider);
   const byModel = new Map<string, CodexCatalogModel>();
+  const byFetchedModel = new Map<string, string>();
   for (const model of existingModels) {
     byModel.set(model.model, model);
+    const visibleModel = model.model?.trim();
+    if (visibleModel) {
+      byFetchedModel.set(visibleModel, model.model);
+    }
+    const upstreamModel = (
+      model.upstreamModel ??
+      model.upstream_model ??
+      model.model
+    )?.trim();
+    if (upstreamModel) {
+      byFetchedModel.set(upstreamModel, model.model);
+    }
   }
+  const shouldAppendFetchedModels =
+    !options.preserveExistingSelection || existingModels.length === 0;
   for (const fetched of fetchedModels) {
     const modelId = fetched.id.trim();
     if (!modelId) continue;
-    const existing = byModel.get(modelId);
-    byModel.set(modelId, {
+    const visibleModelId = byFetchedModel.get(modelId) ?? modelId;
+    const existing = byModel.get(visibleModelId);
+    if (!existing && !shouldAppendFetchedModels) continue;
+    byModel.set(visibleModelId, {
       ...(existing ?? {}),
-      model: modelId,
+      model: visibleModelId,
       upstreamModel:
         existing?.upstreamModel ?? existing?.upstream_model ?? modelId,
-      displayName: existing?.displayName ?? modelId,
+      displayName: existing?.displayName ?? visibleModelId,
       ...(fetched.contextWindow
         ? { contextWindow: fetched.contextWindow }
         : {}),
     });
   }
+  const models = Array.from(byModel.values());
+  const allowedModels = new Set(models.map((model) => model.model));
+  const rawSpawnAgentModels =
+    provider.settingsConfig?.modelCatalog?.spawnAgentModels;
+  const spawnAgentModels = Array.isArray(rawSpawnAgentModels)
+    ? rawSpawnAgentModels
+        .filter(
+          (model): model is string =>
+            typeof model === "string" && allowedModels.has(model),
+        )
+        .slice(0, 5)
+    : undefined;
   return {
     ...provider,
     settingsConfig: {
       ...provider.settingsConfig,
       modelCatalog: {
         ...(provider.settingsConfig?.modelCatalog ?? {}),
-        models: Array.from(byModel.values()),
+        models,
+        ...(spawnAgentModels ? { spawnAgentModels } : {}),
       },
     },
   };
@@ -737,6 +826,9 @@ export function buildWizardRoutesFromSources(
   return providers.map((provider) => {
     const models = readWizardModelCatalog(provider).map((model) => model.model);
     const modelMap = buildWizardRouteModelMap(provider);
+    const oauthAccountId = isWizardCodexOAuthSource(provider)
+      ? readWizardCodexOAuthAccountId(provider)
+      : undefined;
     return {
       id: `router-${provider.id}`,
       label: provider.name,
@@ -748,7 +840,13 @@ export function buildWizardRoutesFromSources(
       },
       upstream: {
         apiFormat: inferWizardApiFormat(provider),
-        auth: { source: "provider_config" },
+        auth: isWizardCodexOAuthSource(provider)
+          ? {
+              source: "managed_codex_oauth",
+              authProvider: "codex_oauth",
+              ...(oauthAccountId ? { accountId: oauthAccountId } : {}),
+            }
+          : { source: "provider_config" },
         ...(modelMap ? { modelMap } : {}),
       },
       capabilities: {

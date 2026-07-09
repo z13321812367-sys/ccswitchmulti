@@ -899,6 +899,8 @@ mod tests {
             success,
             tiers,
             extra_usage: None,
+            reset_credits: None,
+            reset_credits_error: None,
             error: None,
             queried_at: Some(0),
         }

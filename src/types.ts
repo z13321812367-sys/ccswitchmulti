@@ -173,6 +173,8 @@ export interface CodexChatReasoning {
   effortValueMode?: CodexChatEffortValueMode;
   // Chat Completions 上游的最小输出 token 预算，用于避免小预算请求被 reasoning 吃空正文。
   minOutputTokens?: number;
+  // 请求没有任何输出预算时写入的默认上限，避免 vLLM 把剩余上下文都当输出预算。
+  defaultOutputTokens?: number;
   // 声明性字段：标注上游 reasoning 回传位置。当前提取靠穷举字段，未读取此值（think_tags 尚未接线）。
   outputFormat?: CodexChatReasoningOutputFormat;
 }
@@ -237,6 +239,8 @@ export interface ProviderMeta {
   codexFastMode?: boolean;
   // Codex Responses -> Chat Completions reasoning capability metadata
   codexChatReasoning?: CodexChatReasoning;
+  // Codex 单供应商模型目录是否投射为 /model 菜单映射；关闭时 modelCatalog 只作为目录/上下文元数据保存。
+  codexLocalModelMapping?: boolean;
   // Custom User-Agent for local proxy routing. Only applied by the local proxy.
   customUserAgent?: string;
   // Local proxy request overrides. Only applied by the local proxy after route transforms.

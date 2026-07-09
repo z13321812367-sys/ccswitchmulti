@@ -771,13 +771,56 @@ pub fn set_default_model(model: &OpenClawDefaultModel) -> Result<OpenClawWriteOu
 
     let model_value =
         serde_json::to_value(model).map_err(|e| AppError::JsonSerialize { source: e })?;
-    ensure_object(defaults).insert("model".to_string(), model_value);
+    let defaults_obj = ensure_object(defaults);
+    defaults_obj.insert("model".to_string(), model_value);
+    upsert_default_model_refs_into_catalog(defaults_obj, model);
 
     let agents_value = root
         .get("agents")
         .cloned()
         .unwrap_or_else(|| Value::Object(Map::new()));
     write_root_section("agents", &agents_value)
+}
+
+/// 将默认模型引用同步进 `agents.defaults.models`，保证 OpenClaw 能从同一套 key 读取能力声明。
+fn upsert_default_model_refs_into_catalog(
+    defaults: &mut Map<String, Value>,
+    model: &OpenClawDefaultModel,
+) {
+    let refs = default_model_refs(model);
+    if refs.is_empty() {
+        return;
+    }
+
+    let catalog = defaults
+        .entry("models".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let catalog_obj = ensure_object(catalog);
+
+    for model_ref in refs {
+        if catalog_obj.contains_key(&model_ref) {
+            continue;
+        }
+
+        let existing_key = catalog_obj
+            .keys()
+            .find(|key| key.eq_ignore_ascii_case(&model_ref))
+            .cloned();
+        let existing_value = existing_key
+            .and_then(|key| catalog_obj.remove(&key))
+            .unwrap_or_else(|| Value::Object(Map::new()));
+        catalog_obj.insert(model_ref, existing_value);
+    }
+}
+
+/// 收集默认主模型和回退模型引用，并过滤空白值避免写出无效 catalog key。
+fn default_model_refs(model: &OpenClawDefaultModel) -> Vec<String> {
+    std::iter::once(model.primary.as_str())
+        .chain(model.fallbacks.iter().map(String::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 /// 读取模型目录/允许列表（agents.defaults.models）
@@ -1027,6 +1070,74 @@ mod tests {
             let second_written = fs::read_to_string(get_openclaw_config_path()).unwrap();
             assert_eq!(second_written, first_written);
             assert_eq!(fs::read_dir(&backup_dir).unwrap().count(), backup_count);
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn default_model_write_registers_catalog_refs() {
+        let source = r#"{
+  models: {
+    mode: 'merge',
+    providers: {},
+  },
+  agents: {
+    defaults: {
+      workspace: "/tmp/workspace",
+    },
+  },
+}
+"#;
+
+        with_test_paths(source, |_| {
+            set_default_model(&OpenClawDefaultModel {
+                primary: "vllm/qwen3.6".to_string(),
+                fallbacks: vec!["vllm/qwen3.6-flash".to_string()],
+                extra: HashMap::new(),
+            })
+            .unwrap();
+
+            let catalog = get_model_catalog()
+                .unwrap()
+                .expect("default model write should create agents.defaults.models");
+            assert!(catalog.contains_key("vllm/qwen3.6"));
+            assert!(catalog.contains_key("vllm/qwen3.6-flash"));
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn default_model_write_canonicalizes_case_variant_catalog_ref() {
+        let source = r#"{
+  agents: {
+    defaults: {
+      models: {
+        "vllm/Qwen3.6": { alias: "Qwen Local" },
+      },
+    },
+  },
+}
+"#;
+
+        with_test_paths(source, |_| {
+            set_default_model(&OpenClawDefaultModel {
+                primary: "vllm/qwen3.6".to_string(),
+                fallbacks: Vec::new(),
+                extra: HashMap::new(),
+            })
+            .unwrap();
+
+            let catalog = get_model_catalog()
+                .unwrap()
+                .expect("catalog should still exist after canonicalization");
+            assert!(catalog.contains_key("vllm/qwen3.6"));
+            assert!(!catalog.contains_key("vllm/Qwen3.6"));
+            assert_eq!(
+                catalog
+                    .get("vllm/qwen3.6")
+                    .and_then(|entry| entry.alias.as_deref()),
+                Some("Qwen Local")
+            );
         });
     }
 

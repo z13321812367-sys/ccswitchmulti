@@ -123,6 +123,10 @@ vi.mock("@/components/codex/CodexRouterWorkspacePage", async () => {
   };
 });
 
+vi.mock("@/components/codex/CodexUsagePage", () => ({
+  CodexUsagePage: () => <div data-testid="codex-usage-page" />,
+}));
+
 vi.mock("@/components/codex/CodexMultiRouterWizard", () => ({
   CodexMultiRouterWizard: ({ open, onOpenChange }: any) =>
     open ? (
@@ -458,6 +462,24 @@ describe("App integration with MSW", () => {
       "codex-router",
     );
     expect(screen.getByTestId("codex-router-tab").textContent).toBe("status");
+  });
+
+  it("opens the Codex usage page from the Codex toolbar", async () => {
+    const { default: App } = await import("@/App");
+    renderApp(App);
+
+    fireEvent.click(screen.getByText("switch-codex"));
+    await waitFor(() =>
+      expect(screen.getByTestId("provider-list").textContent).toContain(
+        "codex-1",
+      ),
+    );
+
+    fireEvent.click(screen.getByTitle("Codex 用量与重置额度"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("codex-usage-page")).toBeInTheDocument(),
+    );
   });
 
   it("shows toast when duplicate cannot load live provider ids", async () => {

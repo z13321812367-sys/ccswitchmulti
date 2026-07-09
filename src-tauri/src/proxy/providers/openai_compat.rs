@@ -7,7 +7,9 @@
 
 use crate::proxy::{
     error::ProxyError,
-    json_canonical::{canonical_json_string, canonicalize_json_string_if_parseable},
+    json_canonical::{
+        canonical_json_string, canonicalize_json_string_if_parseable, canonicalize_tool_arguments,
+    },
     sse::{append_utf8_safe, strip_sse_field, take_sse_block},
 };
 use bytes::Bytes;
@@ -147,6 +149,7 @@ pub(crate) fn normalize_codex_responses_passthrough_request(request_body: Value)
     };
 
     normalize_codex_responses_control_messages(&mut body);
+    normalize_codex_responses_function_call_arguments(&mut body);
 
     Value::Object(body)
 }
@@ -190,6 +193,48 @@ fn normalize_codex_responses_control_messages(body: &mut Map<String, Value>) {
     let (input, control_instructions) = lift_codex_responses_control_messages(input);
     append_codex_responses_control_instructions(body, control_instructions);
     body.insert("input".to_string(), input);
+}
+
+/// 规整 Codex Responses input 中历史 function_call 的 arguments。
+///
+/// 参数:
+/// - `body`: 正在转发给原生 Responses 上游的请求体对象。
+///   返回:
+/// - 无，直接修改 `body.input[*].arguments`。
+///   副作用:
+/// - 无外部副作用；只修改内存中的 JSON 对象。
+///   边界:
+/// - 只处理 `type=function_call` 的 Responses 历史 item。MiniMax 等严格上游会重新解析
+///   历史工具调用，空字符串或被截断的 JSON 片段会直接触发 400；这里把它们规整为合法
+///   JSON 字符串，同时把非法原文保存在 `raw_arguments` 中，避免丢失排障信息。
+fn normalize_codex_responses_function_call_arguments(body: &mut Map<String, Value>) {
+    let Some(Value::Array(items)) = body.get_mut("input") else {
+        return;
+    };
+
+    for item in items {
+        normalize_codex_responses_function_call_item_arguments(item);
+    }
+}
+
+/// 规整单条 Responses function_call item 的 arguments 字段。
+///
+/// 参数:
+/// - `item`: 一条 Responses input item。
+///   返回:
+/// - 无，若该 item 是 function_call，则确保 `arguments` 是合法 JSON 字符串。
+///   副作用:
+/// - 无。
+fn normalize_codex_responses_function_call_item_arguments(item: &mut Value) {
+    let Value::Object(object) = item else {
+        return;
+    };
+    if object.get("type").and_then(Value::as_str) != Some("function_call") {
+        return;
+    }
+
+    let arguments = canonicalize_tool_arguments(object.get("arguments"));
+    object.insert("arguments".to_string(), Value::String(arguments));
 }
 
 /// 提升 Codex Responses input 中的 system/developer 控制消息。
@@ -1707,6 +1752,46 @@ mod tests {
         assert_eq!(input.len(), 1);
         assert_eq!(input[0]["role"], "user");
         assert_eq!(input[0]["content"][0]["text"], "continue");
+    }
+
+    #[test]
+    fn codex_responses_passthrough_normalizes_function_call_arguments() {
+        // MiniMax 等严格 Responses 上游会重新解析历史 function_call.arguments。
+        // 空字符串或被截断的 JSON 片段必须在透传前变成合法 JSON 字符串。
+        let body = json!({
+            "model": "MiniMax-M3",
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_empty",
+                    "name": "update_plan",
+                    "arguments": ""
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_empty",
+                    "output": "ok"
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_partial",
+                    "name": "read_file",
+                    "arguments": "{"
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "continue" }]
+                }
+            ]
+        });
+
+        let normalized = normalize_codex_responses_passthrough_request(body);
+        let input = normalized["input"].as_array().expect("input array");
+
+        assert_eq!(input[0]["arguments"], "{}");
+        assert_eq!(input[2]["arguments"], r#"{"raw_arguments":"{"}"#);
+        assert_eq!(input[3]["role"], "user");
     }
 
     #[test]

@@ -171,7 +171,7 @@ const normalizeClaudeApiFormat = (
     : undefined;
 };
 
-// 从已保存的 settingsConfig 推断 Codex 模型映射条目数（用于决定本地路由初始开关）。
+// 从已保存的 settingsConfig 推断 Codex 模型目录条目数；旧版没有独立映射开关时用它做兼容推断。
 const codexCatalogCountFromSettings = (settingsConfig: unknown): number => {
   if (settingsConfig && typeof settingsConfig === "object") {
     const models = (settingsConfig as { modelCatalog?: { models?: unknown } })
@@ -179,6 +179,16 @@ const codexCatalogCountFromSettings = (settingsConfig: unknown): number => {
     return Array.isArray(models) ? models.length : 0;
   }
   return 0;
+};
+
+// 读取 Codex 菜单映射开关。新配置优先读取 meta；旧配置没有 meta 时继续按 modelCatalog 存在与否启用。
+const codexLocalModelMappingFromInitialData = (
+  initialData: ProviderFormProps["initialData"] | undefined,
+): boolean => {
+  if (typeof initialData?.meta?.codexLocalModelMapping === "boolean") {
+    return initialData.meta.codexLocalModelMapping;
+  }
+  return codexCatalogCountFromSettings(initialData?.settingsConfig) > 0;
 };
 
 export const normalizeCodexCatalogModelsForSave = (
@@ -246,12 +256,59 @@ const normalizeCodexSpawnAgentModelsForSave = (
   return normalized;
 };
 
-const normalizeCodexChatReasoningForSave = (
+type CodexChatReasoningSaveContext = {
+  providerName?: string;
+  baseUrl?: string;
+  models?: CodexCatalogModel[];
+};
+
+const QWEN_VLLM_MIN_OUTPUT_TOKENS = 2048;
+
+// 把表单里的最小输出预算收敛为正整数；空值或非法值保持未配置。
+const normalizeCodexOutputTokensForSave = (
+  value: number | undefined,
+): number | undefined => {
+  if (value === undefined) return undefined;
+  const normalized = Math.floor(Number(value));
+  return Number.isFinite(normalized) && normalized > 0 ? normalized : undefined;
+};
+
+// 判断当前 provider 是否是 Qwen + vLLM 兼容端点，保存时需要沿用后端同一组思考参数默认值。
+const shouldApplyQwenVllmReasoningDefaults = (
+  context?: CodexChatReasoningSaveContext,
+): boolean => {
+  const haystack = [
+    context?.providerName,
+    context?.baseUrl,
+    ...(context?.models ?? []).flatMap((model) => [
+      model.model,
+      model.upstreamModel,
+      model.upstream_model,
+      model.displayName,
+    ]),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  return (
+    haystack.includes("qwen") &&
+    (haystack.includes("vllm") || haystack.includes("matrixminecraft"))
+  );
+};
+
+export const normalizeCodexChatReasoningForSave = (
   value?: CodexChatReasoning,
+  context?: CodexChatReasoningSaveContext,
 ): CodexChatReasoning | undefined => {
   const supportsEffort = value?.supportsEffort === true;
   const supportsThinking = value?.supportsThinking === true || supportsEffort;
   const hasExplicitConfig = value && Object.keys(value).length > 0;
+  const minOutputTokens = normalizeCodexOutputTokensForSave(
+    value?.minOutputTokens,
+  );
+  const defaultOutputTokens = normalizeCodexOutputTokensForSave(
+    value?.defaultOutputTokens,
+  );
 
   if (!supportsThinking && !supportsEffort) {
     return hasExplicitConfig
@@ -260,23 +317,41 @@ const normalizeCodexChatReasoningForSave = (
           supportsEffort: false,
           thinkingParam: "none",
           effortParam: "none",
+          ...(minOutputTokens ? { minOutputTokens } : {}),
+          ...(defaultOutputTokens ? { defaultOutputTokens } : {}),
           outputFormat: value?.outputFormat ?? "auto",
         }
       : undefined;
   }
 
+  const useQwenVllmDefaults = shouldApplyQwenVllmReasoningDefaults(context);
+  const thinkingParam =
+    supportsThinking &&
+    useQwenVllmDefaults &&
+    (!value?.thinkingParam || value.thinkingParam === "thinking")
+      ? "enable_thinking"
+      : supportsThinking
+        ? (value?.thinkingParam ?? "thinking")
+        : "none";
+  const safeMinOutputTokens = useQwenVllmDefaults
+    ? Math.max(minOutputTokens ?? 0, QWEN_VLLM_MIN_OUTPUT_TOKENS)
+    : minOutputTokens;
+  const safeDefaultOutputTokens = defaultOutputTokens;
+
   return {
     supportsThinking,
     supportsEffort,
-    thinkingParam: supportsThinking
-      ? (value?.thinkingParam ?? "thinking")
-      : "none",
+    thinkingParam,
     effortParam: supportsEffort
       ? (value?.effortParam ?? "reasoning_effort")
       : "none",
     effortValueMode: supportsEffort
       ? (value?.effortValueMode ?? "passthrough")
       : undefined,
+    ...(safeMinOutputTokens ? { minOutputTokens: safeMinOutputTokens } : {}),
+    ...(safeDefaultOutputTokens
+      ? { defaultOutputTokens: safeDefaultOutputTokens }
+      : {}),
     outputFormat: value?.outputFormat ?? "auto",
   };
 };
@@ -665,13 +740,19 @@ function ProviderFormFull({
   const [localCodexApiFormat, setLocalCodexApiFormat] =
     useState<CodexApiFormat>(initialCodexApiFormat);
 
-  // 本地路由（接管）开关 —— 纯模型映射门控，与上游格式完全独立。
-  // 没有独立持久化字段，初值仅按「是否已配置模型映射」推断（有 catalog 即视为
-  // 接管已开）。只在 useState 初始化与预设重置点设置，跟 localCodexApiFormat
-  // 对称，避免漂移。
+  // Codex 菜单映射开关 —— 只控制 modelCatalog 是否投射到 /model 菜单和本地映射。
+  // modelCatalog 现在也承担目录/上下文元数据职责，保存和获取模型列表不再依赖此开关。
   const [codexTakeoverEnabled, setCodexTakeoverEnabled] = useState<boolean>(
-    () => codexCatalogCountFromSettings(initialData?.settingsConfig) > 0,
+    () => codexLocalModelMappingFromInitialData(initialData),
   );
+
+  useEffect(() => {
+    if (appId !== "codex") {
+      setCodexTakeoverEnabled(false);
+      return;
+    }
+    setCodexTakeoverEnabled(codexLocalModelMappingFromInitialData(initialData));
+  }, [appId, initialData]);
 
   const { configError: codexConfigError, debouncedValidate } =
     useCodexTomlValidation();
@@ -1354,9 +1435,7 @@ function ProviderFormFull({
           shouldPersistCodexLocalConfig && (codexConfig ?? "").trim()
             ? setCodexWireApi(codexConfig ?? "", "responses")
             : (codexConfig ?? "");
-        const shouldPersistCodexCatalog =
-          shouldPersistCodexLocalConfig &&
-          (codexTakeoverEnabled || hasCodexRouting);
+        const shouldPersistCodexCatalog = shouldPersistCodexLocalConfig;
         const normalizedCatalogModels = shouldPersistCodexCatalog
           ? normalizeCodexCatalogModelsForSave(codexCatalogModels)
           : [];
@@ -1575,7 +1654,15 @@ function ProviderFormFull({
         category !== "official" &&
         codexTakeoverEnabled &&
         localCodexApiFormat === "openai_chat"
-          ? normalizeCodexChatReasoningForSave(codexChatReasoning)
+          ? normalizeCodexChatReasoningForSave(codexChatReasoning, {
+              providerName: form.getValues("name"),
+              baseUrl: codexBaseUrl,
+              models: codexCatalogModels,
+            })
+          : undefined,
+      codexLocalModelMapping:
+        appId === "codex" && category !== "official"
+          ? codexTakeoverEnabled
           : undefined,
       customUserAgent:
         (appId === "claude" || appId === "codex") && category !== "official"

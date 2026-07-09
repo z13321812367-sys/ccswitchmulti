@@ -54,6 +54,7 @@ export const proxyApi = {
     return invoke("diagnose_codex_multirouter", { providerId });
   },
 
+  // 解锁 Codex Desktop 模型菜单；CLI/app-server 支持由 live config/catalog/proxy 链路负责。
   async unlockCodexModelPicker(): Promise<CodexModelPickerUnlockResult> {
     return invoke("unlock_codex_model_picker");
   },

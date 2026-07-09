@@ -337,6 +337,7 @@ pub fn responses_to_chat_completions_with_reasoning_text_only_and_cache(
     if let Some(max_tokens) = body.get("max_completion_tokens") {
         result["max_completion_tokens"] = max_tokens.clone();
     }
+    apply_default_output_tokens(&mut result, model, reasoning_config);
     apply_min_output_tokens(&mut result, model, reasoning_config);
 
     for key in ["temperature", "top_p", "stream"] {
@@ -456,10 +457,46 @@ fn apply_openai_prompt_cache_options(
     }
 }
 
-/// 根据 provider/route 声明抬高 Chat 上游的最小输出预算。
+/// 根据目标模型选择 Chat Completions 使用的输出 token 字段。
+fn chat_output_token_field(model: &str) -> &'static str {
+    if super::transform::is_openai_o_series(model) {
+        "max_completion_tokens"
+    } else {
+        "max_tokens"
+    }
+}
+
+/// 判断请求是否已经带有任意输出预算字段。
+fn has_output_token_limit(result: &Value) -> bool {
+    result.get("max_tokens").is_some() || result.get("max_completion_tokens").is_some()
+}
+
+/// 在 Codex 请求没有任何输出预算时，按 provider 的显式配置写入默认输出上限。
+///
+/// Codex 原生 Responses 请求经常不声明输出 token 上限；这个缺省语义应默认透传给
+/// Chat 上游。只有当 provider 明确配置了 `default_output_tokens` 时，才把它当作
+/// 用户/路由策略写入请求，且不覆盖 Codex 或用户显式传入的 token 字段。
+fn apply_default_output_tokens(
+    result: &mut Value,
+    model: &str,
+    config: Option<&CodexChatReasoningConfig>,
+) {
+    let Some(default_output_tokens) = config.and_then(|config| config.default_output_tokens) else {
+        return;
+    };
+    if has_output_token_limit(result) {
+        return;
+    }
+
+    let token_field = chat_output_token_field(model);
+    result[token_field] = json!(default_output_tokens);
+}
+
+/// 根据 provider/route 声明抬高 Chat 上游的显式最小输出预算。
 ///
 /// 某些 Chat 兼容上游在小 `max_tokens` 请求下会先生成内部思考并直接触发 length，
-/// 导致 Codex 侧看不到正文。该函数只在显式配置 `minOutputTokens` 时生效。
+/// 导致 Codex 侧看不到正文。该函数只在请求已经携带输出预算时生效，避免把
+/// Codex/vLLM 双方都没有要求的缺省请求变成有限制请求。
 fn apply_min_output_tokens(
     result: &mut Value,
     model: &str,
@@ -468,18 +505,12 @@ fn apply_min_output_tokens(
     let Some(min_output_tokens) = config.and_then(|config| config.min_output_tokens) else {
         return;
     };
-    let token_field = if super::transform::is_openai_o_series(model) {
-        "max_completion_tokens"
-    } else {
-        "max_tokens"
-    };
+    let token_field = chat_output_token_field(model);
 
-    let should_raise = result
-        .get(token_field)
-        .and_then(|value| value.as_u64())
-        .map(|current| current < min_output_tokens)
-        .unwrap_or(true);
-    if should_raise {
+    let Some(current) = result.get(token_field).and_then(|value| value.as_u64()) else {
+        return;
+    };
+    if current < min_output_tokens {
         result[token_field] = json!(min_output_tokens);
     }
 }
@@ -2034,6 +2065,39 @@ mod tests {
     }
 
     #[test]
+    fn responses_request_without_temperature_does_not_default_temperature() {
+        // OpenAI-compatible 上游对 temperature 的约束不一致：OpenAI reasoning/GPT-5
+        // 类模型可能拒绝该字段，Kimi coding 类模型又可能要求非 0 固定值。
+        // 因此 Codex 缺省不带 temperature 时，转换层必须保持缺省，让上游或用户配置决定。
+        let input = json!({
+            "model": "kimi-k2.6",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+
+        assert!(
+            result.get("temperature").is_none(),
+            "缺省 temperature 不能被自动补成 0 或其它值"
+        );
+    }
+
+    #[test]
+    fn responses_request_with_temperature_preserves_explicit_temperature() {
+        // 用户或 provider override 显式给出的 temperature 代表有意的上游参数，
+        // 转换层只负责忠实透传，不改写为自己的默认值。
+        let input = json!({
+            "model": "qwen3.5-coder",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+            "temperature": 0.6
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+
+        assert_eq!(result["temperature"], json!(0.6));
+    }
+
+    #[test]
     fn responses_request_merges_include_usage_into_existing_stream_options() {
         let input = json!({
             "model": "kimi-k2.6",
@@ -2600,6 +2664,7 @@ mod tests {
             effort_param: Some("reasoning_effort".to_string()),
             effort_value_mode: Some("deepseek".to_string()),
             min_output_tokens: None,
+            default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
         };
 
@@ -2620,6 +2685,7 @@ mod tests {
             effort_param: Some("reasoning.effort".to_string()),
             effort_value_mode: Some("openrouter".to_string()),
             min_output_tokens: None,
+            default_output_tokens: None,
             output_format: Some("auto".to_string()),
         };
 
@@ -2662,6 +2728,7 @@ mod tests {
             effort_param: Some("reasoning.effort".to_string()),
             effort_value_mode: Some("openrouter".to_string()),
             min_output_tokens: None,
+            default_output_tokens: None,
             output_format: Some("auto".to_string()),
         };
 
@@ -2690,6 +2757,7 @@ mod tests {
             effort_param: Some("reasoning_effort".to_string()),
             effort_value_mode: Some("deepseek".to_string()),
             min_output_tokens: None,
+            default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
         };
 
@@ -2720,6 +2788,7 @@ mod tests {
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             min_output_tokens: None,
+            default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
         };
 
@@ -2743,6 +2812,7 @@ mod tests {
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             min_output_tokens: None,
+            default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
         };
 
@@ -2767,6 +2837,7 @@ mod tests {
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             min_output_tokens: None,
+            default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
         };
 
@@ -2792,6 +2863,7 @@ mod tests {
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             min_output_tokens: None,
+            default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
         };
 
@@ -2816,6 +2888,7 @@ mod tests {
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             min_output_tokens: None,
+            default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
         };
 
@@ -2841,6 +2914,7 @@ mod tests {
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             min_output_tokens: Some(1024),
+            default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
         };
 
@@ -2852,7 +2926,84 @@ mod tests {
     }
 
     #[test]
-    fn responses_request_to_chat_keeps_qwen_thinking_with_larger_budget() {
+    fn responses_request_to_chat_applies_explicit_default_output_tokens_when_missing() {
+        let input = json!({
+            "model": "qwen3.6",
+            "input": "hello",
+            "reasoning": {"effort": "medium"}
+        });
+        let config = CodexChatReasoningConfig {
+            supports_thinking: Some(true),
+            supports_effort: Some(false),
+            thinking_param: Some("enable_thinking".to_string()),
+            effort_param: Some("none".to_string()),
+            effort_value_mode: None,
+            min_output_tokens: Some(2048),
+            default_output_tokens: Some(32_768),
+            output_format: Some("reasoning_content".to_string()),
+        };
+
+        let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
+
+        assert_eq!(result["max_tokens"], 32_768);
+        assert_eq!(result["enable_thinking"], true);
+        assert!(result.get("thinking").is_none());
+    }
+
+    #[test]
+    fn responses_request_to_chat_keeps_missing_output_budget_unbounded_by_minimum() {
+        let input = json!({
+            "model": "qwen3.6",
+            "input": "hello",
+            "reasoning": {"effort": "medium"}
+        });
+        let config = CodexChatReasoningConfig {
+            supports_thinking: Some(true),
+            supports_effort: Some(false),
+            thinking_param: Some("enable_thinking".to_string()),
+            effort_param: Some("none".to_string()),
+            effort_value_mode: None,
+            min_output_tokens: Some(2048),
+            default_output_tokens: None,
+            output_format: Some("reasoning_content".to_string()),
+        };
+
+        let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
+
+        assert!(result.get("max_tokens").is_none());
+        assert!(result.get("max_completion_tokens").is_none());
+        assert_eq!(result["enable_thinking"], true);
+        assert!(result.get("thinking").is_none());
+    }
+
+    #[test]
+    fn responses_request_to_chat_keeps_explicit_large_output_budget() {
+        let input = json!({
+            "model": "qwen3.6",
+            "input": "hello",
+            "max_output_tokens": 65_536,
+            "reasoning": {"effort": "medium"}
+        });
+        let config = CodexChatReasoningConfig {
+            supports_thinking: Some(true),
+            supports_effort: Some(false),
+            thinking_param: Some("enable_thinking".to_string()),
+            effort_param: Some("none".to_string()),
+            effort_value_mode: None,
+            min_output_tokens: Some(2048),
+            default_output_tokens: Some(32_768),
+            output_format: Some("reasoning_content".to_string()),
+        };
+
+        let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
+
+        assert_eq!(result["max_tokens"], 65_536);
+        assert_eq!(result["enable_thinking"], true);
+        assert!(result.get("thinking").is_none());
+    }
+
+    #[test]
+    fn responses_request_to_chat_raises_small_explicit_budget_to_minimum() {
         let input = json!({
             "model": "qwen3.6",
             "input": "hello",
@@ -2866,6 +3017,7 @@ mod tests {
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             min_output_tokens: Some(2048),
+            default_output_tokens: Some(32_768),
             output_format: Some("reasoning_content".to_string()),
         };
 

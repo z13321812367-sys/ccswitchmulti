@@ -53,6 +53,12 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { providersApi } from "@/lib/api";
 import { fetchModelsForConfig, type FetchedModel } from "@/lib/api/model-fetch";
 import { proxyApi } from "@/lib/api/proxy";
@@ -108,6 +114,14 @@ export type WorkspaceTab =
 type StatusView = "link" | "protocol" | "debug" | "providers" | "traffic";
 
 type SpawnAgentCandidateView = "selected" | "routed" | "priority" | "all";
+
+// 模型菜单解锁只处理 Codex Desktop renderer 白名单，不改变 MultiRouter 路由或凭据。
+const MODEL_PICKER_UNLOCK_TOOLTIP =
+  "开启或确认 Codex 接管后，CCSwitchMulti 会自动尝试一次。只有当前 Codex Desktop 已普通启动且没有 remote debugging 时，才需要完全退出后点击这里；成功带 CDP 启动后，切换第三方 API Key 不需要重复解锁。它只注入 Desktop renderer 模型白名单补丁，不改变路由规则、API Key 或模型目录；CLI/app-server 仍由 config.toml、model_catalog_json、本地 /v1/models 和 MultiRouter 路由支持。";
+
+// 链路页需要给出明确下一步，避免用户只看到诊断异常却不知道要触发解锁。
+const MODEL_PICKER_UNLOCK_HINT =
+  "开启或确认 Codex 接管后会自动尝试一次；若当前 Desktop 已普通启动且菜单仍只显示“自定义”，请完全退出 Codex Desktop 后点击“解锁模型菜单”。CLI/app-server 的模型目录修复走 live config、model_catalog_json 和本地 /v1/models，不需要把小写 codex.exe 当 Desktop 启动。";
 
 type CodexRoute = {
   id?: string;
@@ -544,7 +558,7 @@ function getProviderModelFetchConfig(
   };
 }
 
-/// 将远端 /models 结果写回普通 provider 的 modelCatalog，供 MultiRouter 候选和 spawn_agent 直接消费。
+/// 将远端 /models 结果写回普通 provider 的 modelCatalog；已有目录视为用户保留列表，只刷新元数据，空目录才初始化。
 function providerWithFetchedModelCatalog(
   provider: Provider,
   fetchedModels: FetchedModel[],
@@ -591,6 +605,7 @@ function providerWithFetchedModelCatalog(
       byFetchedModel.set(upstreamModel, index);
     }
   }
+  const shouldAppendFetchedModels = currentCatalog.models.length === 0;
 
   for (const fetched of fetchedModels) {
     const id = fetched.id.trim();
@@ -609,6 +624,7 @@ function providerWithFetchedModelCatalog(
       };
       continue;
     }
+    if (!shouldAppendFetchedModels) continue;
     const nextModel: CodexCatalogModelDraft = {
       model: id,
       upstreamModel: id,
@@ -2444,8 +2460,11 @@ export function CodexRouterWorkspacePage({
             ...current,
             [provider.id]: {
               status: "success",
-              message: `已读取并更新 ${result.models.length} 个模型。`,
-              modelCount: result.models.length,
+              message: `已读取并更新 ${
+                readCodexModelCatalog(result.nextProvider).models.length
+              } 个模型。`,
+              modelCount: readCodexModelCatalog(result.nextProvider).models
+                .length,
             },
           }));
           await queryClient.invalidateQueries({
@@ -5249,20 +5268,38 @@ function StatusTab({
                   )}
                   协议探测
                 </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={unlockModelPicker}
-                  disabled={isUnlockingModelPicker}
-                  className="gap-2 border-indigo-300 bg-background/70 text-indigo-700 hover:bg-indigo-50 dark:border-indigo-500/50 dark:bg-indigo-500/10 dark:text-indigo-100 dark:hover:bg-indigo-500/20"
-                >
-                  {isUnlockingModelPicker ? (
-                    <RefreshCw className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Wand2 className="h-4 w-4" />
-                  )}
-                  解锁模型菜单
-                </Button>
+                <TooltipProvider delayDuration={200}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span
+                        className="inline-flex"
+                        title={MODEL_PICKER_UNLOCK_TOOLTIP}
+                      >
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={unlockModelPicker}
+                          disabled={isUnlockingModelPicker}
+                          className="gap-2 border-indigo-300 bg-background/70 text-indigo-700 hover:bg-indigo-50 dark:border-indigo-500/50 dark:bg-indigo-500/10 dark:text-indigo-100 dark:hover:bg-indigo-500/20"
+                        >
+                          {isUnlockingModelPicker ? (
+                            <RefreshCw className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Wand2 className="h-4 w-4" />
+                          )}
+                          解锁模型菜单
+                        </Button>
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent
+                      side="bottom"
+                      align="end"
+                      className="max-w-80 whitespace-normal text-left leading-5"
+                    >
+                      {MODEL_PICKER_UNLOCK_TOOLTIP}
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
                 {selectedPlan ? (
                   <>
                     <Button
@@ -5351,8 +5388,13 @@ function StatusTab({
               {validationRefreshMessage}
             </div>
           ) : null}
+          {!modelPickerUnlockResult ? (
+            <div className="mt-3 rounded-lg border border-indigo-200 bg-indigo-50 p-3 text-xs leading-5 text-indigo-800 dark:border-indigo-700/50 dark:bg-indigo-950/25 dark:text-indigo-100">
+              {MODEL_PICKER_UNLOCK_HINT}
+            </div>
+          ) : null}
           {modelPickerUnlockError ? (
-            <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700 dark:border-rose-700/50 dark:bg-rose-950/30 dark:text-rose-100">
+            <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs leading-5 text-rose-700 dark:border-rose-700/50 dark:bg-rose-950/30 dark:text-rose-100">
               模型菜单解锁失败：{modelPickerUnlockError}
             </div>
           ) : null}
@@ -5376,6 +5418,17 @@ function StatusTab({
                 {modelPickerUnlockResult.debugPort ?? "-"} launched=
                 {String(modelPickerUnlockResult.launched)}
               </div>
+              {modelPickerUnlockResult.codexExecutable ? (
+                <div className="mt-2 rounded-md border border-current/20 bg-white/40 p-2 text-[11px] leading-5 dark:bg-black/10">
+                  Codex Desktop 主程序：
+                  <span className="font-mono break-all">
+                    {modelPickerUnlockResult.codexExecutable}
+                  </span>
+                  {!modelPickerUnlockResult.injected
+                    ? "。已捕获该 Desktop 路径；请完全退出 Codex Desktop 后再次点击“解锁模型菜单”，让 CCSwitchMulti 用 remote debugging 启动同一个 Desktop。成功注入后，切换第三方 API Key 不需要重复解锁；CLI/app-server 继续使用 live config、model_catalog_json 和本地 /v1/models 路径。"
+                    : ""}
+                </div>
+              ) : null}
             </div>
           ) : null}
           <div className="mt-4 grid gap-3 text-sm md:grid-cols-3">

@@ -385,7 +385,7 @@ impl ProxyService {
             Some(provider_for_projection),
         );
         effective_settings["config"] = json!(updated_config);
-        Self::attach_codex_model_catalog_from_provider(
+        Self::sync_codex_model_catalog_projection_flag(
             &mut effective_settings,
             Some(provider_for_projection),
         );
@@ -1587,7 +1587,7 @@ impl ProxyService {
                 codex_provider.as_ref(),
             );
             live_config["config"] = json!(updated_config);
-            Self::attach_codex_model_catalog_from_provider(
+            Self::sync_codex_model_catalog_projection_flag(
                 &mut live_config,
                 codex_provider.as_ref(),
             );
@@ -1651,7 +1651,7 @@ impl ProxyService {
                     Some(&codex_provider),
                 );
                 live_config["config"] = json!(updated_config);
-                Self::attach_codex_model_catalog_from_provider(
+                Self::sync_codex_model_catalog_projection_flag(
                     &mut live_config,
                     Some(&codex_provider),
                 );
@@ -1730,7 +1730,7 @@ impl ProxyService {
                         codex_provider.as_ref(),
                     );
                     live_config["config"] = json!(updated_config);
-                    Self::attach_codex_model_catalog_from_provider(
+                    Self::sync_codex_model_catalog_projection_flag(
                         &mut live_config,
                         codex_provider.as_ref(),
                     );
@@ -2719,13 +2719,26 @@ impl ProxyService {
             .is_some_and(|routes| !routes.is_empty())
     }
 
-    fn attach_codex_model_catalog_from_provider(
+    fn sync_codex_model_catalog_projection_flag(
         live_config: &mut Value,
         provider: Option<&Provider>,
     ) {
         let Some(provider) = provider else {
             return;
         };
+
+        let should_project = provider
+            .meta
+            .as_ref()
+            .map(|meta| meta.codex_model_catalog_projection_enabled(&provider.settings_config))
+            .unwrap_or_else(|| provider.settings_config.get("modelCatalog").is_some());
+
+        if !should_project {
+            if let Some(root) = live_config.as_object_mut() {
+                root.remove("modelCatalog");
+            }
+            return;
+        }
 
         let model_catalog = provider
             .settings_config
@@ -2825,8 +2838,11 @@ impl ProxyService {
             .ok_or_else(|| "Codex 配置缺少 auth 字段".to_string())?;
         let config_str = config.get("config").and_then(|v| v.as_str());
 
+        let config_for_projection =
+            Self::codex_settings_for_model_catalog_projection(config, Some(provider));
+
         crate::codex_config::write_codex_provider_live_with_catalog(
-            config,
+            &config_for_projection,
             provider.category.as_deref(),
             auth,
             config_str,
@@ -2851,10 +2867,16 @@ impl ProxyService {
             .get("auth")
             .filter(|auth| Self::codex_auth_has_proxy_placeholder(auth))
         {
-            let config_str = config.get("config").and_then(|v| v.as_str()).unwrap_or("");
+            let config_for_projection =
+                Self::codex_settings_for_model_catalog_projection(config, provider);
+            let config_str = config_for_projection
+                .get("config")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let prepared_config =
                 crate::codex_config::prepare_codex_live_config_text_with_optional_catalog(
-                    config, config_str,
+                    &config_for_projection,
+                    config_str,
                 )
                 .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
             let live_config =
@@ -2869,6 +2891,31 @@ impl ProxyService {
         }
 
         self.write_codex_live_for_provider(config, provider)
+    }
+
+    /// 根据 provider meta 决定 `modelCatalog` 是否参与 live 投射；目录元数据仍保存在 DB。
+    fn codex_settings_for_model_catalog_projection(
+        config: &Value,
+        provider: Option<&Provider>,
+    ) -> Value {
+        let Some(provider) = provider else {
+            return config.clone();
+        };
+        let should_project = provider
+            .meta
+            .as_ref()
+            .map(|meta| meta.codex_model_catalog_projection_enabled(&provider.settings_config))
+            .unwrap_or_else(|| provider.settings_config.get("modelCatalog").is_some());
+
+        if should_project {
+            return config.clone();
+        }
+
+        let mut next = config.clone();
+        if let Some(root) = next.as_object_mut() {
+            root.remove("modelCatalog");
+        }
+        next
     }
 
     /// Codex Desktop renderer 可能会用远端 Statsig 白名单过滤本地 catalog。

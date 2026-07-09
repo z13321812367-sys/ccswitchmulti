@@ -20,6 +20,8 @@ const CODEX_ROUTER_PARENT_PROVIDER_ID: &str = "codexRouterParentProviderId";
 const CODEX_ROUTER_PARENT_PROVIDER_NAME: &str = "codexRouterParentProviderName";
 const CODEX_RESOLVED_TARGET_PROVIDER_ID: &str = "codexResolvedTargetProviderId";
 const CODEX_RESOLVED_UPSTREAM_MODEL_OVERRIDE: &str = "codexResolvedUpstreamModelOverride";
+const QWEN_VLLM_MIN_OUTPUT_TOKENS: u64 = 2_048;
+const RETIRED_QWEN_VLLM_DEFAULT_OUTPUT_TOKENS: u64 = 32_768;
 
 /// 官方 Codex 客户端 User-Agent 正则
 #[allow(dead_code)]
@@ -1265,15 +1267,20 @@ pub fn resolve_codex_chat_reasoning_config(
     provider: &Provider,
     body: &JsonValue,
 ) -> Option<CodexChatReasoningConfig> {
+    let inferred = infer_codex_chat_reasoning_config(provider, body);
     if let Some(config) = provider
         .meta
         .as_ref()
         .and_then(|meta| meta.codex_chat_reasoning.clone())
     {
-        return Some(normalize_codex_chat_reasoning_config(config));
+        let config = normalize_codex_chat_reasoning_config(config);
+        if let Some(inferred) = inferred {
+            return Some(merge_qwen_vllm_reasoning_defaults(config, inferred));
+        }
+        return Some(config);
     }
 
-    infer_codex_chat_reasoning_config(provider, body)
+    inferred
 }
 
 /// 解析 Codex provider 当前请求应采用的缓存能力。
@@ -1437,6 +1444,80 @@ fn normalize_codex_chat_reasoning_config(
     config
 }
 
+/// 合并 Qwen/vLLM 的运行时兼容默认值。
+///
+/// 历史 provider 可能已经持久化了 `thinkingParam=thinking` 且没有
+/// `minOutputTokens` 的显式 meta；这会阻断 Qwen/vLLM 推断分支。只有当推断结果
+/// 明确识别为 Qwen/vLLM 时，才纠正过时字段和过小显式预算，避免影响 DeepSeek、
+/// OpenRouter 等需要完整显式覆盖的平台。
+fn merge_qwen_vllm_reasoning_defaults(
+    mut explicit: CodexChatReasoningConfig,
+    inferred: CodexChatReasoningConfig,
+) -> CodexChatReasoningConfig {
+    if !is_qwen_vllm_reasoning_defaults(&inferred) {
+        return explicit;
+    }
+
+    if explicit.supports_thinking.is_none() {
+        explicit.supports_thinking = inferred.supports_thinking;
+    }
+    if explicit.supports_effort.is_none() {
+        explicit.supports_effort = inferred.supports_effort;
+    }
+
+    let thinking_param = explicit
+        .thinking_param
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if thinking_param.is_empty() || thinking_param == "thinking" {
+        explicit.thinking_param = inferred.thinking_param;
+    }
+    if explicit.effort_param.is_none() {
+        explicit.effort_param = inferred.effort_param;
+    }
+    if explicit.effort_value_mode.is_none() {
+        explicit.effort_value_mode = inferred.effort_value_mode;
+    }
+    if explicit.output_format.is_none() {
+        explicit.output_format = inferred.output_format;
+    }
+    if let Some(inferred_min_output_tokens) = inferred.min_output_tokens {
+        if explicit
+            .min_output_tokens
+            .map(|current| current < inferred_min_output_tokens)
+            .unwrap_or(true)
+        {
+            explicit.min_output_tokens = Some(inferred_min_output_tokens);
+        }
+    }
+    if let Some(inferred_default_output_tokens) = inferred.default_output_tokens {
+        if explicit
+            .default_output_tokens
+            .map(|current| current < inferred_default_output_tokens)
+            .unwrap_or(true)
+        {
+            explicit.default_output_tokens = Some(inferred_default_output_tokens);
+        }
+    }
+    if explicit.default_output_tokens == Some(RETIRED_QWEN_VLLM_DEFAULT_OUTPUT_TOKENS)
+        && inferred.default_output_tokens.is_none()
+    {
+        explicit.default_output_tokens = None;
+    }
+
+    normalize_codex_chat_reasoning_config(explicit)
+}
+
+/// 判断推断结果是否是 Qwen/vLLM 专用默认值。
+fn is_qwen_vllm_reasoning_defaults(config: &CodexChatReasoningConfig) -> bool {
+    config.thinking_param.as_deref() == Some("enable_thinking")
+        && config.effort_param.as_deref() == Some("none")
+        && config.min_output_tokens == Some(QWEN_VLLM_MIN_OUTPUT_TOKENS)
+        && config.output_format.as_deref() == Some("reasoning_content")
+}
+
 fn infer_codex_chat_reasoning_config(
     provider: &Provider,
     body: &JsonValue,
@@ -1481,6 +1562,7 @@ fn infer_codex_chat_reasoning_config(
             effort_param: Some("reasoning_effort".to_string()),
             effort_value_mode: Some("deepseek".to_string()),
             min_output_tokens: None,
+            default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
         });
     }
@@ -1496,6 +1578,7 @@ fn infer_codex_chat_reasoning_config(
             effort_param: Some("reasoning_effort".to_string()),
             effort_value_mode: Some("low_high".to_string()),
             min_output_tokens: None,
+            default_output_tokens: None,
             output_format: Some("reasoning".to_string()),
         });
     }
@@ -1508,6 +1591,7 @@ fn infer_codex_chat_reasoning_config(
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             min_output_tokens: None,
+            default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
         });
     }
@@ -1520,12 +1604,14 @@ fn infer_codex_chat_reasoning_config(
             effort_param: Some("reasoning_effort".to_string()),
             effort_value_mode: Some("deepseek".to_string()),
             min_output_tokens: None,
+            default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
         });
     }
 
-    // 本地 / vLLM 托管的 Qwen 兼容端点会先输出 reasoning；
-    // Codex 小 `max_output_tokens` 请求容易被思考内容吃满，所以保持 thinking 开启并设置最小输出预算。
+    // 本地 / vLLM 托管的 Qwen 兼容端点会先输出 reasoning；Codex 小
+    // `max_output_tokens` 请求容易被思考内容吃满，因此只声明显式预算的最小下限。
+    // Codex 完全缺省时应继续交给 vLLM 自身默认策略，不能在路由层强行截断输出长度。
     if haystack.contains("qwen")
         && (haystack.contains("vllm") || haystack.contains("matrixminecraft"))
     {
@@ -1535,7 +1621,8 @@ fn infer_codex_chat_reasoning_config(
             thinking_param: Some("enable_thinking".to_string()),
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
-            min_output_tokens: Some(2048),
+            min_output_tokens: Some(QWEN_VLLM_MIN_OUTPUT_TOKENS),
+            default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
         });
     }
@@ -1548,6 +1635,7 @@ fn infer_codex_chat_reasoning_config(
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             min_output_tokens: None,
+            default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
         });
     }
@@ -1560,6 +1648,7 @@ fn infer_codex_chat_reasoning_config(
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             min_output_tokens: None,
+            default_output_tokens: None,
             output_format: Some("reasoning_details".to_string()),
         });
     }
@@ -1572,6 +1661,7 @@ fn infer_codex_chat_reasoning_config(
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             min_output_tokens: None,
+            default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
         });
     }
@@ -1602,6 +1692,7 @@ fn infer_aggregator_platform_config(
             effort_param: Some("reasoning.effort".to_string()),
             effort_value_mode: Some("openrouter".to_string()),
             min_output_tokens: None,
+            default_output_tokens: None,
             output_format: Some("auto".to_string()),
         });
     }
@@ -1617,6 +1708,7 @@ fn infer_aggregator_platform_config(
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             min_output_tokens: None,
+            default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
         });
     }
@@ -2514,7 +2606,8 @@ experimental_bearer_token = "PROXY_MANAGED"
         assert_eq!(config.supports_effort, Some(false));
         assert_eq!(config.thinking_param.as_deref(), Some("enable_thinking"));
         assert_eq!(config.effort_param.as_deref(), Some("none"));
-        assert_eq!(config.min_output_tokens, Some(2048));
+        assert_eq!(config.min_output_tokens, Some(QWEN_VLLM_MIN_OUTPUT_TOKENS));
+        assert_eq!(config.default_output_tokens, None);
     }
 
     #[test]
@@ -2559,7 +2652,7 @@ experimental_bearer_token = "PROXY_MANAGED"
     }
 
     #[test]
-    fn test_qwen_vllm_route_infers_thinking_with_larger_budget() {
+    fn test_qwen_vllm_route_infers_thinking_without_default_output_budget() {
         let provider = create_provider(json!({
             "modelRoutes": [
                 {
@@ -2581,7 +2674,116 @@ experimental_bearer_token = "PROXY_MANAGED"
         assert_eq!(config.supports_effort, Some(false));
         assert_eq!(config.thinking_param.as_deref(), Some("enable_thinking"));
         assert_eq!(config.effort_param.as_deref(), Some("none"));
-        assert_eq!(config.min_output_tokens, Some(2048));
+        assert_eq!(config.min_output_tokens, Some(QWEN_VLLM_MIN_OUTPUT_TOKENS));
+        assert_eq!(config.default_output_tokens, None);
+    }
+
+    #[test]
+    fn test_qwen_vllm_explicit_stale_reasoning_keeps_inferred_defaults() {
+        let mut provider = create_provider(json!({
+            "config": r#"
+model_provider = "qwen_local"
+model = "qwen3.6"
+
+[model_providers.qwen_local]
+name = "Qwen Local"
+base_url = "https://www.matrixminecraft.cn:24443/vllm/v1"
+wire_api = "chat"
+"#
+        }));
+        provider.meta = Some(crate::provider::ProviderMeta {
+            codex_chat_reasoning: Some(CodexChatReasoningConfig {
+                supports_thinking: Some(true),
+                supports_effort: Some(false),
+                thinking_param: Some("thinking".to_string()),
+                effort_param: Some("none".to_string()),
+                effort_value_mode: None,
+                min_output_tokens: None,
+                default_output_tokens: None,
+                output_format: Some("reasoning_content".to_string()),
+            }),
+            ..Default::default()
+        });
+
+        let config = resolve_codex_chat_reasoning_config(&provider, &json!({ "model": "qwen3.6" }))
+            .expect("qwen vllm reasoning config");
+
+        assert_eq!(config.supports_thinking, Some(true));
+        assert_eq!(config.supports_effort, Some(false));
+        assert_eq!(config.thinking_param.as_deref(), Some("enable_thinking"));
+        assert_eq!(config.effort_param.as_deref(), Some("none"));
+        assert_eq!(config.min_output_tokens, Some(QWEN_VLLM_MIN_OUTPUT_TOKENS));
+        assert_eq!(config.default_output_tokens, None);
+    }
+
+    #[test]
+    fn test_qwen_vllm_retired_auto_default_budget_is_cleared() {
+        let mut provider = create_provider(json!({
+            "config": r#"
+model_provider = "qwen_local"
+model = "qwen3.6"
+
+[model_providers.qwen_local]
+name = "Qwen Local"
+base_url = "https://www.matrixminecraft.cn:24443/vllm/v1"
+wire_api = "chat"
+"#
+        }));
+        provider.meta = Some(crate::provider::ProviderMeta {
+            codex_chat_reasoning: Some(CodexChatReasoningConfig {
+                supports_thinking: Some(true),
+                supports_effort: Some(false),
+                thinking_param: Some("thinking".to_string()),
+                effort_param: Some("none".to_string()),
+                effort_value_mode: None,
+                min_output_tokens: Some(QWEN_VLLM_MIN_OUTPUT_TOKENS),
+                default_output_tokens: Some(RETIRED_QWEN_VLLM_DEFAULT_OUTPUT_TOKENS),
+                output_format: Some("reasoning_content".to_string()),
+            }),
+            ..Default::default()
+        });
+
+        let config = resolve_codex_chat_reasoning_config(&provider, &json!({ "model": "qwen3.6" }))
+            .expect("qwen vllm reasoning config");
+
+        assert_eq!(config.thinking_param.as_deref(), Some("enable_thinking"));
+        assert_eq!(config.min_output_tokens, Some(QWEN_VLLM_MIN_OUTPUT_TOKENS));
+        assert_eq!(config.default_output_tokens, None);
+    }
+
+    #[test]
+    fn test_qwen_vllm_explicit_larger_budget_is_preserved() {
+        let mut provider = create_provider(json!({
+            "config": r#"
+model_provider = "qwen_local"
+model = "qwen3.6"
+
+[model_providers.qwen_local]
+name = "Qwen Local"
+base_url = "https://www.matrixminecraft.cn:24443/vllm/v1"
+wire_api = "chat"
+"#
+        }));
+        provider.meta = Some(crate::provider::ProviderMeta {
+            codex_chat_reasoning: Some(CodexChatReasoningConfig {
+                supports_thinking: Some(true),
+                supports_effort: Some(false),
+                thinking_param: Some("enable_thinking".to_string()),
+                effort_param: Some("none".to_string()),
+                effort_value_mode: None,
+                min_output_tokens: Some(4096),
+                default_output_tokens: Some(65_536),
+                output_format: Some("reasoning_content".to_string()),
+            }),
+            ..Default::default()
+        });
+
+        let config = resolve_codex_chat_reasoning_config(&provider, &json!({ "model": "qwen3.6" }))
+            .expect("qwen vllm reasoning config");
+
+        assert_eq!(config.thinking_param.as_deref(), Some("enable_thinking"));
+        assert_eq!(config.min_output_tokens, Some(4096));
+        assert_eq!(config.default_output_tokens, Some(65_536));
     }
 
     #[test]
@@ -3778,6 +3980,7 @@ wire_api = "chat"
                 effort_param: Some("none".to_string()),
                 effort_value_mode: None,
                 min_output_tokens: None,
+                default_output_tokens: None,
                 output_format: Some("auto".to_string()),
             }),
             ..Default::default()

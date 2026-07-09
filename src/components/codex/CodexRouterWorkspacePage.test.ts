@@ -5,6 +5,7 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { providersApi } from "@/lib/api";
 import { fetchModelsForConfig, type FetchedModel } from "@/lib/api/model-fetch";
+import { proxyApi } from "@/lib/api/proxy";
 import type { Provider } from "@/types";
 import type { PaginatedLogs, RequestLog } from "@/types/usage";
 import {
@@ -131,6 +132,7 @@ function createCodexProxyLog(overrides: Partial<RequestLog> = {}): RequestLog {
 beforeEach(() => {
   requestLogsFixture.value = { data: [], isLoading: false };
   vi.mocked(fetchModelsForConfig).mockReset();
+  vi.mocked(proxyApi.unlockCodexModelPicker).mockReset();
   vi.mocked(providersApi.add).mockResolvedValue(true);
   vi.mocked(providersApi.update).mockResolvedValue(true);
 });
@@ -427,7 +429,9 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         ),
     ).toBe(false);
 
-    currentRefresh.resolve([{ id: "new-model", ownedBy: null }]);
+    currentRefresh.resolve([
+      { id: "old-catalog", ownedBy: null, contextWindow: 131072 },
+    ]);
     await waitFor(() =>
       expect(
         vi
@@ -435,9 +439,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
           .mock.calls.some(
             ([savedProvider]) =>
               savedProvider.id === provider.id &&
-              JSON.stringify(savedProvider.settingsConfig).includes(
-                "new-model",
-              ),
+              JSON.stringify(savedProvider.settingsConfig).includes("131072"),
           ),
       ).toBe(true),
     );
@@ -613,6 +615,99 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     expect(
       screen.queryByText("未发现模型目录，保存后可在模型源补充目录"),
     ).not.toBeInTheDocument();
+  });
+
+  it("does not restore removed provider models during routes refresh", async () => {
+    vi.mocked(fetchModelsForConfig).mockResolvedValueOnce([
+      { id: "kept-model", ownedBy: null, contextWindow: 128000 },
+      { id: "removed-model", ownedBy: null, contextWindow: 64000 },
+    ]);
+    const provider: Provider = {
+      id: "codex-curated-source",
+      name: "Curated Source",
+      category: "custom",
+      settingsConfig: {
+        baseUrl: "https://curated.example/v1",
+        auth: { OPENAI_API_KEY: "key-curated" },
+        modelCatalog: {
+          models: [{ model: "kept-model" }],
+          spawnAgentModels: ["kept-model", "removed-model"],
+        },
+      },
+    };
+    const plan = createDraftRoutingPlan([provider], [provider]);
+    const route = normalizeCodexRouteForSave(
+      {
+        label: provider.name,
+        targetProviderId: provider.id,
+        match: { models: ["kept-model", "removed-model"] },
+      },
+      0,
+      new Set<string>(),
+    );
+    const stalePlan: Provider = {
+      ...plan,
+      settingsConfig: {
+        ...plan.settingsConfig,
+        modelCatalog: {
+          models: [{ model: "kept-model" }, { model: "removed-model" }],
+          spawnAgentModels: ["removed-model"],
+        },
+        codexRouting: {
+          enabled: true,
+          defaultRouteId: route.id,
+          routes: [route],
+        },
+      },
+    };
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [provider, stalePlan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: stalePlan.id,
+        initialProviderId: stalePlan.id,
+        initialTab: "routes",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    await waitFor(() => expect(providersApi.update).toHaveBeenCalled());
+    const savedProvider = vi
+      .mocked(providersApi.update)
+      .mock.calls.map(([saved]) => saved)
+      .find((saved) => saved.id === provider.id)!;
+    expect(
+      savedProvider.settingsConfig.modelCatalog.models.map(
+        (model: { model: string }) => model.model,
+      ),
+    ).toEqual(["kept-model"]);
+    expect(savedProvider.settingsConfig.modelCatalog.spawnAgentModels).toEqual([
+      "kept-model",
+    ]);
+
+    await waitFor(() =>
+      expect(
+        vi
+          .mocked(providersApi.update)
+          .mock.calls.some(([saved]) => saved.id === stalePlan.id),
+      ).toBe(true),
+    );
+    const savedPlan = vi
+      .mocked(providersApi.update)
+      .mock.calls.map(([saved]) => saved)
+      .find((saved) => saved.id === stalePlan.id)!;
+    expect(
+      savedPlan.settingsConfig.modelCatalog.models.map(
+        (model: { model: string }) => model.model,
+      ),
+    ).toEqual(["kept-model"]);
+    expect(savedPlan.settingsConfig.modelCatalog.spawnAgentModels).toEqual([]);
+    const savedRoutes = readCodexRouting(savedPlan)?.routes ?? [];
+    expect(savedRoutes[0]?.match?.models).toEqual(["kept-model"]);
   });
 
   it("opens the Codex add-source flow when route picker has no model sources", async () => {
@@ -796,7 +891,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       settingsConfig: {
         baseUrl: "https://ark.cn-beijing.volces.com/api/coding/v3",
         auth: {},
-        modelCatalog: { models: [{ model: "old-agentplan-model" }] },
+        modelCatalog: { models: [] },
       },
     };
     const plan = createDraftRoutingPlan([provider], [provider]);
@@ -854,7 +949,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       settingsConfig: {
         baseUrl: "https://ark.cn-beijing.volces.com/api/coding/v3",
         auth: { OPENAI_API_KEY: "sk-volc-route" },
-        modelCatalog: { models: [{ model: "old-agentplan-model" }] },
+        modelCatalog: { models: [] },
       },
     };
     const plan = createDraftRoutingPlan([provider], [provider]);
@@ -1977,6 +2072,209 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         screen.getByText("已刷新校验状态，请查看链路卡片和最近转发表。"),
       ).toBeInTheDocument(),
     );
+  });
+
+  // 解锁模型菜单是 issue #10 的关键恢复动作，必须同时固定提示文案和真实 API 调用。
+  it("explains and triggers the Codex model picker unlock action", async () => {
+    const source: Provider = {
+      id: "codex-unlock-source",
+      name: "Unlock Source",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "unlock-model" }],
+        },
+      },
+    };
+    const plan = createDraftRoutingPlan([source], [source]);
+    vi.mocked(proxyApi.unlockCodexModelPicker).mockResolvedValueOnce({
+      attemptedPorts: [9222],
+      debugPort: 9222,
+      targetId: "target-1",
+      targetTitle: "Codex",
+      targetUrl: "app://codex",
+      modelCount: 1,
+      modelNames: ["unlock-model"],
+      injected: true,
+      launched: false,
+      codexExecutable: null,
+      message: "已注入模型菜单白名单",
+    });
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [source, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "status",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    expect(
+      screen.getByText(
+        "开启或确认 Codex 接管后会自动尝试一次；若当前 Desktop 已普通启动且菜单仍只显示“自定义”，请完全退出 Codex Desktop 后点击“解锁模型菜单”。CLI/app-server 的模型目录修复走 live config、model_catalog_json 和本地 /v1/models，不需要把小写 codex.exe 当 Desktop 启动。",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTitle(
+        /CLI\/app-server 仍由 config\.toml、model_catalog_json、本地 \/v1\/models 和 MultiRouter 路由支持/,
+      ),
+    ).toBeInTheDocument();
+
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "解锁模型菜单" }));
+
+    await waitFor(() =>
+      expect(proxyApi.unlockCodexModelPicker).toHaveBeenCalledTimes(1),
+    );
+    expect(proxyApi.unlockCodexModelPicker).toHaveBeenCalledWith();
+    expect(screen.getByText("模型菜单白名单已注入")).toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        "开启或确认 Codex 接管后会自动尝试一次；若当前 Desktop 已普通启动且菜单仍只显示“自定义”，请完全退出 Codex Desktop 后点击“解锁模型菜单”。CLI/app-server 的模型目录修复走 live config、model_catalog_json 和本地 /v1/models，不需要把小写 codex.exe 当 Desktop 启动。",
+      ),
+    ).not.toBeInTheDocument();
+  });
+
+  // Desktop 主程序发现属于后端自动探测；前端只展示诊断路径，不记忆也不回传 exe。
+  it("keeps Codex Desktop executable discovery owned by the backend", async () => {
+    const source: Provider = {
+      id: "codex-desktop-retry-source",
+      name: "Desktop Retry Source",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "desktop-model" }],
+        },
+      },
+    };
+    const plan = createDraftRoutingPlan([source], [source]);
+    const codexExecutable =
+      "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.623.141536.0_x64__2p2nqsd0c76g0\\app\\Codex.exe";
+    vi.mocked(proxyApi.unlockCodexModelPicker)
+      .mockResolvedValueOnce({
+        attemptedPorts: [9229],
+        debugPort: null,
+        targetId: null,
+        targetTitle: null,
+        targetUrl: null,
+        modelCount: 1,
+        modelNames: ["desktop-model"],
+        injected: false,
+        launched: false,
+        codexExecutable,
+        message:
+          "Codex Desktop is already running without an injectable CDP port.",
+      })
+      .mockResolvedValueOnce({
+        attemptedPorts: [9229],
+        debugPort: 9229,
+        targetId: "desktop-target",
+        targetTitle: "Codex",
+        targetUrl: "app://codex",
+        modelCount: 1,
+        modelNames: ["desktop-model"],
+        injected: true,
+        launched: true,
+        codexExecutable,
+        message: "Codex Desktop model picker whitelist patch was injected.",
+      });
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [source, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "status",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "解锁模型菜单" }));
+
+    await waitFor(() =>
+      expect(screen.getByText("模型菜单白名单尚未注入")).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/Codex Desktop 主程序/)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /已捕获该 Desktop 路径；请完全退出 Codex Desktop 后再次点击“解锁模型菜单”/,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/切换第三方 API Key 不需要重复解锁/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/CLI\/app-server 继续使用 live config/),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "解锁模型菜单" }));
+
+    await waitFor(() =>
+      expect(proxyApi.unlockCodexModelPicker).toHaveBeenCalledTimes(2),
+    );
+    expect(proxyApi.unlockCodexModelPicker).toHaveBeenNthCalledWith(1);
+    expect(proxyApi.unlockCodexModelPicker).toHaveBeenNthCalledWith(2);
+    expect(screen.getByText("模型菜单白名单已注入")).toBeInTheDocument();
+  });
+
+  // 找不到 Desktop 时只展示失败原因，避免把 CCSwitchMulti portable 误解成 Codex Desktop portable。
+  it("shows unlock failures without offering a manual Codex.exe picker", async () => {
+    const source: Provider = {
+      id: "codex-desktop-missing-source",
+      name: "Desktop Missing Source",
+      category: "custom",
+      settingsConfig: {
+        modelCatalog: {
+          models: [{ model: "missing-desktop-model" }],
+        },
+      },
+    };
+    const plan = createDraftRoutingPlan([source], [source]);
+    vi.mocked(proxyApi.unlockCodexModelPicker).mockRejectedValueOnce(
+      new Error(
+        "Codex Desktop executable was not found. Install the Codex Windows app from Microsoft Store.",
+      ),
+    );
+
+    renderWorkspace(
+      React.createElement(CodexRouterWorkspacePage, {
+        providers: [source, plan],
+        isProxyRunning: true,
+        isCodexTakeoverActive: true,
+        activeProviderId: plan.id,
+        initialProviderId: plan.id,
+        initialTab: "status",
+        onEditProvider: vi.fn(),
+        onDeletePlan: vi.fn(),
+        onCreateProvider: vi.fn(),
+      }),
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "解锁模型菜单" }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/模型菜单解锁失败/)).toBeInTheDocument(),
+    );
+    expect(proxyApi.unlockCodexModelPicker).toHaveBeenCalledWith();
+    expect(
+      screen.queryByRole("button", { name: "选择 Codex.exe 后解锁" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/ccswitch\.codexDesktopExecutablePath/),
+    ).not.toBeInTheDocument();
   });
 
   // onRuntimeReady 负向测试：即使最近一条 Codex 代理日志成功，只要它没有命中当前
