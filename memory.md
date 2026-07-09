@@ -1,5 +1,12 @@
 # CC Switch Repository Memory
 
+## 2026-07-09 Codex Public Evidence For Output Budget And Subagent Reasoning
+
+- 公开核验结论需要修正表述：`defaultOutputTokens=32768` 不是“从根上修 Codex 客户端”，也不应简单说成“规避 Codex 弱点”。OpenAI Codex 当前原生 Responses 请求结构本身没有 `max_output_tokens` 字段，`build_responses_request` 也不写输出预算；公开 issue `openai/codex#4138` 报告 `model_max_output_tokens` 不进入 Responses 请求，`#31181` 也把“Codex native wire_api=responses 不发送 max_output_tokens”当作与 OpenAI-compatible gateway 兼容的证据。
+- 对 CCSwitchMulti 更准确的边界是：当 Codex 的 Responses 风格请求被 CCSM 转成 Chat Completions 发给 Qwen/vLLM 时，OpenAI 原生“缺省输出预算”的语义会落到 vLLM/Chat 侧完全不同的默认行为上；Qwen 可能用大量剩余上下文持续输出 reasoning。`defaultOutputTokens` 只在请求没有 `max_tokens/max_completion_tokens/max_output_tokens` 时补 `max_tokens=32768`，是跨协议适配的安全上限，不覆盖 Codex 或用户显式给的大输出预算。
+- 关于子 Agent reasoning：官方 subagents 文档确认当前 Codex 默认启用 subagent，且自定义 agent 文件可以包含 `model`、`model_reasoning_effort` 等普通 config 键；这些字段省略时继承父会话。因此 CCSM 旧 Qwen role 硬编码 `model_reasoning_effort="low"` 会覆盖父会话/模型默认，移除该字段让 Qwen 继承是正确方向。公开 issue `openai/codex#27712` 也把 role 中 `model` / `model_reasoning_effort` 会进入 child request body 当作预期并写了验证说明。
+- 公开搜索没有找到“reasoning-only stream 必然导致 subagent 卡住”的官方确认 issue。相关公开证据只有 `openai/codex#30179`：Codex backend 可先流 `response.reasoning_summary_text.delta` / keepalive，而最终 `response.output_text.delta` 可能集中成一个大块返回；这支持“Codex 子 Agent 进度/可见输出可能长时间不可见”的风险判断，但不足以证明 upstream Codex 已确认有 reasoning-only stream 卡死 bug。后续排查必须继续以本机 `codex-router.log` 的 `done_seen/finish_reasons/client_disconnected/request_shape` 和 Qwen 上游实际 SSE 为准。
+
 ## 2026-07-09 Qwen Codex Subagent Context And Output Budget Boundary
 
 - Qwen3.6 Local 的 Codex 可见上下文当前是 262144：`~/.codex/config.toml` 的 provider model entry、`~/.codex/cc-switch-model-catalog.json`、`~/.codex/models_cache.json` 都写了 `contextWindow/context_window=262144`；顶层 `model_context_window=272000` 只是兜底，不是 Qwen route 的实际 catalog 值。
