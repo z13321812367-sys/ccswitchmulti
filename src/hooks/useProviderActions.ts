@@ -387,6 +387,9 @@ export function useProviderActions(
           queryKey: openclawKeys.defaultModel,
         });
         await queryClient.invalidateQueries({
+          queryKey: openclawKeys.agentsDefaults,
+        });
+        await queryClient.invalidateQueries({
           queryKey: openclawKeys.health,
         });
         toast.success(

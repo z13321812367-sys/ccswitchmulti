@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-07-09 OpenClaw Default Model Catalog Canonicalization
+
+- 用户排查 OpenClaw 不支持流式/思考等级时，只读确认 WSL `~/.openclaw/openclaw.json` 中 `models.providers.vllm.models[0]` 已有 `reasoning=false`、`input=["text","image"]`、`contextWindow=128000`、`maxTokens=8192`；因此“思考等级不可用”不是 OpenClaw 完全没读模型声明，而是 live 配置把该模型声明为不支持 reasoning。
+- 同一份 live 配置还暴露了默认模型引用不一致：`agents.defaults.models` 是 `vllm/Qwen3.6`，但 `agents.defaults.model.primary` 是 `vllm/qwen3.6`。这类大小写/目录 key 不一致会让 OpenClaw 的模型能力表现得像没读到。
+- 根修边界在 `src-tauri/src/openclaw_config.rs::set_default_model`：设置 `agents.defaults.model` 时必须同步把 primary/fallback refs 写入 `agents.defaults.models`，并把仅大小写不同的旧 catalog key 迁移到 canonical ref，保留旧 entry 的 alias/extra。不要只在 ProviderList 的“一键设默认”按钮里补前端逻辑，否则其他命令入口仍会写出不自洽配置。
+- 前端缓存边界：`src/hooks/useProviderActions.ts::setAsDefaultModel` 成功后需要同时 invalidate `openclawKeys.defaultModel`、`openclawKeys.agentsDefaults` 和 `openclawKeys.health`，否则 Agents 面板可能继续显示旧的 catalog/default 状态。
+- 回归测试：`default_model_write_registers_catalog_refs`、`default_model_write_canonicalizes_case_variant_catalog_ref`、既有 `default_model_write_preserves_top_level_comments`，以及 `tests/hooks/useProviderActions.test.tsx`。验证命令：`cargo test --manifest-path src-tauri/Cargo.toml default_model_write --lib`、`pnpm vitest run tests/hooks/useProviderActions.test.tsx`、`cargo fmt --manifest-path src-tauri/Cargo.toml --check`、`pnpm typecheck`。
+
 ## 2026-07-08 CCSwitchMulti Release Asset Name Branding Repair
 
 - 用户问“为什么最新的 release 里应用名的 multi 没了”。事实边界：GitHub latest release `v3.16.4-15` 的标题是 `CCSwitchMulti v3.16.4-15`，但远端资产名和下载说明是 `CC-Switch-v3.16.4-15-*`；本地固定目录 `C:\Users\sunda\Documents\LLMservice\最新版ccswitchmulti` 的 Windows 导出仍是 `CCSwitchMulti_3.16.4-15_x64-setup.exe`。
