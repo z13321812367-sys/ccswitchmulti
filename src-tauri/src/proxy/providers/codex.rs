@@ -20,6 +20,8 @@ const CODEX_ROUTER_PARENT_PROVIDER_ID: &str = "codexRouterParentProviderId";
 const CODEX_ROUTER_PARENT_PROVIDER_NAME: &str = "codexRouterParentProviderName";
 const CODEX_RESOLVED_TARGET_PROVIDER_ID: &str = "codexResolvedTargetProviderId";
 const CODEX_RESOLVED_UPSTREAM_MODEL_OVERRIDE: &str = "codexResolvedUpstreamModelOverride";
+const QWEN_VLLM_MIN_OUTPUT_TOKENS: u64 = 2_048;
+const QWEN_VLLM_DEFAULT_OUTPUT_TOKENS: u64 = 32_768;
 
 /// 官方 Codex 客户端 User-Agent 正则
 #[allow(dead_code)]
@@ -1445,9 +1447,9 @@ fn normalize_codex_chat_reasoning_config(
 /// 合并 Qwen/vLLM 的运行时安全默认值。
 ///
 /// 历史 provider 可能已经持久化了 `thinkingParam=thinking` 且没有
-/// `minOutputTokens` 的显式 meta；这会阻断 Qwen/vLLM 推断分支。只有当推断结果
-/// 明确识别为 Qwen/vLLM 时，才纠正过时字段并补齐最小输出预算，避免影响
-/// DeepSeek、OpenRouter 等需要完整显式覆盖的平台。
+/// `minOutputTokens/defaultOutputTokens` 的显式 meta；这会阻断 Qwen/vLLM 推断分支。
+/// 只有当推断结果明确识别为 Qwen/vLLM 时，才纠正过时字段并补齐预算边界，避免
+/// 影响 DeepSeek、OpenRouter 等需要完整显式覆盖的平台。
 fn merge_qwen_vllm_reasoning_defaults(
     mut explicit: CodexChatReasoningConfig,
     inferred: CodexChatReasoningConfig,
@@ -1490,6 +1492,15 @@ fn merge_qwen_vllm_reasoning_defaults(
             explicit.min_output_tokens = Some(inferred_min_output_tokens);
         }
     }
+    if let Some(inferred_default_output_tokens) = inferred.default_output_tokens {
+        if explicit
+            .default_output_tokens
+            .map(|current| current < inferred_default_output_tokens)
+            .unwrap_or(true)
+        {
+            explicit.default_output_tokens = Some(inferred_default_output_tokens);
+        }
+    }
 
     normalize_codex_chat_reasoning_config(explicit)
 }
@@ -1498,7 +1509,8 @@ fn merge_qwen_vllm_reasoning_defaults(
 fn is_qwen_vllm_reasoning_defaults(config: &CodexChatReasoningConfig) -> bool {
     config.thinking_param.as_deref() == Some("enable_thinking")
         && config.effort_param.as_deref() == Some("none")
-        && config.min_output_tokens == Some(2048)
+        && config.min_output_tokens == Some(QWEN_VLLM_MIN_OUTPUT_TOKENS)
+        && config.default_output_tokens == Some(QWEN_VLLM_DEFAULT_OUTPUT_TOKENS)
 }
 
 fn infer_codex_chat_reasoning_config(
@@ -1545,6 +1557,7 @@ fn infer_codex_chat_reasoning_config(
             effort_param: Some("reasoning_effort".to_string()),
             effort_value_mode: Some("deepseek".to_string()),
             min_output_tokens: None,
+            default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
         });
     }
@@ -1560,6 +1573,7 @@ fn infer_codex_chat_reasoning_config(
             effort_param: Some("reasoning_effort".to_string()),
             effort_value_mode: Some("low_high".to_string()),
             min_output_tokens: None,
+            default_output_tokens: None,
             output_format: Some("reasoning".to_string()),
         });
     }
@@ -1572,6 +1586,7 @@ fn infer_codex_chat_reasoning_config(
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             min_output_tokens: None,
+            default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
         });
     }
@@ -1584,12 +1599,14 @@ fn infer_codex_chat_reasoning_config(
             effort_param: Some("reasoning_effort".to_string()),
             effort_value_mode: Some("deepseek".to_string()),
             min_output_tokens: None,
+            default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
         });
     }
 
     // 本地 / vLLM 托管的 Qwen 兼容端点会先输出 reasoning；
-    // Codex 小 `max_output_tokens` 请求容易被思考内容吃满，所以保持 thinking 开启并设置最小输出预算。
+    // Codex 小 `max_output_tokens` 请求容易被思考内容吃满，而完全缺省时 vLLM 会把剩余
+    // 上下文都当输出预算。这里同时声明小预算下限和缺省上限，避免正文/tool call 长时间不可见。
     if haystack.contains("qwen")
         && (haystack.contains("vllm") || haystack.contains("matrixminecraft"))
     {
@@ -1599,7 +1616,8 @@ fn infer_codex_chat_reasoning_config(
             thinking_param: Some("enable_thinking".to_string()),
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
-            min_output_tokens: Some(2048),
+            min_output_tokens: Some(QWEN_VLLM_MIN_OUTPUT_TOKENS),
+            default_output_tokens: Some(QWEN_VLLM_DEFAULT_OUTPUT_TOKENS),
             output_format: Some("reasoning_content".to_string()),
         });
     }
@@ -1612,6 +1630,7 @@ fn infer_codex_chat_reasoning_config(
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             min_output_tokens: None,
+            default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
         });
     }
@@ -1624,6 +1643,7 @@ fn infer_codex_chat_reasoning_config(
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             min_output_tokens: None,
+            default_output_tokens: None,
             output_format: Some("reasoning_details".to_string()),
         });
     }
@@ -1636,6 +1656,7 @@ fn infer_codex_chat_reasoning_config(
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             min_output_tokens: None,
+            default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
         });
     }
@@ -1666,6 +1687,7 @@ fn infer_aggregator_platform_config(
             effort_param: Some("reasoning.effort".to_string()),
             effort_value_mode: Some("openrouter".to_string()),
             min_output_tokens: None,
+            default_output_tokens: None,
             output_format: Some("auto".to_string()),
         });
     }
@@ -1681,6 +1703,7 @@ fn infer_aggregator_platform_config(
             effort_param: Some("none".to_string()),
             effort_value_mode: None,
             min_output_tokens: None,
+            default_output_tokens: None,
             output_format: Some("reasoning_content".to_string()),
         });
     }
@@ -2578,7 +2601,11 @@ experimental_bearer_token = "PROXY_MANAGED"
         assert_eq!(config.supports_effort, Some(false));
         assert_eq!(config.thinking_param.as_deref(), Some("enable_thinking"));
         assert_eq!(config.effort_param.as_deref(), Some("none"));
-        assert_eq!(config.min_output_tokens, Some(2048));
+        assert_eq!(config.min_output_tokens, Some(QWEN_VLLM_MIN_OUTPUT_TOKENS));
+        assert_eq!(
+            config.default_output_tokens,
+            Some(QWEN_VLLM_DEFAULT_OUTPUT_TOKENS)
+        );
     }
 
     #[test]
@@ -2623,7 +2650,7 @@ experimental_bearer_token = "PROXY_MANAGED"
     }
 
     #[test]
-    fn test_qwen_vllm_route_infers_thinking_with_larger_budget() {
+    fn test_qwen_vllm_route_infers_thinking_with_bounded_output_budget() {
         let provider = create_provider(json!({
             "modelRoutes": [
                 {
@@ -2645,7 +2672,11 @@ experimental_bearer_token = "PROXY_MANAGED"
         assert_eq!(config.supports_effort, Some(false));
         assert_eq!(config.thinking_param.as_deref(), Some("enable_thinking"));
         assert_eq!(config.effort_param.as_deref(), Some("none"));
-        assert_eq!(config.min_output_tokens, Some(2048));
+        assert_eq!(config.min_output_tokens, Some(QWEN_VLLM_MIN_OUTPUT_TOKENS));
+        assert_eq!(
+            config.default_output_tokens,
+            Some(QWEN_VLLM_DEFAULT_OUTPUT_TOKENS)
+        );
     }
 
     #[test]
@@ -2669,6 +2700,7 @@ wire_api = "chat"
                 effort_param: Some("none".to_string()),
                 effort_value_mode: None,
                 min_output_tokens: None,
+                default_output_tokens: None,
                 output_format: Some("reasoning_content".to_string()),
             }),
             ..Default::default()
@@ -2681,7 +2713,11 @@ wire_api = "chat"
         assert_eq!(config.supports_effort, Some(false));
         assert_eq!(config.thinking_param.as_deref(), Some("enable_thinking"));
         assert_eq!(config.effort_param.as_deref(), Some("none"));
-        assert_eq!(config.min_output_tokens, Some(2048));
+        assert_eq!(config.min_output_tokens, Some(QWEN_VLLM_MIN_OUTPUT_TOKENS));
+        assert_eq!(
+            config.default_output_tokens,
+            Some(QWEN_VLLM_DEFAULT_OUTPUT_TOKENS)
+        );
     }
 
     #[test]
@@ -2705,6 +2741,7 @@ wire_api = "chat"
                 effort_param: Some("none".to_string()),
                 effort_value_mode: None,
                 min_output_tokens: Some(4096),
+                default_output_tokens: Some(65_536),
                 output_format: Some("reasoning_content".to_string()),
             }),
             ..Default::default()
@@ -2715,6 +2752,7 @@ wire_api = "chat"
 
         assert_eq!(config.thinking_param.as_deref(), Some("enable_thinking"));
         assert_eq!(config.min_output_tokens, Some(4096));
+        assert_eq!(config.default_output_tokens, Some(65_536));
     }
 
     #[test]
@@ -3911,6 +3949,7 @@ wire_api = "chat"
                 effort_param: Some("none".to_string()),
                 effort_value_mode: None,
                 min_output_tokens: None,
+                default_output_tokens: None,
                 output_format: Some("auto".to_string()),
             }),
             ..Default::default()

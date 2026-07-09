@@ -263,9 +263,10 @@ type CodexChatReasoningSaveContext = {
 };
 
 const QWEN_VLLM_MIN_OUTPUT_TOKENS = 2048;
+const QWEN_VLLM_DEFAULT_OUTPUT_TOKENS = 32768;
 
 // 把表单里的最小输出预算收敛为正整数；空值或非法值保持未配置。
-const normalizeCodexMinOutputTokensForSave = (
+const normalizeCodexOutputTokensForSave = (
   value: number | undefined,
 ): number | undefined => {
   if (value === undefined) return undefined;
@@ -303,8 +304,11 @@ export const normalizeCodexChatReasoningForSave = (
   const supportsEffort = value?.supportsEffort === true;
   const supportsThinking = value?.supportsThinking === true || supportsEffort;
   const hasExplicitConfig = value && Object.keys(value).length > 0;
-  const minOutputTokens = normalizeCodexMinOutputTokensForSave(
+  const minOutputTokens = normalizeCodexOutputTokensForSave(
     value?.minOutputTokens,
+  );
+  const defaultOutputTokens = normalizeCodexOutputTokensForSave(
+    value?.defaultOutputTokens,
   );
 
   if (!supportsThinking && !supportsEffort) {
@@ -315,6 +319,7 @@ export const normalizeCodexChatReasoningForSave = (
           thinkingParam: "none",
           effortParam: "none",
           ...(minOutputTokens ? { minOutputTokens } : {}),
+          ...(defaultOutputTokens ? { defaultOutputTokens } : {}),
           outputFormat: value?.outputFormat ?? "auto",
         }
       : undefined;
@@ -332,6 +337,9 @@ export const normalizeCodexChatReasoningForSave = (
   const safeMinOutputTokens = useQwenVllmDefaults
     ? Math.max(minOutputTokens ?? 0, QWEN_VLLM_MIN_OUTPUT_TOKENS)
     : minOutputTokens;
+  const safeDefaultOutputTokens = useQwenVllmDefaults
+    ? Math.max(defaultOutputTokens ?? 0, QWEN_VLLM_DEFAULT_OUTPUT_TOKENS)
+    : defaultOutputTokens;
 
   return {
     supportsThinking,
@@ -344,6 +352,9 @@ export const normalizeCodexChatReasoningForSave = (
       ? (value?.effortValueMode ?? "passthrough")
       : undefined,
     ...(safeMinOutputTokens ? { minOutputTokens: safeMinOutputTokens } : {}),
+    ...(safeDefaultOutputTokens
+      ? { defaultOutputTokens: safeDefaultOutputTokens }
+      : {}),
     outputFormat: value?.outputFormat ?? "auto",
   };
 };

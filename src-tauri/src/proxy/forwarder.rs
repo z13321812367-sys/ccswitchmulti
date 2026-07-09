@@ -3658,6 +3658,9 @@ fn summarize_codex_chat_request_shape(body: &Value) -> String {
         "service_tier",
         "stream_options",
         "response_format",
+        "max_tokens",
+        "max_completion_tokens",
+        "max_output_tokens",
         "reasoning_effort",
         "enable_thinking",
         "reasoning",
@@ -3960,6 +3963,7 @@ mod tests {
             ],
             "thinking": {"type": "enabled"},
             "reasoning_effort": "max",
+            "max_tokens": 32768,
             "stream_options": {"include_usage": true},
             "tools": [{
                 "type": "function",
@@ -3978,6 +3982,7 @@ mod tests {
         assert!(summary.contains("tool_types=[function]"));
         assert!(summary.contains("thinking=object(keys=[type])"));
         assert!(summary.contains("reasoning_effort=string"));
+        assert!(summary.contains("max_tokens=number"));
         assert!(summary.contains("stream_options=object(keys=[include_usage])"));
         assert!(!summary.contains("secret prompt"));
         assert!(!summary.contains("read_secret"));

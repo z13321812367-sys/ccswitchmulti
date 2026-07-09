@@ -391,6 +391,16 @@ pub struct CodexChatReasoningConfig {
     /// 该字段允许 provider/route 声明安全下限，避免 Codex 探测类小预算请求被截断。
     #[serde(rename = "minOutputTokens", skip_serializing_if = "Option::is_none")]
     pub min_output_tokens: Option<u64>,
+    /// Chat Completions 上游在请求没有任何输出预算时写入的默认输出上限。
+    ///
+    /// vLLM 这类上游缺省会把剩余上下文窗口都当成可输出预算；对 Codex 子 Agent 来说，
+    /// 这会让模型长时间只吐 reasoning，直到客户端断开。该字段只在请求没有
+    /// `max_tokens` / `max_completion_tokens` / `max_output_tokens` 时生效。
+    #[serde(
+        rename = "defaultOutputTokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub default_output_tokens: Option<u64>,
     /// 声明性字段：标注上游 reasoning 的回传位置（reasoning_content / reasoning /
     /// reasoning_details / think_tags）。当前响应侧 `extract_reasoning_field_text`
     /// 靠穷举字段提取、并不读取本字段；保留作文档说明与未来按格式分发（如 think_tags）的预留。

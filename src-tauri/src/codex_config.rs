@@ -1565,21 +1565,29 @@ fn codex_agent_description_for_model(model: &str) -> String {
 }
 
 /// 根据模型能力选择 custom agent 的默认 reasoning effort。
-fn codex_agent_reasoning_effort_for_model(model: &str) -> &'static str {
+///
+/// Qwen 这类用户本地/中转模型不在 role 文件里钉死 effort，避免覆盖用户在当前
+/// Codex 会话或模型目录里选择的 high/xhigh；Spark/DeepSeek 保留有明确角色语义的默认值。
+fn codex_agent_reasoning_effort_for_model(model: &str) -> Option<&'static str> {
     let lower = model.to_ascii_lowercase();
-    if lower.starts_with("qwen") || lower.contains("spark") {
-        "low"
+    if lower.starts_with("qwen") {
+        return None;
+    }
+    if lower.contains("spark") {
+        Some("low")
     } else if lower.contains("pro") {
-        "high"
+        Some("high")
     } else {
-        "medium"
+        Some("medium")
     }
 }
 
 /// 为 role 文件写入更可读的昵称候选。
 fn codex_agent_nickname_candidates_for_role(role: &str) -> Vec<&'static str> {
+    if role.ends_with("qwen-local") {
+        return vec!["Qwen Local", "Qwen Scout", "Local Worker"];
+    }
     match role {
-        "qwen-local" => vec!["Qwen Local", "Qwen Scout", "Local Worker"],
         "deepseek-flash" => vec!["DeepSeek Flash", "Flash Worker", "Long Context"],
         "deepseek-pro" => vec!["DeepSeek Pro", "Deep Reviewer", "Pro Worker"],
         "codex-spark-worker" => vec!["Spark Worker", "Fast Fix", "Quick Pass"],
@@ -1623,7 +1631,9 @@ fn codex_managed_agent_role_name(
 /// 渲染官方 custom agent TOML。
 fn render_codex_managed_agent_toml(role: &str, spec: &CodexCatalogModelSpec) -> String {
     let description = codex_agent_description_for_model(&spec.model);
-    let effort = codex_agent_reasoning_effort_for_model(&spec.model);
+    let effort_line = codex_agent_reasoning_effort_for_model(&spec.model)
+        .map(|effort| format!("model_reasoning_effort = \"{effort}\"\n"))
+        .unwrap_or_default();
     let nicknames = codex_agent_nickname_candidates_for_role(role)
         .into_iter()
         .map(|name| format!("\"{name}\""))
@@ -1645,8 +1655,7 @@ Do not change unrelated files or override user-owned worktree changes.
 nickname_candidates = [{nicknames}]
 model = "{model}"
 model_provider = "{model_provider}"
-model_reasoning_effort = "{effort}"
-model_context_window = {context_window}
+{effort_line}model_context_window = {context_window}
 "#
     )
 }
@@ -4815,6 +4824,11 @@ model_provider = "codex_model_router"
         assert!(managed.contains(r#"model_provider = "codex_model_router_v2""#));
         assert!(managed.contains(r#"model = "qwen3.6""#));
         assert!(
+            !managed.contains("model_reasoning_effort"),
+            "managed qwen agents should inherit the user's active effort instead of forcing low"
+        );
+        assert!(managed.contains(r#"nickname_candidates = ["Qwen Local""#));
+        assert!(
             !agents_dir.join("ccswitch-qwen-local.toml").exists(),
             "legacy CC Switch roles should be migrated in place so existing prompts keep working"
         );
@@ -4854,6 +4868,11 @@ model_provider = "custom"
         assert!(managed.contains(CC_SWITCH_MANAGED_AGENT_MARKER));
         assert!(managed.contains(r#"name = "ccswitch-qwen-local""#));
         assert!(managed.contains(r#"model_provider = "codex_model_router_v2""#));
+        assert!(
+            !managed.contains("model_reasoning_effort"),
+            "managed qwen agents should not pin an effort in fallback role files"
+        );
+        assert!(managed.contains(r#"nickname_candidates = ["Qwen Local""#));
     }
 
     #[test]

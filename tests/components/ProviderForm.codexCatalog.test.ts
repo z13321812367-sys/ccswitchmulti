@@ -51,6 +51,7 @@ describe("ProviderForm Codex catalog helpers", () => {
         thinkingParam: "thinking",
         effortParam: "none",
         minOutputTokens: 4096,
+        defaultOutputTokens: 65536,
         outputFormat: "reasoning_content",
       }),
     ).toMatchObject({
@@ -59,6 +60,7 @@ describe("ProviderForm Codex catalog helpers", () => {
       thinkingParam: "thinking",
       effortParam: "none",
       minOutputTokens: 4096,
+      defaultOutputTokens: 65536,
       outputFormat: "reasoning_content",
     });
   });
@@ -85,6 +87,7 @@ describe("ProviderForm Codex catalog helpers", () => {
       thinkingParam: "enable_thinking",
       effortParam: "none",
       minOutputTokens: 2048,
+      defaultOutputTokens: 32768,
       outputFormat: "reasoning_content",
     });
   });
