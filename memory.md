@@ -6,7 +6,8 @@
 - 真实上游 `https://www.matrixminecraft.cn:24443/vllm/v1/models` 只返回 `id=qwen3.6`、`owned_by=vllm`、`max_model_len=262144` 等字段，未返回 `max_output_tokens/max_tokens/maxOutputTokens`。CCSwitchMulti 的 `FetchedModel` 也只保存 `id/owned_by/context_window`，Codex catalog 类型也没有输出上限字段，所以“云端给了 max output 但 CCSM 丢了”当前没有证据；准确说是上游 `/models` 未给，CCSM schema 也未承载。
 - Qwen 子 Agent 失败链路更像输出预算/思考参数配置缺口，不是 context window 错配：`codex-qwen-local` meta 显式写了 `codexChatReasoning`，但没有 `minOutputTokens`，并且 `thinkingParam` 是 `thinking`；`resolve_codex_chat_reasoning_config` 看到显式 meta 会直接返回，绕过 Qwen vLLM 推断分支。推断分支本来会给 matrixminecraft/vLLM Qwen 设置 `thinkingParam=enable_thinking` 和 `min_output_tokens=2048`。
 - 运行日志 `codex-router.log` 中 Qwen 请求已正确命中 `router-codex-qwen-local` 并发往 `/chat/completions`，多次 `upstream_status=200/response_ready=200`；`request_shape.top_keys` 只有 `messages,model,parallel_tool_calls,reasoning_effort,stream,stream_options,thinking,tool_choice,tools`，没有 `max_tokens/max_output_tokens`。注意当前日志摘要不会单独打印 max token 字段值，但字段若存在会出现在 `top_keys`。
-- 后续修复优先级：先修 reasoning config 合并/默认值，让显式 meta 缺 `minOutputTokens` 时仍能继承 Qwen vLLM 的安全输出预算，并校正 vLLM Qwen 的 thinking 参数；是否新增 catalog 级 max output 字段应作为更大 schema 任务处理，且需要先确认各上游 `/models` 是否有可靠字段来源。
+- 修复落点：`resolve_codex_chat_reasoning_config` 现在会在识别到 Qwen + vLLM/matrixminecraft 推断结果时，对旧的显式 `codexChatReasoning` 做定向兼容：`thinkingParam=thinking` 或缺省会改回 `enable_thinking`，缺失或小于 2048 的 `minOutputTokens` 会抬到 2048，但 DeepSeek/OpenRouter/SiliconFlow 等非 Qwen/vLLM 显式配置仍保持覆盖。`ProviderForm` 保存时也必须保留 `minOutputTokens`，并在 Qwen vLLM provider 上写出同一组安全默认值，防止 DB 再生成“显式但不完整”的 reasoning meta。
+- 仍不把 catalog 级 `max_output_tokens` 纳入本次修复：当前证据是上游 `/models` 未给可靠输出上限，CCSM schema 也未承载；如后续要做，应作为独立模型能力 schema 任务处理。
 
 ## 2026-07-09 Codex Desktop Model Picker And Managed Subagent Roles
 
