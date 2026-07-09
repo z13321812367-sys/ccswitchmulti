@@ -2149,11 +2149,7 @@ impl ProxyService {
         }
 
         if let Some(cfg_str) = config.get("config").and_then(|v| v.as_str()) {
-            let updated = Self::remove_local_toml_base_url(cfg_str);
-            let updated =
-                crate::codex_config::remove_codex_experimental_bearer_token_if(&updated, |token| {
-                    token == PROXY_TOKEN_PLACEHOLDER
-                })
+            let updated = crate::codex_config::cleanup_codex_local_proxy_takeover_fields(cfg_str)
                 .map_err(|e| format!("清理 Codex 接管占位符失败: {e}"))?;
             config["config"] = json!(updated);
         }
@@ -2163,6 +2159,7 @@ impl ProxyService {
     }
 
     /// Remove local proxy base_url from TOML（委托给 codex_config 共享实现）
+    #[cfg(test)]
     fn remove_local_toml_base_url(toml_str: &str) -> String {
         crate::codex_config::remove_codex_toml_base_url_if(toml_str, Self::is_local_proxy_url)
     }
