@@ -1,5 +1,13 @@
 # CC Switch Repository Memory
 
+## 2026-07-09 Qwen Codex Subagent Context And Output Budget Boundary
+
+- Qwen3.6 Local 的 Codex 可见上下文当前是 262144：`~/.codex/config.toml` 的 provider model entry、`~/.codex/cc-switch-model-catalog.json`、`~/.codex/models_cache.json` 都写了 `contextWindow/context_window=262144`；顶层 `model_context_window=272000` 只是兜底，不是 Qwen route 的实际 catalog 值。
+- 真实上游 `https://www.matrixminecraft.cn:24443/vllm/v1/models` 只返回 `id=qwen3.6`、`owned_by=vllm`、`max_model_len=262144` 等字段，未返回 `max_output_tokens/max_tokens/maxOutputTokens`。CCSwitchMulti 的 `FetchedModel` 也只保存 `id/owned_by/context_window`，Codex catalog 类型也没有输出上限字段，所以“云端给了 max output 但 CCSM 丢了”当前没有证据；准确说是上游 `/models` 未给，CCSM schema 也未承载。
+- Qwen 子 Agent 失败链路更像输出预算/思考参数配置缺口，不是 context window 错配：`codex-qwen-local` meta 显式写了 `codexChatReasoning`，但没有 `minOutputTokens`，并且 `thinkingParam` 是 `thinking`；`resolve_codex_chat_reasoning_config` 看到显式 meta 会直接返回，绕过 Qwen vLLM 推断分支。推断分支本来会给 matrixminecraft/vLLM Qwen 设置 `thinkingParam=enable_thinking` 和 `min_output_tokens=2048`。
+- 运行日志 `codex-router.log` 中 Qwen 请求已正确命中 `router-codex-qwen-local` 并发往 `/chat/completions`，多次 `upstream_status=200/response_ready=200`；`request_shape.top_keys` 只有 `messages,model,parallel_tool_calls,reasoning_effort,stream,stream_options,thinking,tool_choice,tools`，没有 `max_tokens/max_output_tokens`。注意当前日志摘要不会单独打印 max token 字段值，但字段若存在会出现在 `top_keys`。
+- 后续修复优先级：先修 reasoning config 合并/默认值，让显式 meta 缺 `minOutputTokens` 时仍能继承 Qwen vLLM 的安全输出预算，并校正 vLLM Qwen 的 thinking 参数；是否新增 catalog 级 max output 字段应作为更大 schema 任务处理，且需要先确认各上游 `/models` 是否有可靠字段来源。
+
 ## 2026-07-09 Codex Desktop Model Picker And Managed Subagent Roles
 
 - `BigStrongSun/ccswitchmulti#10` 的截图中 `remote_debugging_enabled=false`、`remote_debugging_port=None`、`model_catalog_models=Some(12)` 是关键组合：catalog 已生成，但 Codex Desktop 以普通方式启动，renderer 侧 Statsig `107580212` 仍可能把模型菜单压回“自定义”或少数官方模型。排查时先让用户完全退出 Codex Desktop，再从 CCSwitchMulti 点“解锁模型菜单”用 CDP 端口启动和注入，不要先把问题归因为 catalog 缺失。
@@ -1882,3 +1890,4 @@
 - 这个桥接模式可以扩展到 `image_generation`：对第三方模型暴露 `generate_image(prompt, size, quality, format)`，CCSwitchMulti 内部调用 OpenAI Responses `tools: [{ "type": "image_generation" }]`，解析 `image_generation_call.result`，把 base64 解码成 artifact 文件，返回路径、MIME、尺寸和可选缩略图；不要把完整 base64 直接塞回模型上下文或普通日志。
 - `file_search` 也可桥接，但必须显式配置允许的 vector store、文件权限和日志脱敏；`computer_use` 不应作为普通 provider proxy tool-loop 的 MVP，因为它需要独立的交互会话、安全确认、屏幕状态和动作权限设计。
 - 实现建议新增 `src-tauri/src/proxy/providers/hosted_tools/` 模块，拆出 `bridge.rs`、`openai_client.rs`、`web_search.rs`、`image_generation.rs`、`file_search.rs`。默认只开启 `web_search`，`image_generation` 和 `file_search` 需要显式 allowlist，日志只记录 trace id、tool name、query hash、耗时和状态，不记录完整网页正文、完整 prompt、base64 图片或 API key。
+
