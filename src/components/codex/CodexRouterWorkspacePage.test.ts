@@ -2074,7 +2074,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     );
   });
 
-  // 解锁模型菜单是 issue #10 的关键人工动作，必须同时固定提示文案和真实 API 调用。
+  // 解锁模型菜单是 issue #10 的关键恢复动作，必须同时固定提示文案和真实 API 调用。
   it("explains and triggers the Codex model picker unlock action", async () => {
     const source: Provider = {
       id: "codex-unlock-source",
@@ -2117,12 +2117,12 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
 
     expect(
       screen.getByText(
-        "模型菜单仍只显示“自定义”时，先完全退出 Codex Desktop，再点击“解锁模型菜单”。",
+        "开启或确认 Codex 接管后会自动尝试一次；若模型菜单仍只显示“自定义”，请完全退出 Codex Desktop，再点击“解锁模型菜单”。",
       ),
     ).toBeInTheDocument();
     expect(
       screen.getByTitle(
-        /当 Codex Desktop 模型菜单只显示“自定义”或看不到 MultiRouter 模型时使用。/,
+        /开启或确认 Codex 接管后，CCSwitchMulti 会自动尝试一次；如果 Codex Desktop 模型菜单仍只显示“自定义”/,
       ),
     ).toBeInTheDocument();
 
@@ -2137,7 +2137,7 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     expect(screen.getByText("模型菜单白名单已注入")).toBeInTheDocument();
     expect(
       screen.queryByText(
-        "模型菜单仍只显示“自定义”时，先完全退出 Codex Desktop，再点击“解锁模型菜单”。",
+        "开启或确认 Codex 接管后会自动尝试一次；若模型菜单仍只显示“自定义”，请完全退出 Codex Desktop，再点击“解锁模型菜单”。",
       ),
     ).not.toBeInTheDocument();
   });

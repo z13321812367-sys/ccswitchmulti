@@ -117,11 +117,11 @@ type SpawnAgentCandidateView = "selected" | "routed" | "priority" | "all";
 
 // 模型菜单解锁只处理 Codex Desktop renderer 白名单，不改变 MultiRouter 路由或凭据。
 const MODEL_PICKER_UNLOCK_TOOLTIP =
-  "当 Codex Desktop 模型菜单只显示“自定义”或看不到 MultiRouter 模型时使用。它会用 remote debugging 启动或连接 Codex Desktop，并注入 renderer 模型白名单补丁；不会改变路由规则、API Key 或模型目录。若 Codex 已普通启动，请先完全退出再点击。";
+  "开启或确认 Codex 接管后，CCSwitchMulti 会自动尝试一次；如果 Codex Desktop 模型菜单仍只显示“自定义”，请完全退出 Codex 后点击这里。它会用 remote debugging 启动或连接 Codex Desktop，并注入 renderer 模型白名单补丁；不会改变路由规则、API Key 或模型目录。";
 
 // 链路页需要给出明确下一步，避免用户只看到诊断异常却不知道要触发解锁。
 const MODEL_PICKER_UNLOCK_HINT =
-  "模型菜单仍只显示“自定义”时，先完全退出 Codex Desktop，再点击“解锁模型菜单”。";
+  "开启或确认 Codex 接管后会自动尝试一次；若模型菜单仍只显示“自定义”，请完全退出 Codex Desktop，再点击“解锁模型菜单”。";
 
 type CodexRoute = {
   id?: string;
