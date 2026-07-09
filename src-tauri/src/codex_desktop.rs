@@ -850,7 +850,7 @@ fn resolve_codex_executable() -> Option<PathBuf> {
         .or_else(find_latest_windows_codex_executable)
 }
 
-/// 存储最近确认过的大写 `Codex.exe` 路径，支持 portable Codex Desktop 不在系统安装目录的场景。
+/// 存储最近确认过的大写 `Codex.exe` 路径，支持 Desktop 不在常见安装目录的场景。
 fn remembered_codex_desktop_executable_path() -> PathBuf {
     crate::config::get_app_config_dir().join(REMEMBERED_CODEX_DESKTOP_EXECUTABLE_FILENAME)
 }
@@ -1401,10 +1401,10 @@ mod tests {
         assert!(!DETECT_CODEX_MAIN_PROCESS_SCRIPT.contains(" -ieq 'Codex.exe'"));
     }
 
-    /// 验证便携版 Desktop 路径能写入状态文件并再次读回。
+    /// 验证已确认的 Desktop 路径能写入状态文件并再次读回。
     #[test]
-    fn remembered_codex_desktop_executable_round_trips_portable_path() {
-        let desktop_dir = tempfile::tempdir().expect("create portable desktop temp dir");
+    fn remembered_codex_desktop_executable_round_trips_confirmed_path() {
+        let desktop_dir = tempfile::tempdir().expect("create confirmed desktop temp dir");
         let desktop = desktop_dir.path().join("Codex.exe");
         std::fs::write(&desktop, "").expect("write desktop exe");
         let state_dir = tempfile::tempdir().expect("create state temp dir");
@@ -1413,9 +1413,9 @@ mod tests {
             .join(REMEMBERED_CODEX_DESKTOP_EXECUTABLE_FILENAME);
 
         let remembered = remember_codex_desktop_executable_at(&state_path, &desktop)
-            .expect("remember portable desktop path");
+            .expect("remember confirmed desktop path");
         let loaded = read_remembered_codex_desktop_executable_from(&state_path)
-            .expect("read remembered portable desktop path");
+            .expect("read remembered desktop path");
 
         assert_eq!(loaded, remembered);
         assert!(loaded.ends_with("Codex.exe"));
