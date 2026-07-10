@@ -164,12 +164,10 @@ impl ServerHandler for ReadonlyProjectServer {
         Ok(ListResourceTemplatesResult {
             resource_templates: vec![
                 ResourceTemplate::new("ccswitch://project/tree/{path}", "project-subtree")
-                    .with_description(
-                        "Read a shallow read-only subtree under CCSWITCH_READONLY_ROOT",
-                    )
+                    .with_description("Read a shallow project subtree")
                     .with_mime_type("text/plain"),
                 ResourceTemplate::new("ccswitch://project/file/{path}", "project-file")
-                    .with_description("Read a UTF-8 text file under CCSWITCH_READONLY_ROOT")
+                    .with_description("Read a UTF-8 project file")
                     .with_mime_type("text/plain"),
             ],
             next_cursor: None,
