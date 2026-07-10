@@ -52,13 +52,28 @@ const CLAUDE_ASK_ALLOWED_TOOLS: &[&str] = &[
 ];
 const CLAUDE_ASK_PROJECT_MCP_SERVER: &str = "ccswitch_readonly";
 
-fn apply_claude_chat_profile(body: &mut Value) -> bool {
-    let is_chat_model = body
-        .get("model")
-        .and_then(Value::as_str)
-        .is_some_and(|model| model == CLAUDE_CHAT_MODEL);
+fn provider_supports_chat_ask_profiles(provider: &Provider) -> bool {
+    if provider.uses_managed_account_auth() {
+        return false;
+    }
 
-    if !is_chat_model {
+    provider
+        .settings_config
+        .get("codexResolvedRouteMatched")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || provider
+            .settings_config
+            .get("codexResolvedRouteId")
+            .and_then(Value::as_str)
+            .is_some_and(|route_id| !route_id.trim().is_empty())
+}
+
+fn apply_claude_chat_profile_for_provider(
+    body: &mut Value,
+    provider_supports_profiles: bool,
+) -> bool {
+    if !provider_supports_profiles {
         return false;
     }
 
@@ -145,13 +160,11 @@ fn is_agents_instructions_fragment(trimmed: &str) -> bool {
         && trimmed.ends_with("</INSTRUCTIONS>")
 }
 
-fn apply_claude_ask_profile(body: &mut Value) -> bool {
-    let is_ask_model = body
-        .get("model")
-        .and_then(Value::as_str)
-        .is_some_and(|model| model == CLAUDE_CHAT_MODEL);
-
-    if !is_ask_model {
+fn apply_claude_ask_profile_for_provider(
+    body: &mut Value,
+    provider_supports_profiles: bool,
+) -> bool {
+    if !provider_supports_profiles {
         return false;
     }
 
@@ -162,7 +175,7 @@ fn apply_claude_ask_profile(body: &mut Value) -> bool {
     obj.remove("instructions");
     let filter_result = filter_claude_ask_tools(obj);
     log::info!(
-        "[ClaudeAsk] filtered_tools kept={} original={}",
+        "[CodexAsk] filtered_tools kept={} original={}",
         filter_result.kept_count,
         filter_result.original_count
     );
@@ -201,10 +214,7 @@ fn filter_claude_ask_tools(obj: &mut serde_json::Map<String, Value>) -> AskToolF
         .iter()
         .filter_map(response_tool_name_for_ask_log)
         .collect::<Vec<_>>();
-    log::info!(
-        "[ClaudeAsk] available_tools=[{}]",
-        available_tools.join(",")
-    );
+    log::info!("[CodexAsk] available_tools=[{}]", available_tools.join(","));
 
     let allowed_tools = tools
         .iter()
@@ -425,18 +435,32 @@ fn should_keep_ask_conversation_item(item: &Value) -> bool {
 }
 
 fn sanitize_ask_environment_context_item(item: &mut Value) {
-    let Some(content) = item.get_mut("content").and_then(Value::as_array_mut) else {
-        return;
-    };
+    if let Some(text) = item.get("text").and_then(Value::as_str) {
+        if let Some(sanitized) = sanitize_environment_context_fragment(text) {
+            *item.get_mut("text").expect("text exists") = Value::String(sanitized);
+        }
+    }
 
-    for content_item in content {
-        let Some(text) = content_item.get("text").and_then(Value::as_str) else {
-            continue;
-        };
-        let Some(sanitized) = sanitize_environment_context_fragment(text) else {
-            continue;
-        };
-        *content_item.get_mut("text").expect("text exists") = Value::String(sanitized);
+    if let Some(content) = item.get_mut("content") {
+        match content {
+            Value::String(text) => {
+                if let Some(sanitized) = sanitize_environment_context_fragment(text) {
+                    *content = Value::String(sanitized);
+                }
+            }
+            Value::Array(content_items) => {
+                for content_item in content_items {
+                    let Some(text) = content_item.get("text").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let Some(sanitized) = sanitize_environment_context_fragment(text) else {
+                        continue;
+                    };
+                    *content_item.get_mut("text").expect("text exists") = Value::String(sanitized);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -1784,7 +1808,10 @@ impl RequestForwarder {
         let mut effective_body = body.clone();
         let claude_chat_profile_applied =
             if matches!(*self.interaction_mode.read().await, InteractionMode::Chat) {
-                apply_claude_chat_profile(&mut effective_body)
+                apply_claude_chat_profile_for_provider(
+                    &mut effective_body,
+                    provider_supports_chat_ask_profiles(provider),
+                )
             } else {
                 false
             };
@@ -1794,7 +1821,7 @@ impl RequestForwarder {
                 .and_then(Value::as_str)
                 .unwrap_or(CLAUDE_CHAT_MODEL);
             log::info!(
-                "[ClaudeChat] applied chat profile to model={} effective_provider={}",
+                "[CodexChat] applied chat profile to model={} effective_provider={}",
                 model,
                 provider.id
             );
@@ -2120,9 +2147,32 @@ impl RequestForwarder {
                     "[Codex] Restored or enriched {restored} cached function call item(s) for Chat upstream"
                 );
             }
+            let claude_chat_profile_reapplied =
+                if matches!(*self.interaction_mode.read().await, InteractionMode::Chat) {
+                    apply_claude_chat_profile_for_provider(
+                        &mut mapped_body,
+                        provider_supports_chat_ask_profiles(provider),
+                    )
+                } else {
+                    false
+                };
+            if claude_chat_profile_reapplied {
+                let model = mapped_body
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .unwrap_or(CLAUDE_CHAT_MODEL);
+                log::info!(
+                    "[CodexChat] reapplied chat profile after history enrich to model={} effective_provider={}",
+                    model,
+                    provider.id
+                );
+            }
             let claude_ask_profile_applied =
                 if matches!(*self.interaction_mode.read().await, InteractionMode::Ask) {
-                    apply_claude_ask_profile(&mut mapped_body)
+                    apply_claude_ask_profile_for_provider(
+                        &mut mapped_body,
+                        provider_supports_chat_ask_profiles(provider),
+                    )
                 } else {
                     false
                 };
@@ -2132,7 +2182,7 @@ impl RequestForwarder {
                     .and_then(Value::as_str)
                     .unwrap_or(CLAUDE_CHAT_MODEL);
                 log::info!(
-                    "[ClaudeAsk] applied ask profile to model={} effective_provider={}",
+                    "[CodexAsk] applied ask profile to model={} effective_provider={}",
                     model,
                     provider.id
                 );
@@ -4585,7 +4635,7 @@ mod tests {
             ]
         });
 
-        assert!(apply_claude_chat_profile(&mut body));
+        assert!(apply_claude_chat_profile_for_provider(&mut body, true));
         assert!(body.get("instructions").is_none());
         assert!(body.get("tools").is_none());
         assert!(body.get("tool_choice").is_none());
@@ -4619,7 +4669,7 @@ mod tests {
             }]
         });
 
-        assert!(apply_claude_chat_profile(&mut body));
+        assert!(apply_claude_chat_profile_for_provider(&mut body, true));
         let serialized = body["input"].to_string();
         assert!(serialized.contains("真实用户问题"));
         assert!(!serialized.contains("environment_context"));
@@ -4640,7 +4690,7 @@ mod tests {
             }]
         });
 
-        assert!(apply_claude_chat_profile(&mut body));
+        assert!(apply_claude_chat_profile_for_provider(&mut body, true));
         assert_eq!(body["input"].as_array().unwrap().len(), 0);
     }
 
@@ -4664,7 +4714,7 @@ mod tests {
             }]
         });
 
-        assert!(apply_claude_chat_profile(&mut body));
+        assert!(apply_claude_chat_profile_for_provider(&mut body, true));
         let serialized = body["input"].to_string();
         assert!(serialized.contains("聊聊设计"));
         assert!(!serialized.contains("codex_internal_context"));
@@ -4685,7 +4735,7 @@ mod tests {
             }]
         });
 
-        assert!(apply_claude_chat_profile(&mut body));
+        assert!(apply_claude_chat_profile_for_provider(&mut body, true));
         assert_eq!(body["input"].as_array().unwrap().len(), 0);
     }
 
@@ -4703,7 +4753,7 @@ mod tests {
             }]
         });
 
-        assert!(apply_claude_chat_profile(&mut body));
+        assert!(apply_claude_chat_profile_for_provider(&mut body, true));
         assert_eq!(body["input"].as_array().unwrap().len(), 0);
     }
 
@@ -4722,7 +4772,7 @@ mod tests {
             }]
         });
 
-        assert!(apply_claude_chat_profile(&mut body));
+        assert!(apply_claude_chat_profile_for_provider(&mut body, true));
         assert_eq!(body["input"][0]["content"][0]["text"], text);
     }
 
@@ -4741,8 +4791,133 @@ mod tests {
             }]
         });
 
-        assert!(apply_claude_chat_profile(&mut body));
+        assert!(apply_claude_chat_profile_for_provider(&mut body, true));
         assert_eq!(body["input"][0]["content"][0]["text"], text);
+    }
+
+    #[test]
+    fn deepseek_chat_profile_removes_agent_context_and_tools() {
+        let mut body = json!({
+            "model": "deepseek-v4-flash",
+            "instructions": "You are Codex, an autonomous coding agent.",
+            "tools": [{"type": "function", "name": "shell_command"}],
+            "tool_choice": "auto",
+            "parallel_tool_calls": true,
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "<environment_context>\n<cwd>E:\\repo</cwd>\n<shell>powershell</shell>\n</environment_context>"
+                    },
+                    {
+                        "type": "input_text",
+                        "text": "只聊天"
+                    }
+                ]
+            }]
+        });
+
+        assert!(apply_claude_chat_profile_for_provider(&mut body, true));
+        assert!(body.get("instructions").is_none());
+        assert!(body.get("tools").is_none());
+        assert!(body.get("tool_choice").is_none());
+        assert!(body.get("parallel_tool_calls").is_none());
+
+        let serialized = body["input"].to_string();
+        assert!(serialized.contains("只聊天"));
+        assert!(!serialized.contains("environment_context"));
+        assert!(!serialized.contains("shell_command"));
+        assert!(!serialized.contains("autonomous coding agent"));
+    }
+
+    #[test]
+    fn custom_routed_chat_profile_applies_to_unknown_model() {
+        let mut body = json!({
+            "model": "kimi-k2-local",
+            "instructions": "You are Codex, an autonomous coding agent.",
+            "tools": [{"type": "function", "name": "shell_command"}],
+            "tool_choice": "auto",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "纯聊天"}]
+            }]
+        });
+
+        assert!(apply_claude_chat_profile_for_provider(&mut body, true));
+        assert!(body.get("instructions").is_none());
+        assert!(body.get("tools").is_none());
+        assert!(body.get("tool_choice").is_none());
+        assert!(body["input"].to_string().contains("纯聊天"));
+    }
+
+    #[test]
+    fn chat_profile_removes_tool_history_restored_after_enrich() {
+        let mut body = json!({
+            "model": "kimi-k2-local",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "只聊天"}]
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "read_mcp_resource",
+                    "arguments": "{\"uri\":\"ccswitch://project/file/src-tauri/src/proxy/forwarder.rs\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "fn secret_project_code() {}"
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "之前看过代码"}]
+                }
+            ]
+        });
+
+        assert!(apply_claude_chat_profile_for_provider(&mut body, true));
+        let serialized = body["input"].to_string();
+        assert!(serialized.contains("只聊天"));
+        assert!(serialized.contains("之前看过代码"));
+        assert!(!serialized.contains("read_mcp_resource"));
+        assert!(!serialized.contains("secret_project_code"));
+        assert!(!serialized.contains("function_call"));
+        assert!(!serialized.contains("function_call_output"));
+    }
+
+    #[test]
+    fn chat_profile_does_not_apply_to_unknown_model_without_custom_route() {
+        let mut body = json!({
+            "model": "unknown-built-in",
+            "instructions": "keep me",
+            "tools": [{"type": "function", "name": "shell_command"}],
+            "input": "hello"
+        });
+
+        assert!(!apply_claude_chat_profile_for_provider(&mut body, false));
+        assert_eq!(body["instructions"], "keep me");
+        assert!(body.get("tools").is_some());
+    }
+
+    #[test]
+    fn named_profile_model_does_not_apply_without_custom_route() {
+        let mut body = json!({
+            "model": "deepseek-v4-flash",
+            "instructions": "keep me",
+            "tools": [{"type": "function", "name": "shell_command"}],
+            "input": "hello"
+        });
+
+        assert!(!apply_claude_chat_profile_for_provider(&mut body, false));
+        assert_eq!(body["instructions"], "keep me");
+        assert!(body.get("tools").is_some());
     }
 
     #[test]
@@ -4808,7 +4983,7 @@ mod tests {
             ]
         });
 
-        assert!(apply_claude_ask_profile(&mut body));
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
         assert!(body.get("instructions").is_none());
         let tools = body["tools"].as_array().expect("allowed tools");
         assert_eq!(tools.len(), 1);
@@ -4843,7 +5018,7 @@ mod tests {
             }]
         });
 
-        assert!(apply_claude_ask_profile(&mut body));
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
         let text = body["input"][0]["content"][0]["text"].as_str().unwrap();
         assert!(
             text.contains(r#"<cwd>E:\文档备份\New project 333\downloads\ccswitchmulti-src</cwd>"#)
@@ -4873,7 +5048,7 @@ mod tests {
             }]
         });
 
-        assert!(apply_claude_ask_profile(&mut body));
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
         let text = body["input"][0]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains(r#"<environment id="main">"#));
         assert!(text.contains(r#"<cwd>E:\repo</cwd>"#));
@@ -4882,6 +5057,43 @@ mod tests {
         assert!(!text.contains("powershell"));
         assert!(!text.contains("filesystem"));
         assert!(!text.contains("unrestricted"));
+        assert!(!text.contains("network"));
+    }
+
+    #[test]
+    fn claude_ask_profile_sanitizes_top_level_environment_text() {
+        let mut body = json!({
+            "model": "claude-sonnet-5",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "text": "<environment_context>\n<cwd>E:\\repo</cwd>\n<shell>powershell</shell>\n<filesystem>unrestricted</filesystem>\n</environment_context>"
+            }]
+        });
+
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
+        let text = body["input"][0]["text"].as_str().unwrap();
+        assert!(text.contains(r#"<cwd>E:\repo</cwd>"#));
+        assert!(!text.contains("powershell"));
+        assert!(!text.contains("filesystem"));
+        assert!(!text.contains("unrestricted"));
+    }
+
+    #[test]
+    fn claude_ask_profile_sanitizes_string_content_environment_context() {
+        let mut body = json!({
+            "model": "claude-sonnet-5",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": "<environment_context>\n<cwd>E:\\repo</cwd>\n<shell>powershell</shell>\n<network>enabled</network>\n</environment_context>"
+            }]
+        });
+
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
+        let text = body["input"][0]["content"].as_str().unwrap();
+        assert!(text.contains(r#"<cwd>E:\repo</cwd>"#));
+        assert!(!text.contains("powershell"));
         assert!(!text.contains("network"));
     }
 
@@ -4900,7 +5112,7 @@ mod tests {
             }]
         });
 
-        assert!(apply_claude_ask_profile(&mut body));
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
         assert_eq!(body["input"][0]["content"][0]["text"], agents);
     }
 
@@ -4919,7 +5131,7 @@ mod tests {
             }]
         });
 
-        assert!(apply_claude_ask_profile(&mut body));
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
         assert_eq!(body["input"][0]["content"][0]["text"], text);
     }
 
@@ -4954,7 +5166,7 @@ mod tests {
             ]
         });
 
-        assert!(apply_claude_ask_profile(&mut body));
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
         let serialized = body["input"].to_string();
         let env_text = body["input"][0]["content"][0]["text"].as_str().unwrap();
         assert!(serialized.contains("read_mcp_resource"));
@@ -4992,7 +5204,7 @@ mod tests {
             "input": "Inspect only."
         });
 
-        assert!(apply_claude_ask_profile(&mut body));
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
         let tools = body["tools"].as_array().expect("allowed tools");
         assert_eq!(tools.len(), 3);
         assert_eq!(tools[0]["name"], "list_mcp_resources");
@@ -5051,7 +5263,7 @@ mod tests {
             ]
         });
 
-        assert!(apply_claude_ask_profile(&mut body));
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
         let serialized = body["input"].to_string();
         assert!(serialized.contains("ccswitch_readonly"));
         assert!(serialized.contains("ccswitch://project/tree"));
@@ -5095,7 +5307,7 @@ mod tests {
             ]
         });
 
-        assert!(apply_claude_ask_profile(&mut body));
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
         let serialized = body["input"].to_string();
         assert!(serialized.contains("codex_apps"));
         assert!(serialized.contains("global mail data"));
@@ -5119,7 +5331,7 @@ mod tests {
             "input": "Inspect only."
         });
 
-        assert!(apply_claude_ask_profile(&mut body));
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
         assert!(body.get("tools").is_none());
         assert_eq!(body["tool_choice"], "auto");
         assert_eq!(body["parallel_tool_calls"], true);
@@ -5141,7 +5353,7 @@ mod tests {
             "input": "Inspect only."
         });
 
-        assert!(apply_claude_ask_profile(&mut body));
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
         let tools = body["tools"].as_array().expect("allowed tools");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["name"], "read_mcp_resource");
@@ -5160,9 +5372,135 @@ mod tests {
             }]
         });
 
-        assert!(apply_claude_ask_profile(&mut body));
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
         let serialized = body["input"].to_string();
         assert!(!serialized.contains("orphan result"));
+    }
+
+    #[test]
+    fn deepseek_ask_profile_keeps_readonly_mcp_and_removes_shell_protocol() {
+        let mut body = json!({
+            "model": "deepseek-v4-pro",
+            "instructions": "agent instructions",
+            "tools": [
+                {"type": "function", "name": "list_mcp_resources"},
+                {"type": "function", "name": "read_mcp_resource"},
+                {"type": "function", "name": "shell_command"}
+            ],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "shell_command"}
+            },
+            "parallel_tool_calls": true,
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Inspect only"}]
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "shell_1",
+                    "name": "shell_command",
+                    "arguments": "Get-ChildItem"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "shell_1",
+                    "output": "private shell result"
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "mcp_1",
+                    "name": "read_mcp_resource",
+                    "arguments": "{\"server\":\"ccswitch_readonly\",\"uri\":\"ccswitch://project/tree\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "mcp_1",
+                    "output": "src-tauri/"
+                }
+            ]
+        });
+
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
+        assert!(body.get("instructions").is_none());
+        assert!(body.get("tool_choice").is_none());
+        assert_eq!(body["parallel_tool_calls"], true);
+
+        let tools = body["tools"].as_array().expect("allowed tools");
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0]["name"], "list_mcp_resources");
+        assert_eq!(tools[1]["name"], "read_mcp_resource");
+
+        let serialized = body["input"].to_string();
+        assert!(serialized.contains("read_mcp_resource"));
+        assert!(serialized.contains("ccswitch://project/tree"));
+        assert!(serialized.contains("src-tauri/"));
+        assert!(!serialized.contains("shell_command"));
+        assert!(!serialized.contains("Get-ChildItem"));
+        assert!(!serialized.contains("private shell result"));
+        assert!(!serialized.contains("agent instructions"));
+    }
+
+    #[test]
+    fn custom_routed_ask_profile_applies_to_unknown_model() {
+        let mut body = json!({
+            "model": "qwen-local-custom",
+            "instructions": "agent instructions",
+            "tools": [
+                {"type": "function", "name": "read_mcp_resource"},
+                {"type": "function", "name": "shell_command"}
+            ],
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "mcp_1",
+                    "name": "read_mcp_resource",
+                    "arguments": "{\"server\":\"ccswitch_readonly\",\"uri\":\"ccswitch://project/tree\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "mcp_1",
+                    "output": "src-tauri/"
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "shell_1",
+                    "name": "shell_command",
+                    "arguments": "Get-ChildItem"
+                }
+            ]
+        });
+
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
+        assert!(body.get("instructions").is_none());
+        let tools = body["tools"].as_array().expect("allowed tools");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"], "read_mcp_resource");
+
+        let serialized = body["input"].to_string();
+        assert!(serialized.contains("read_mcp_resource"));
+        assert!(serialized.contains("src-tauri/"));
+        assert!(!serialized.contains("shell_command"));
+        assert!(!serialized.contains("Get-ChildItem"));
+    }
+
+    #[test]
+    fn provider_profile_detection_uses_routed_non_managed_providers_only() {
+        let mut routed = test_provider_with_type(None);
+        routed.settings_config = json!({
+            "codexResolvedRouteId": "qwen-local",
+            "codexResolvedRouteMatched": true
+        });
+        assert!(provider_supports_chat_ask_profiles(&routed));
+
+        let mut codex_oauth = test_provider_with_type(Some("codex_oauth"));
+        codex_oauth.settings_config = json!({
+            "codexResolvedRouteId": "official",
+            "codexResolvedRouteMatched": true
+        });
+        assert!(!provider_supports_chat_ask_profiles(&codex_oauth));
     }
 
     #[test]
