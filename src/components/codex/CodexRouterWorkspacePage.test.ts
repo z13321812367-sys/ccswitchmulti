@@ -1134,17 +1134,17 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       {
         model: "gpt-5.6-sol",
         displayName: "GPT-5.6 Sol",
-        contextWindow: 256000,
+        contextWindow: 372000,
       },
       {
         model: "gpt-5.6-terra",
         displayName: "GPT-5.6 Terra",
-        contextWindow: 256000,
+        contextWindow: 372000,
       },
       {
         model: "gpt-5.6-luna",
         displayName: "GPT-5.6 Luna",
-        contextWindow: 256000,
+        contextWindow: 372000,
       },
       { model: "qwen3.6", displayName: "Qwen 3.6", contextWindow: 262144 },
     ]);
@@ -1288,17 +1288,17 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       {
         model: "gpt-5.6-sol",
         displayName: "GPT-5.6 Sol",
-        contextWindow: 256000,
+        contextWindow: 372000,
       },
       {
         model: "gpt-5.6-terra",
         displayName: "GPT-5.6 Terra",
-        contextWindow: 256000,
+        contextWindow: 372000,
       },
       {
         model: "gpt-5.6-luna",
         displayName: "GPT-5.6 Luna",
-        contextWindow: 256000,
+        contextWindow: 372000,
       },
       {
         model: "gpt-5.5-relay-gpt",
@@ -1803,17 +1803,17 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       {
         model: "gpt-5.6-sol",
         displayName: "GPT-5.6 Sol",
-        contextWindow: 256000,
+        contextWindow: 372000,
       },
       {
         model: "gpt-5.6-terra",
         displayName: "GPT-5.6 Terra",
-        contextWindow: 256000,
+        contextWindow: 372000,
       },
       {
         model: "gpt-5.6-luna",
         displayName: "GPT-5.6 Luna",
-        contextWindow: 256000,
+        contextWindow: 372000,
       },
     ]);
     expect(plan.settingsConfig.modelCatalog.spawnAgentModels).toEqual([
