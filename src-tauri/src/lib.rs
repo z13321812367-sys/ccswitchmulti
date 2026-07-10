@@ -1786,10 +1786,7 @@ pub(crate) fn remove_tray_icon_before_exit(app_handle: &tauri::AppHandle) {
 // 启动时恢复代理状态
 // ============================================================
 
-/// 启动时根据 proxy_config 表中的代理状态自动恢复代理服务
-///
-/// 检查 `proxy_config.enabled` 字段，如果有任一应用的状态为 `true`，
-/// 则自动启动代理服务并接管对应应用的 Live 配置。
+/// 启动时恢复独立代理服务，并清理上次异常退出残留的 Live 接管状态。
 async fn restore_proxy_state_on_startup(state: &store::AppState) {
     match crate::proxy::external_openai_api::load_profile(&state.db) {
         Ok(profile) if profile.enabled => {
@@ -1806,45 +1803,26 @@ async fn restore_proxy_state_on_startup(state: &store::AppState) {
         Err(e) => log::warn!("读取第三方 Agent API profile 失败，跳过独立监听恢复: {e}"),
     }
 
-    // 收集需要恢复接管的应用列表（从 proxy_config.enabled 读取）
-    let mut apps_to_restore = Vec::new();
+    // App takeover is an explicit user action. Startup must not re-take over
+    // Claude/Codex/Gemini from stale DB flags, otherwise Codex can remain
+    // pinned to 127.0.0.1 after CC Switch is closed.
+    let mut stale_takeovers = Vec::new();
     for app_type in ["claude", "codex", "gemini"] {
         if let Ok(config) = state.db.get_proxy_config_for_app(app_type).await {
             if config.enabled {
-                apps_to_restore.push(app_type);
+                stale_takeovers.push(app_type);
             }
         }
     }
 
-    if apps_to_restore.is_empty() {
-        log::debug!("启动时没有需要恢复的 app takeover");
+    if stale_takeovers.is_empty() {
+        log::debug!("启动时没有需要清理的 app takeover 残留");
         return;
     }
 
-    log::info!("检测到上次代理状态需要恢复，应用列表: {apps_to_restore:?}");
-
-    // 逐个恢复接管状态
-    for app_type in apps_to_restore {
-        match state
-            .proxy_service
-            .set_takeover_for_app(app_type, true)
-            .await
-        {
-            Ok(()) => {
-                log::info!("✓ 已恢复 {app_type} 的代理接管状态");
-            }
-            Err(e) => {
-                log::error!("✗ 恢复 {app_type} 的代理接管状态失败: {e}");
-                // 失败时清除该应用的状态，避免下次启动再次尝试
-                if let Err(clear_err) = state
-                    .proxy_service
-                    .set_takeover_for_app(app_type, false)
-                    .await
-                {
-                    log::error!("清除 {app_type} 代理状态失败: {clear_err}");
-                }
-            }
-        }
+    log::warn!("检测到上次 app takeover 残留，启动时仅恢复清理，不自动接管: {stale_takeovers:?}");
+    if let Err(e) = state.proxy_service.stop_with_restore().await {
+        log::error!("启动时清理 app takeover 残留失败: {e}");
     }
 }
 
@@ -2133,7 +2111,9 @@ pub fn restart_process(app_handle: &tauri::AppHandle) -> ! {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_exit_request, ExitRequestAction};
+    use super::{classify_exit_request, restore_proxy_state_on_startup, store, ExitRequestAction};
+    use crate::database::Database;
+    use std::sync::Arc;
 
     #[test]
     fn no_code_keeps_app_alive_in_tray() {
@@ -2157,6 +2137,30 @@ mod tests {
         assert_eq!(
             classify_exit_request(Some(1)),
             ExitRequestAction::CleanupAndExit
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_clears_stale_codex_takeover_without_reenabling_it() {
+        let db = Arc::new(Database::memory().expect("init db"));
+        let mut config = db
+            .get_proxy_config_for_app("codex")
+            .await
+            .expect("read codex proxy config");
+        config.enabled = true;
+        db.update_proxy_config_for_app(config)
+            .await
+            .expect("mark codex takeover stale");
+
+        let state = store::AppState::new(db.clone());
+        restore_proxy_state_on_startup(&state).await;
+
+        assert!(
+            !db.get_proxy_config_for_app("codex")
+                .await
+                .expect("read codex proxy config")
+                .enabled,
+            "startup must not re-enable Codex takeover from a stale enabled flag"
         );
     }
 }
