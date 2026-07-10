@@ -52,6 +52,14 @@ const CLAUDE_ASK_ALLOWED_TOOLS: &[&str] = &[
 ];
 const CLAUDE_ASK_PROJECT_MCP_SERVER: &str = "ccswitch_readonly";
 
+#[derive(Debug, Default)]
+struct AskInputFilterStats {
+    original_items: usize,
+    kept_items: usize,
+    removed_assistant_messages: usize,
+    removed_contextual_fragments: usize,
+}
+
 fn provider_supports_chat_ask_profiles(provider: &Provider) -> bool {
     if provider.uses_managed_account_auth() {
         return false;
@@ -182,7 +190,15 @@ fn apply_claude_ask_profile_for_provider(
 
     if let Some(input) = obj.get_mut("input") {
         let original_input = std::mem::take(input);
-        *input = filter_responses_input_for_claude_ask(original_input);
+        let (filtered_input, input_stats) = filter_responses_input_for_claude_ask(original_input);
+        log::info!(
+            "[CodexAsk] filtered_input kept={} original={} removed_assistant={} removed_contextual_fragments={}",
+            input_stats.kept_items,
+            input_stats.original_items,
+            input_stats.removed_assistant_messages,
+            input_stats.removed_contextual_fragments
+        );
+        *input = filtered_input;
     }
 
     true
@@ -284,19 +300,25 @@ fn tool_choice_tool_name(tool_choice: &Value) -> Option<&str> {
     }
 }
 
-fn filter_responses_input_for_claude_ask(input: Value) -> Value {
+fn filter_responses_input_for_claude_ask(input: Value) -> (Value, AskInputFilterStats) {
     match input {
-        Value::Array(items) => Value::Array(filter_response_items_for_claude_ask(items)),
-        Value::Object(object) => {
-            Value::Array(filter_response_items_for_claude_ask(vec![Value::Object(
-                object,
-            )]))
+        Value::Array(items) => {
+            let (items, stats) = filter_response_items_for_claude_ask(items);
+            (Value::Array(items), stats)
         }
-        other => other,
+        Value::Object(object) => {
+            let (items, stats) = filter_response_items_for_claude_ask(vec![Value::Object(object)]);
+            (Value::Array(items), stats)
+        }
+        other => (other, AskInputFilterStats::default()),
     }
 }
 
-fn filter_response_items_for_claude_ask(items: Vec<Value>) -> Vec<Value> {
+fn filter_response_items_for_claude_ask(items: Vec<Value>) -> (Vec<Value>, AskInputFilterStats) {
+    let mut stats = AskInputFilterStats {
+        original_items: items.len(),
+        ..Default::default()
+    };
     let mut allowed_calls = HashMap::new();
 
     for item in &items {
@@ -337,13 +359,20 @@ fn filter_response_items_for_claude_ask(items: Vec<Value>) -> Vec<Value> {
             continue;
         }
 
+        if item.get("role").and_then(Value::as_str) == Some("assistant") {
+            stats.removed_assistant_messages += 1;
+            continue;
+        }
+
         if should_keep_ask_conversation_item(&item) {
-            sanitize_ask_environment_context_item(&mut item);
-            filtered.push(item);
+            if clean_ask_contextual_content_items(&mut item, &mut stats) {
+                filtered.push(item);
+            }
         }
     }
 
-    filtered
+    stats.kept_items = filtered.len();
+    (filtered, stats)
 }
 
 fn sanitize_ask_mcp_tool_output(tool_name: &str, item: &mut Value) {
@@ -424,7 +453,8 @@ fn should_keep_ask_conversation_item(item: &Value) -> bool {
     }
 
     match item.get("role").and_then(Value::as_str) {
-        Some("user") | Some("assistant") | Some("latest_reminder") => true,
+        Some("user") | Some("latest_reminder") => true,
+        Some("assistant") => false,
         Some("system") | Some("developer") | Some("tool") => false,
         Some(_) => false,
         None => matches!(
@@ -434,10 +464,13 @@ fn should_keep_ask_conversation_item(item: &Value) -> bool {
     }
 }
 
-fn sanitize_ask_environment_context_item(item: &mut Value) {
+fn clean_ask_contextual_content_items(item: &mut Value, stats: &mut AskInputFilterStats) -> bool {
     if let Some(text) = item.get("text").and_then(Value::as_str) {
         if let Some(sanitized) = sanitize_environment_context_fragment(text) {
             *item.get_mut("text").expect("text exists") = Value::String(sanitized);
+        } else if is_ask_removed_contextual_fragment(text) {
+            stats.removed_contextual_fragments += 1;
+            return false;
         }
     }
 
@@ -446,22 +479,48 @@ fn sanitize_ask_environment_context_item(item: &mut Value) {
             Value::String(text) => {
                 if let Some(sanitized) = sanitize_environment_context_fragment(text) {
                     *content = Value::String(sanitized);
+                } else if is_ask_removed_contextual_fragment(text) {
+                    stats.removed_contextual_fragments += 1;
+                    return false;
                 }
             }
             Value::Array(content_items) => {
-                for content_item in content_items {
+                content_items.retain_mut(|content_item| {
                     let Some(text) = content_item.get("text").and_then(Value::as_str) else {
-                        continue;
+                        return true;
                     };
-                    let Some(sanitized) = sanitize_environment_context_fragment(text) else {
-                        continue;
-                    };
-                    *content_item.get_mut("text").expect("text exists") = Value::String(sanitized);
+                    if let Some(sanitized) = sanitize_environment_context_fragment(text) {
+                        *content_item.get_mut("text").expect("text exists") =
+                            Value::String(sanitized);
+                        return true;
+                    }
+                    if is_ask_removed_contextual_fragment(text) {
+                        stats.removed_contextual_fragments += 1;
+                        return false;
+                    }
+                    true
+                });
+                if content_items.is_empty() {
+                    return false;
                 }
             }
             _ => {}
         }
     }
+
+    true
+}
+
+fn is_ask_removed_contextual_fragment(text: &str) -> bool {
+    let trimmed = text.trim();
+    is_agents_instructions_fragment(trimmed)
+        || is_wrapped_fragment(
+            trimmed,
+            "<codex_internal_context",
+            "</codex_internal_context>",
+        )
+        || is_wrapped_fragment(trimmed, "<goal_context", "</goal_context>")
+        || is_wrapped_fragment(trimmed, "<recommended_plugins", "</recommended_plugins>")
 }
 
 fn sanitize_environment_context_fragment(text: &str) -> Option<String> {
@@ -4960,16 +5019,14 @@ mod tests {
                 "role": "user",
                 "content": [{
                     "type": "input_text",
-                    "text": "<environment_context>\n  <cwd>E:\\文档备份\\New project 333\\downloads\\ccswitchmulti-src</cwd>\n  <shell>powershell</shell>\n  <current_date>2026-07-07</current_date>\n  <timezone>Asia/Shanghai</timezone>\n  <network>enabled</network>\n  <filesystem><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n  <subagents>enabled</subagents>\n</environment_context>"
+                    "text": "<environment_context>\n  <cwd>C:\\project</cwd>\n  <shell>powershell</shell>\n  <current_date>2026-07-07</current_date>\n  <timezone>Asia/Shanghai</timezone>\n  <network>enabled</network>\n  <filesystem><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n  <subagents>enabled</subagents>\n</environment_context>"
                 }]
             }]
         });
 
         assert!(apply_claude_ask_profile_for_provider(&mut body, true));
         let text = body["input"][0]["content"][0]["text"].as_str().unwrap();
-        assert!(
-            text.contains(r#"<cwd>E:\文档备份\New project 333\downloads\ccswitchmulti-src</cwd>"#)
-        );
+        assert!(text.contains(r#"<cwd>C:\project</cwd>"#));
         assert!(!text.contains("powershell"));
         assert!(!text.contains("current_date"));
         assert!(!text.contains("timezone"));
@@ -5045,7 +5102,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_ask_profile_leaves_agents_fragment_unchanged() {
+    fn claude_ask_profile_removes_agents_fragment() {
         let agents = "# AGENTS.md instructions\n\n<INSTRUCTIONS>\n- Read files first.\n- Do not weaken safety gates.\n</INSTRUCTIONS>";
         let mut body = json!({
             "model": "claude-sonnet-5",
@@ -5060,7 +5117,58 @@ mod tests {
         });
 
         assert!(apply_claude_ask_profile_for_provider(&mut body, true));
-        assert_eq!(body["input"][0]["content"][0]["text"], agents);
+        let serialized = body["input"].to_string();
+        assert!(!serialized.contains("AGENTS.md instructions"));
+        assert!(!serialized.contains("Read files first"));
+        assert!(!serialized.contains("<INSTRUCTIONS>"));
+    }
+
+    #[test]
+    fn claude_ask_profile_removes_codex_context_fragments_and_old_assistant_text() {
+        let mut body = json!({
+            "model": "claude-sonnet-5",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "<recommended_plugins>\nCanva\nFigma\nGmail\n</recommended_plugins>"
+                        },
+                        {
+                            "type": "input_text",
+                            "text": "<goal_context>\nold objective\n</goal_context>"
+                        },
+                        {
+                            "type": "input_text",
+                            "text": "<codex_internal_context source=\"codex\">\ninternal routing notes\n</codex_internal_context>"
+                        },
+                        {
+                            "type": "input_text",
+                            "text": "检查当前项目结构"
+                        }
+                    ]
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "我运行在 macOS 环境中，无法直接访问 Windows 路径。"}]
+                }
+            ]
+        });
+
+        assert!(apply_claude_ask_profile_for_provider(&mut body, true));
+        let serialized = body["input"].to_string();
+        assert!(serialized.contains("检查当前项目结构"));
+        assert!(!serialized.contains("recommended_plugins"));
+        assert!(!serialized.contains("Canva"));
+        assert!(!serialized.contains("goal_context"));
+        assert!(!serialized.contains("old objective"));
+        assert!(!serialized.contains("codex_internal_context"));
+        assert!(!serialized.contains("internal routing notes"));
+        assert!(!serialized.contains("macOS"));
+        assert!(!serialized.contains("无法直接访问"));
     }
 
     #[test]

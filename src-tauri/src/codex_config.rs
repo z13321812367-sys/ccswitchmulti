@@ -12,6 +12,7 @@ use std::process::Command;
 use toml_edit::{Array, DocumentMut, InlineTable, Item, TableLike};
 
 pub const CC_SWITCH_CODEX_MODEL_PROVIDER_ID: &str = "custom";
+const CC_SWITCH_READONLY_MCP_SERVER_ID: &str = "ccswitch_readonly";
 /// Codex MultiRouter 专用的本地 provider id。
 ///
 /// 普通第三方 Codex provider 继续使用 `custom` 桶；MultiRouter 使用稳定的
@@ -220,6 +221,34 @@ pub fn write_codex_live_config_atomic(config_text_opt: Option<&str>) -> Result<(
     }
 
     write_text_file(&config_path, &cfg_text)
+}
+
+pub fn ensure_ccswitch_readonly_mcp_config(config_text: &str) -> Result<String, AppError> {
+    let command = std::env::current_exe()
+        .map_err(|e| AppError::Message(format!("Failed to resolve cc-switch executable: {e}")))?;
+    let command = command.to_string_lossy().to_string();
+
+    let mut doc = if config_text.trim().is_empty() {
+        DocumentMut::new()
+    } else {
+        config_text
+            .parse::<DocumentMut>()
+            .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?
+    };
+
+    if doc.get("mcp_servers").is_none() {
+        doc["mcp_servers"] = toml_edit::table();
+    }
+
+    let mut server = toml_edit::Table::new();
+    server["type"] = toml_edit::value("stdio");
+    server["command"] = toml_edit::value(command);
+    let mut args = Array::new();
+    args.push("--readonly-mcp");
+    server["args"] = toml_edit::value(args);
+
+    doc["mcp_servers"][CC_SWITCH_READONLY_MCP_SERVER_ID] = Item::Table(server);
+    Ok(doc.to_string())
 }
 
 pub fn extract_codex_auth_api_key(auth: &Value) -> Option<String> {
@@ -925,6 +954,96 @@ fn sort_codex_catalog_specs_for_picker(
         )
     });
     indexed_specs.into_iter().map(|(_, spec)| spec).collect()
+}
+
+fn codex_catalog_model_id(entry: &Value) -> Option<&str> {
+    entry
+        .get("slug")
+        .or_else(|| entry.get("model"))
+        .or_else(|| entry.get("id"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+}
+
+fn codex_catalog_model_display_name<'a>(entry: &'a Value, model: &'a str) -> &'a str {
+    entry
+        .get("displayName")
+        .or_else(|| entry.get("display_name"))
+        .or_else(|| entry.get("description"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(model)
+}
+
+fn codex_official_gpt_specs_from_cache(
+    cache: &Value,
+    seen_models: &mut HashSet<String>,
+) -> Vec<CodexCatalogModelSpec> {
+    let Some(models) = cache.get("models").and_then(|models| models.as_array()) else {
+        return Vec::new();
+    };
+
+    models
+        .iter()
+        .filter_map(|entry| {
+            let model = codex_catalog_model_id(entry)?;
+            if !model.to_ascii_lowercase().starts_with("gpt-") {
+                return None;
+            }
+            if !seen_models.insert(model.to_ascii_lowercase()) {
+                return None;
+            }
+
+            let display_name = codex_catalog_model_display_name(entry, model);
+            let context_window = parse_codex_positive_u64(
+                entry
+                    .get("contextWindow")
+                    .or_else(|| entry.get("context_window"))
+                    .or_else(|| entry.get("maxContextWindow"))
+                    .or_else(|| entry.get("max_context_window")),
+            )
+            .unwrap_or(128_000);
+
+            Some(CodexCatalogModelSpec {
+                model: model.to_string(),
+                upstream_model: None,
+                display_name: display_name.to_string(),
+                context_window,
+                text_only: codex_catalog_model_name_is_text_only(model),
+                is_default: false,
+            })
+        })
+        .collect()
+}
+
+fn codex_official_gpt_specs_to_preserve(
+    existing_specs: &[CodexCatalogModelSpec],
+) -> Result<Vec<CodexCatalogModelSpec>, AppError> {
+    let mut seen_models = existing_specs
+        .iter()
+        .map(|spec| spec.model.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+
+    for path in [
+        get_codex_models_cache_backup_path(),
+        get_codex_models_cache_path(),
+    ] {
+        let Some(cache) = read_json_file_if_exists(&path)? else {
+            continue;
+        };
+        if codex_models_cache_is_cc_switch_owned(&cache) {
+            continue;
+        }
+
+        let specs = codex_official_gpt_specs_from_cache(&cache, &mut seen_models);
+        if !specs.is_empty() {
+            return Ok(specs);
+        }
+    }
+
+    Ok(Vec::new())
 }
 
 fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCatalogModelSpec> {
@@ -1843,9 +1962,10 @@ pub fn prepare_codex_config_text_with_model_catalog(
     config_text: &str,
 ) -> Result<String, AppError> {
     let catalog_path = get_codex_model_catalog_path();
-    let specs = codex_catalog_model_specs(settings, config_text);
+    let mut specs = codex_catalog_model_specs(settings, config_text);
 
     if !specs.is_empty() {
+        specs.extend(codex_official_gpt_specs_to_preserve(&specs)?);
         let template = load_codex_model_catalog_template()?;
         let catalog = codex_model_catalog_from_specs(&specs, &template);
         let config_text = set_codex_model_catalog_projection_fields(
@@ -3877,6 +3997,51 @@ experimental_bearer_token = "PROXY_MANAGED"
     }
 
     #[test]
+    fn ensure_ccswitch_readonly_mcp_config_uses_current_exe_without_project_root() {
+        let config = r#"model = "claude-sonnet-5"
+model_provider = "codex_model_router_v2"
+"#;
+
+        let updated =
+            ensure_ccswitch_readonly_mcp_config(config).expect("inject readonly MCP config");
+        let parsed = updated
+            .parse::<DocumentMut>()
+            .expect("generated config should parse");
+        let server = parsed
+            .get("mcp_servers")
+            .and_then(|item| item.as_table())
+            .and_then(|table| table.get("ccswitch_readonly"))
+            .and_then(|item| item.as_table())
+            .expect("readonly server should exist");
+
+        assert_eq!(
+            server.get("type").and_then(|item| item.as_str()),
+            Some("stdio")
+        );
+        assert!(
+            server
+                .get("command")
+                .and_then(|item| item.as_str())
+                .is_some_and(|command| !command.trim().is_empty()),
+            "command should be resolved from current executable"
+        );
+        let args = server
+            .get("args")
+            .and_then(|item| item.as_array())
+            .expect("args should exist");
+        assert_eq!(
+            args.iter()
+                .filter_map(|item| item.as_str())
+                .collect::<Vec<_>>(),
+            vec!["--readonly-mcp"]
+        );
+        assert!(
+            !updated.contains("CCSWITCH_READONLY_ROOT"),
+            "project root must not be hardcoded into shared config"
+        );
+    }
+
+    #[test]
     fn merge_openai_router_config_uses_builtin_openai_history_bucket() {
         let live_config = r#"model = "gpt-5.5"
 approval_policy = "on-request"
@@ -5788,6 +5953,95 @@ base_url = "http://127.0.0.1:15721/v1"
         assert!(slugs.contains(&"deepseek-v4-flash"));
         assert!(model_fields.contains(&"qwen3.6"));
         assert!(model_fields.contains(&"deepseek-v4-flash"));
+    }
+
+    #[test]
+    #[serial]
+    fn model_catalog_preserves_new_official_gpt_models() {
+        let _home = TestHomeGuard::new();
+        seed_codex_models_cache(json!([
+            {
+                "slug": "gpt-5.5",
+                "display_name": "GPT-5.5",
+                "model_messages": { "instructions_template": "template" },
+                "context_window": 128000
+            },
+            {
+                "slug": "gpt-5.6-sol",
+                "display_name": "GPT-5.6 Sol",
+                "model_messages": { "instructions_template": "template" },
+                "context_window": 256000
+            },
+            {
+                "slug": "gpt-5.6-terra",
+                "display_name": "GPT-5.6 Terra",
+                "model_messages": { "instructions_template": "template" },
+                "context_window": 256000
+            },
+            {
+                "slug": "gpt-5.6-luna",
+                "display_name": "GPT-5.6 Luna",
+                "model_messages": { "instructions_template": "template" },
+                "context_window": 256000
+            }
+        ]));
+        let settings = json!({
+            "modelCatalog": {
+                "models": [
+                    { "model": "qwen3.6", "displayName": "Qwen 3.6" }
+                ]
+            }
+        });
+        let config = r#"model_provider = "custom"
+
+[model_providers.custom]
+base_url = "http://127.0.0.1:15721/v1"
+"#;
+
+        let prepared = prepare_codex_config_text_with_model_catalog(&settings, config)
+            .expect("prepare config");
+        let prepared_toml: toml::Value = toml::from_str(&prepared).expect("parse prepared config");
+        let provider_models = prepared_toml
+            .get("model_providers")
+            .and_then(|providers| providers.get("custom"))
+            .and_then(|provider| provider.get("models"))
+            .and_then(|models| models.as_array())
+            .expect("custom provider should expose inline models");
+        let provider_model_ids = provider_models
+            .iter()
+            .filter_map(|model| model.get("model").and_then(|value| value.as_str()))
+            .collect::<Vec<_>>();
+        assert!(provider_model_ids.contains(&"qwen3.6"));
+        assert!(provider_model_ids.contains(&"gpt-5.6-sol"));
+        assert!(provider_model_ids.contains(&"gpt-5.6-terra"));
+        assert!(provider_model_ids.contains(&"gpt-5.6-luna"));
+
+        let catalog: Value =
+            read_json_file(&get_codex_model_catalog_path()).expect("read generated catalog");
+        let catalog_slugs = catalog
+            .get("models")
+            .and_then(|models| models.as_array())
+            .expect("models array")
+            .iter()
+            .filter_map(|model| model.get("slug").and_then(|slug| slug.as_str()))
+            .collect::<Vec<_>>();
+        assert!(catalog_slugs.contains(&"qwen3.6"));
+        assert!(catalog_slugs.contains(&"gpt-5.6-sol"));
+        assert!(catalog_slugs.contains(&"gpt-5.6-terra"));
+        assert!(catalog_slugs.contains(&"gpt-5.6-luna"));
+
+        let cache: Value = read_json_file(&get_codex_models_cache_path()).expect("read cache");
+        let cache_slugs = cache
+            .get("models")
+            .and_then(|models| models.as_array())
+            .expect("models array")
+            .iter()
+            .filter_map(|model| model.get("slug").and_then(|slug| slug.as_str()))
+            .collect::<Vec<_>>();
+        assert!(cache_slugs.contains(&"qwen3.6"));
+        assert!(cache_slugs.contains(&"gpt-5.6-sol"));
+        assert!(cache_slugs.contains(&"gpt-5.6-terra"));
+        assert!(cache_slugs.contains(&"gpt-5.6-luna"));
     }
 
     #[test]

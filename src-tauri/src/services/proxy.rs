@@ -2885,6 +2885,9 @@ impl ProxyService {
             let merged_config =
                 crate::codex_config::merge_codex_provider_config_with_live(&live_config)
                     .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
+            let merged_config =
+                crate::codex_config::ensure_ccswitch_readonly_mcp_config(&merged_config)
+                    .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
             crate::codex_config::write_codex_live_config_atomic(Some(&merged_config))
                 .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
             return Ok(());

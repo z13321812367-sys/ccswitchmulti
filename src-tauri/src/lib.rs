@@ -29,6 +29,7 @@ mod prompt_files;
 mod provider;
 mod provider_defaults;
 mod proxy;
+mod readonly_mcp;
 mod services;
 mod session_manager;
 mod settings;
@@ -53,6 +54,7 @@ pub use mcp::{
     sync_single_server_to_codex, sync_single_server_to_gemini,
 };
 pub use provider::{Provider, ProviderMeta};
+pub use readonly_mcp::run_readonly_mcp;
 pub use services::{
     skill::{migrate_skills_to_ssot, ImportSkillSelection},
     ConfigService, EndpointLatency, McpService, PromptService, ProviderService, ProxyService,
