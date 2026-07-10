@@ -1131,6 +1131,21 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
         displayName: "GPT 5.4 Mini",
         contextWindow: 128000,
       },
+      {
+        model: "gpt-5.6-sol",
+        displayName: "GPT-5.6 Sol",
+        contextWindow: 256000,
+      },
+      {
+        model: "gpt-5.6-terra",
+        displayName: "GPT-5.6 Terra",
+        contextWindow: 256000,
+      },
+      {
+        model: "gpt-5.6-luna",
+        displayName: "GPT-5.6 Luna",
+        contextWindow: 256000,
+      },
       { model: "qwen3.6", displayName: "Qwen 3.6", contextWindow: 262144 },
     ]);
   });
@@ -1271,6 +1286,21 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     expect(savedPlan.settingsConfig.modelCatalog.models).toEqual([
       { model: "gpt-5.5" },
       {
+        model: "gpt-5.6-sol",
+        displayName: "GPT-5.6 Sol",
+        contextWindow: 256000,
+      },
+      {
+        model: "gpt-5.6-terra",
+        displayName: "GPT-5.6 Terra",
+        contextWindow: 256000,
+      },
+      {
+        model: "gpt-5.6-luna",
+        displayName: "GPT-5.6 Luna",
+        contextWindow: 256000,
+      },
+      {
         model: "gpt-5.5-relay-gpt",
         displayName: "Relay GPT 5.5",
         upstreamModel: "gpt-5.5",
@@ -1360,6 +1390,9 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
     });
     expect(catalog.models.map((model) => model.model)).toEqual([
       "gpt-5.5",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
       "gpt-5.5-relay-gpt",
     ]);
   });
@@ -1433,6 +1466,9 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
 
     expect(catalog.models.map((model) => model.model)).toEqual([
       "gpt-5.5",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
       "claude-opus-4-8",
     ]);
     expect(
@@ -1764,12 +1800,73 @@ describe("Codex MultiRouter workspace route persistence helpers", () => {
       { model: "gpt-5.4", contextWindow: 272000 },
       { model: "gpt-5.4-mini", contextWindow: 128000 },
       { model: "gpt-5.3-codex-spark", contextWindow: 128000 },
+      {
+        model: "gpt-5.6-sol",
+        displayName: "GPT-5.6 Sol",
+        contextWindow: 256000,
+      },
+      {
+        model: "gpt-5.6-terra",
+        displayName: "GPT-5.6 Terra",
+        contextWindow: 256000,
+      },
+      {
+        model: "gpt-5.6-luna",
+        displayName: "GPT-5.6 Luna",
+        contextWindow: 256000,
+      },
     ]);
     expect(plan.settingsConfig.modelCatalog.spawnAgentModels).toEqual([
       "gpt-5.5",
       "gpt-5.4",
       "gpt-5.4-mini",
       "gpt-5.3-codex-spark",
+      "gpt-5.6-sol",
+    ]);
+  });
+
+  it("merges new official GPT models into an existing older provider catalog", () => {
+    const officialBackup: Provider = {
+      id: "codex-official-backup",
+      name: "OpenAI Official Backup",
+      category: "official",
+      settingsConfig: {
+        modelCatalog: {
+          models: [
+            { model: "gpt-5.5", contextWindow: 272000 },
+            { model: "gpt-5.4", contextWindow: 272000 },
+          ],
+        },
+      },
+    };
+    const plan = createDraftRoutingPlan([officialBackup], [officialBackup]);
+    const routes = [
+      normalizeCodexRouteForSave(
+        {
+          label: officialBackup.name,
+          targetProviderId: officialBackup.id,
+          match: {
+            models: ["gpt-5.5", "gpt-5.4"],
+            prefixes: ["gpt-"],
+          },
+        },
+        0,
+        new Set<string>(),
+      ),
+    ];
+
+    const rebuilt = buildModelCatalogForRoutes(
+      plan,
+      routes,
+      new Map([[officialBackup.id, officialBackup]]),
+    );
+
+    expect(rebuilt.models.map((model) => model.model)).toEqual([
+      "gpt-5.5",
+      "gpt-5.4",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
     ]);
   });
 

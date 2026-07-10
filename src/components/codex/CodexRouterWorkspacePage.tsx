@@ -228,11 +228,15 @@ function normalizedRouteIdentityText(value?: string | null): string {
 
 /// 收集 provider 可暴露的模型集合；旧 inline route 没有 targetProviderId 时用它判断是否与新增 provider 等价。
 function providerRouteModelIdentitySet(provider: Provider): Set<string> {
+  const providerCatalog = readCodexModelCatalog(provider).models;
   return new Set(
     [
-      ...readCodexModelCatalog(provider).models.map((model) => model.model),
+      ...providerCatalog.map((model) => model.model),
       ...collectProviderModelIds(provider),
-      ...fallbackCatalogDraftForProvider(provider).map((model) => model.model),
+      ...supplementalCatalogDraftForProvider(
+        provider,
+        providerCatalog.length > 0,
+      ).map((model) => model.model),
       ...inferProviderPrefixes(provider, collectProviderModelIds(provider)),
     ]
       .map(normalizedRouteIdentityText)
@@ -397,7 +401,25 @@ type CodexModelCatalogDraft = {
   spawnAgentModels?: string[];
 };
 
+const OPENAI_CODEX_NEW_OFFICIAL_MODELS: CodexCatalogModelDraft[] = [
+  {
+    model: "gpt-5.6-sol",
+    displayName: "GPT-5.6 Sol",
+    contextWindow: 256000,
+  },
+  {
+    model: "gpt-5.6-terra",
+    displayName: "GPT-5.6 Terra",
+    contextWindow: 256000,
+  },
+  {
+    model: "gpt-5.6-luna",
+    displayName: "GPT-5.6 Luna",
+    contextWindow: 256000,
+  },
+];
 const OPENAI_CODEX_FALLBACK_CATALOG_MODELS: CodexCatalogModelDraft[] = [
+  ...OPENAI_CODEX_NEW_OFFICIAL_MODELS,
   { model: "gpt-5.5", contextWindow: 272000 },
   { model: "gpt-5.4", contextWindow: 272000 },
   { model: "gpt-5.4-mini", contextWindow: 128000 },
@@ -932,10 +954,6 @@ function collectProviderModelIds(provider: Provider): string[] {
   ].filter(
     (model): model is string => typeof model === "string" && !!model.trim(),
   );
-  const providerText =
-    `${provider.id} ${provider.name} ${provider.category ?? ""}`
-      .toLowerCase()
-      .trim();
   const providerType = String(
     provider.meta?.providerType ?? provider.settingsConfig?.providerType ?? "",
   ).toLowerCase();
@@ -946,15 +964,14 @@ function collectProviderModelIds(provider: Provider): string[] {
       "",
   ).toLowerCase();
   const looksLikeOpenAiSource =
-    providerText.includes("openai") ||
+    provider.category === "official" ||
     providerType.includes("codex_oauth") ||
     baseUrlText.includes("chatgpt.com/backend-api/codex");
-  const fallbackModels =
-    looksLikeOpenAiSource &&
-    catalogModels.length === 0 &&
-    singleModelFields.length === 0
+  const fallbackModels = looksLikeOpenAiSource
+    ? catalogModels.length === 0 && singleModelFields.length === 0
       ? OPENAI_CODEX_FALLBACK_MODELS
-      : [];
+      : OPENAI_CODEX_NEW_OFFICIAL_MODELS.map((model) => model.model)
+    : [];
   return Array.from(
     new Set([...catalogModels, ...singleModelFields, ...fallbackModels]),
   );
@@ -984,8 +1001,9 @@ function buildRouteModelMapFromProvider(
 
 /// 官方/OAuth provider 经常没有可读 /models catalog；这里提供带上下文窗口的兜底目录，
 /// 避免 MultiRouter 只保存裸模型名后让 Codex Desktop 回退到 128k 级默认窗口。
-function fallbackCatalogDraftForProvider(
+function supplementalCatalogDraftForProvider(
   provider: Provider,
+  hasExistingCatalog: boolean,
 ): CodexCatalogModelDraft[] {
   const settings = provider.settingsConfig ?? {};
   const providerType = String(
@@ -995,7 +1013,10 @@ function fallbackCatalogDraftForProvider(
     provider.category === "official" ||
     providerType.includes("codex_oauth")
   ) {
-    return OPENAI_CODEX_FALLBACK_CATALOG_MODELS.map((model) => ({ ...model }));
+    const models = hasExistingCatalog
+      ? OPENAI_CODEX_NEW_OFFICIAL_MODELS
+      : OPENAI_CODEX_FALLBACK_CATALOG_MODELS;
+    return models.map((model) => ({ ...model }));
   }
   return [];
 }
@@ -1182,10 +1203,10 @@ function buildModelCatalogDraftFromSources(
       byModel.set(id, catalogDraftFromSourceModel(id, catalogModel));
     }
 
-    const fallbackCatalogModels =
-      sourceCatalogModels.length === 0
-        ? fallbackCatalogDraftForProvider(provider)
-        : [];
+    const fallbackCatalogModels = supplementalCatalogDraftForProvider(
+      provider,
+      sourceCatalogModels.length > 0,
+    );
     for (const catalogModel of fallbackCatalogModels) {
       const id = catalogModel.model.trim();
       if (!id || byModel.has(id)) continue;
@@ -1603,10 +1624,12 @@ export function buildModelCatalogForRoutes(
     const targetCatalogModels = targetProvider
       ? readCodexModelCatalog(targetProvider).models
       : [];
-    const fallbackCatalogModels =
-      targetProvider && targetCatalogModels.length === 0
-        ? fallbackCatalogDraftForProvider(targetProvider)
-        : [];
+    const fallbackCatalogModels = targetProvider
+      ? supplementalCatalogDraftForProvider(
+          targetProvider,
+          targetCatalogModels.length > 0,
+        )
+      : [];
     const routableCatalogModels = [
       ...targetCatalogModels,
       ...fallbackCatalogModels,
