@@ -71,6 +71,40 @@ jobs:
           print("removed obsolete body_snippet helper, regression test, and test import")
           PY
 
+      - name: Normalize all-target Clippy baselines
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          codex_path = Path("src-tauri/src/codex_config.rs")
+          codex = codex_path.read_text(encoding="utf-8")
+          codex_old = """    let Some(models) = value.as_object() else {\n        return None;\n    };\n"""
+          codex_new = """    let models = value.as_object()?;\n"""
+          if codex.count(codex_old) != 1:
+              raise SystemExit(f"expected one codex let-else baseline, found {codex.count(codex_old)}")
+          codex = codex.replace(codex_old, codex_new, 1)
+          if codex_old in codex:
+              raise SystemExit("codex let-else baseline remains")
+          codex_path.write_text(codex, encoding="utf-8")
+
+          settings_path = Path("src-tauri/src/settings.rs")
+          settings = settings_path.read_text(encoding="utf-8")
+          settings_old = """        let mut settings = AppSettings::default();\n        settings.show_in_tray = false;\n"""
+          settings_new = """        let settings = AppSettings {\n            show_in_tray: false,\n            ..Default::default()\n        };\n"""
+          if settings.count(settings_old) != 1:
+              raise SystemExit(
+                  f"expected one settings field-reassign baseline, found {settings.count(settings_old)}"
+              )
+          settings = settings.replace(settings_old, settings_new, 1)
+          if settings_old in settings:
+              raise SystemExit("settings field-reassign baseline remains")
+          settings_path.write_text(settings, encoding="utf-8")
+
+          print("normalized all-target Clippy baselines without lint suppression")
+          PY
+
       - name: Install Linux system dependencies
         run: |
           sudo apt-get update
