@@ -21,6 +21,9 @@ jobs:
       - name: Reject unsafe shell interpolation
         run: python scripts/check_workflow_shell_interpolation.py
 
+      - name: Check Rust failure boundaries
+        run: python scripts/check_rust_failure_boundaries.py
+
   frontend:
     name: Frontend Checks
     runs-on: ubuntu-latest
