@@ -79,10 +79,13 @@ fn should_run_auto_sync(settings: Option<&S3SyncSettings>) -> bool {
     sync.enabled && sync.auto_sync
 }
 
-fn persist_auto_sync_error(settings: &mut S3SyncSettings, error: &AppError) {
+fn persist_auto_sync_error(
+    settings: &mut S3SyncSettings,
+    error: &AppError,
+) -> Result<(), AppError> {
     settings.status.last_error = Some(error.to_string());
     settings.status.last_error_source = Some("auto".to_string());
-    let _ = settings::update_s3_sync_status(settings.status.clone());
+    settings::update_s3_sync_status(settings.status.clone())
 }
 
 fn emit_auto_sync_status_updated(app: &AppHandle, status: &str, error: Option<&str>) {
@@ -124,7 +127,11 @@ async fn run_auto_sync_upload(
             Ok(())
         }
         Err(err) => {
-            persist_auto_sync_error(&mut sync_settings, &err);
+            if let Err(persist_err) = persist_auto_sync_error(&mut sync_settings, &err) {
+                log::error!(
+                    "[S3][AutoSync] Upload failed and persisting the error status also failed: upload_error={err}; persistence_error={persist_err}"
+                );
+            }
             emit_auto_sync_status_updated(app, "error", Some(&err.to_string()));
             Err(err)
         }

@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
-#[cfg(unix)]
-use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
 use crate::app_config::AppType;
@@ -626,13 +625,18 @@ impl AppSettings {
         let Some(path) = Self::settings_path() else {
             return Self::default();
         };
-        if let Ok(content) = fs::read_to_string(&path) {
-            match serde_json::from_str::<AppSettings>(&content) {
+        Self::load_from_path(&path)
+    }
+
+    fn load_from_path(path: &Path) -> Self {
+        match fs::read_to_string(path) {
+            Ok(content) => match serde_json::from_str::<AppSettings>(&content) {
                 Ok(mut settings) => {
                     settings.normalize_paths();
                     settings
                 }
                 Err(err) => {
+                    preserve_corrupt_settings_file(path, &content);
                     log::warn!(
                         "解析设置文件失败，将使用默认设置。路径: {}, 错误: {}",
                         path.display(),
@@ -640,19 +644,60 @@ impl AppSettings {
                     );
                     Self::default()
                 }
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(err) => {
+                log::warn!(
+                    "读取设置文件失败，将使用默认设置。路径: {}, 错误: {}",
+                    path.display(),
+                    err
+                );
+                Self::default()
             }
-        } else {
-            Self::default()
         }
     }
 }
 
+fn corrupt_settings_backup_path(path: &Path, content: &str) -> PathBuf {
+    let digest = Sha256::digest(content.as_bytes());
+    let fingerprint = digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("settings.json");
+    path.with_file_name(format!("{file_name}.corrupt-{fingerprint}"))
+}
+
+fn preserve_corrupt_settings_file(path: &Path, content: &str) {
+    let backup_path = corrupt_settings_backup_path(path, content);
+    if backup_path.exists() {
+        return;
+    }
+
+    match crate::config::atomic_write(&backup_path, content.as_bytes()) {
+        Ok(()) => log::warn!("已保留损坏设置文件快照: {}", backup_path.display()),
+        Err(err) => log::error!(
+            "保留损坏设置文件快照失败。原文件仍保留在 {}，备份路径: {}，错误: {}",
+            path.display(),
+            backup_path.display(),
+            err
+        ),
+    }
+}
+
 fn save_settings_file(settings: &AppSettings) -> Result<(), AppError> {
-    let mut normalized = settings.clone();
-    normalized.normalize_paths();
     let Some(path) = AppSettings::settings_path() else {
         return Err(AppError::Config("无法获取用户主目录".to_string()));
     };
+    save_settings_file_to_path(settings, &path)
+}
+
+fn save_settings_file_to_path(settings: &AppSettings, path: &Path) -> Result<(), AppError> {
+    let mut normalized = settings.clone();
+    normalized.normalize_paths();
 
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
@@ -660,28 +705,7 @@ fn save_settings_file(settings: &AppSettings) -> Result<(), AppError> {
 
     let json = serde_json::to_string_pretty(&normalized)
         .map_err(|e| AppError::JsonSerialize { source: e })?;
-    #[cfg(unix)]
-    {
-        use std::fs::OpenOptions;
-        use std::os::unix::fs::OpenOptionsExt;
-
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&path)
-            .map_err(|e| AppError::io(&path, e))?;
-        file.write_all(json.as_bytes())
-            .map_err(|e| AppError::io(&path, e))?;
-    }
-
-    #[cfg(not(unix))]
-    {
-        fs::write(&path, json).map_err(|e| AppError::io(&path, e))?;
-    }
-
-    Ok(())
+    crate::config::atomic_write(path, json.as_bytes())
 }
 
 static SETTINGS_STORE: OnceLock<RwLock<AppSettings>> = OnceLock::new();
@@ -1013,7 +1037,7 @@ pub fn get_effective_current_provider(
             local_id,
             app_type.as_str()
         );
-        let _ = set_current_provider(app_type, None);
+        set_current_provider(app_type, None)?;
     }
 
     // Fallback 到数据库的 is_current
@@ -1141,6 +1165,64 @@ pub fn update_s3_sync_status(status: WebDavSyncStatus) -> Result<(), AppError> {
 mod tests {
     use super::*;
     use crate::app_config::AppType;
+
+    #[test]
+    fn corrupt_settings_are_backed_up_once_before_default_recovery() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        let corrupt = r#"{"webdavSync":{"#;
+        fs::write(&path, corrupt).expect("write corrupt settings");
+
+        let loaded = AppSettings::load_from_path(&path);
+        assert_eq!(loaded.show_in_tray, AppSettings::default().show_in_tray);
+
+        let backup = corrupt_settings_backup_path(&path, corrupt);
+        assert_eq!(
+            fs::read_to_string(&backup).expect("read corruption backup"),
+            corrupt
+        );
+
+        let _ = AppSettings::load_from_path(&path);
+        let backup_count = fs::read_dir(dir.path())
+            .expect("read tempdir")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("settings.json.corrupt-")
+            })
+            .count();
+        assert_eq!(
+            backup_count, 1,
+            "same corruption should not create backup spam"
+        );
+    }
+
+    #[test]
+    fn settings_save_uses_common_atomic_persistence_boundary() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        let mut settings = AppSettings::default();
+        settings.show_in_tray = false;
+
+        save_settings_file_to_path(&settings, &path).expect("save settings");
+        let saved: AppSettings =
+            serde_json::from_str(&fs::read_to_string(&path).expect("read settings"))
+                .expect("parse saved settings");
+        assert!(!saved.show_in_tray);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path)
+                .expect("settings metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
 
     #[test]
     fn visible_apps_old_settings_default_claude_desktop_visible() {

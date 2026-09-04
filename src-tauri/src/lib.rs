@@ -135,7 +135,10 @@ fn handle_deeplink_url(
 
     let redacted_url = redact_url_for_log(url_str);
     log::info!("✓ Deep link URL detected from {source}: {redacted_url}");
-    log::debug!("Deep link URL (raw) from {source}: {url_str}");
+    log::debug!(
+        "Deep link URL metadata from {source}: length={}, redacted={redacted_url}",
+        url_str.len()
+    );
 
     match crate::deeplink::parse_deeplink_url(url_str) {
         Ok(request) => {
@@ -166,12 +169,12 @@ fn handle_deeplink_url(
             }
         }
         Err(e) => {
-            log::error!("✗ Failed to parse deep link URL: {e}");
+            log::error!("✗ Failed to parse deep link URL ({redacted_url}): {e}");
 
             if let Err(emit_err) = app.emit(
                 "deeplink-error",
                 serde_json::json!({
-                    "url": url_str,
+                    "url": redacted_url,
                     "error": e.to_string()
                 }),
             ) {
@@ -2155,5 +2158,30 @@ mod tests {
             classify_exit_request(Some(1)),
             ExitRequestAction::CleanupAndExit
         );
+    }
+}
+
+#[cfg(test)]
+mod sensitive_deeplink_boundary_tests {
+    use super::redact_url_for_log;
+
+    #[test]
+    fn deep_link_log_redaction_keeps_keys_but_never_secret_values() {
+        let raw = "ccswitch://v1/import?resource=provider&name=demo&apiKey=sk-secret&usageAccessToken=token-secret#fragment-secret";
+        let redacted = redact_url_for_log(raw);
+
+        assert!(redacted.contains("apiKey"));
+        assert!(redacted.contains("usageAccessToken"));
+        assert!(!redacted.contains("sk-secret"));
+        assert!(!redacted.contains("token-secret"));
+        assert!(!redacted.contains("fragment-secret"));
+    }
+
+    #[test]
+    fn malformed_deep_link_redaction_drops_query_values() {
+        let raw = "ccswitch://v1/import?apiKey=top-secret%ZZ";
+        let redacted = redact_url_for_log(raw);
+        assert!(!redacted.contains("top-secret"));
+        assert!(redacted.contains("?[redacted]") || redacted.contains("?[keys:"));
     }
 }
