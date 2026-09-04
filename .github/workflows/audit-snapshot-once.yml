@@ -1,0 +1,28 @@
+name: Audit Snapshot Once
+
+on:
+  push:
+    branches:
+      - fix/global-hardening-20260904
+    paths:
+      - .github/workflows/audit-snapshot-once.yml
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    if: github.repository == 'z13321812367-sys/ccswitchmulti'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: fix/global-hardening-20260904
+      - name: Package source snapshot
+        run: tar --exclude=.git -czf /tmp/ccswitchmulti-audit.tar.gz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ccswitchmulti-audit-source
+          path: /tmp/ccswitchmulti-audit.tar.gz
+          if-no-files-found: error
+          retention-days: 1
