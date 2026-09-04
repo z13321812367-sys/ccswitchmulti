@@ -1,0 +1,63 @@
+name: Final Hardening Apply Once
+
+on:
+  push:
+    branches:
+      - fix/global-hardening-20260904
+    paths:
+      - .github/workflows/final-hardening-apply-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-verify:
+    if: github.repository == 'z13321812367-sys/ccswitchmulti'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: fix/global-hardening-20260904
+          fetch-depth: 0
+
+      - name: Apply exact global hardening patch
+        run: python scripts/apply_final_global_hardening_once.py
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev \
+            libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+            || sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.0-dev
+          sudo apt-get install -y --no-install-recommends libsoup-3.0-dev \
+            || sudo apt-get install -y --no-install-recommends libsoup2.4-dev
+
+      - name: Format with repository Rust toolchain
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml
+
+      - name: Run permanent policy guards
+        run: |
+          python scripts/check_workflow_shell_interpolation.py
+          python scripts/check_rust_failure_boundaries.py
+          git diff --check
+
+      - name: Create frontend dist placeholder
+        run: mkdir -p dist
+
+      - name: Clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+
+      - name: Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Remove one-shot drivers and commit verified changes
+        run: |
+          git rm scripts/apply_final_global_hardening_once.py .github/workflows/final-hardening-apply-once.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "fix: close global diagnostics and rollback failure boundaries"
+          git push origin HEAD:fix/global-hardening-20260904
