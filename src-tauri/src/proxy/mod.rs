@@ -32,10 +32,10 @@ pub(crate) mod server;
 pub mod session;
 pub(crate) mod sse;
 pub(crate) mod switch_lock;
-pub(crate) mod timeout_policy;
 pub mod thinking_budget_rectifier;
 pub mod thinking_optimizer;
 pub mod thinking_rectifier;
+pub(crate) mod timeout_policy;
 pub(crate) mod types;
 pub mod usage;
 

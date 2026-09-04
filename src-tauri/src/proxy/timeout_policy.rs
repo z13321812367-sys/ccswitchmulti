@@ -54,9 +54,7 @@ fn non_zero_seconds(seconds: u64) -> Option<Duration> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ForwarderTimeoutPolicy, TRANSPORT_RESPONSE_HEADER_SAFETY_TIMEOUT,
-    };
+    use super::{ForwarderTimeoutPolicy, TRANSPORT_RESPONSE_HEADER_SAFETY_TIMEOUT};
     use std::time::Duration;
 
     #[test]
