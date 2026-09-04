@@ -12,11 +12,8 @@ const STORE_KEY_APP_CONFIG_DIR: &str = "app_config_dir_override";
 /// 该标记必须与 override 分离保存：用户迁移后如果主动清除覆盖目录，旧版
 /// settings.json 中残留的字段不能在下一次启动时再次把覆盖目录“复活”。
 const STORE_KEY_APP_CONFIG_DIR_LEGACY_MIGRATED: &str = "app_config_dir_legacy_migrated_v1";
-const LEGACY_APP_CONFIG_DIR_KEYS: &[&str] = &[
-    "appConfigDir",
-    "app_config_dir",
-    "app_config_dir_override",
-];
+const LEGACY_APP_CONFIG_DIR_KEYS: &[&str] =
+    &["appConfigDir", "app_config_dir", "app_config_dir_override"];
 
 /// 缓存当前的 app_config_dir 覆盖路径，避免存储 AppHandle
 static APP_CONFIG_DIR_OVERRIDE: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
@@ -160,10 +157,7 @@ fn persist_override_and_migration_marker(
             store.delete(STORE_KEY_APP_CONFIG_DIR);
         }
     }
-    store.set(
-        STORE_KEY_APP_CONFIG_DIR_LEGACY_MIGRATED,
-        Value::Bool(true),
-    );
+    store.set(STORE_KEY_APP_CONFIG_DIR_LEGACY_MIGRATED, Value::Bool(true));
     store
         .save()
         .map_err(|e| AppError::Message(format!("保存 Store 失败: {e}")))
