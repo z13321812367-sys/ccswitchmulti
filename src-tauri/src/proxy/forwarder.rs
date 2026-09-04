@@ -3852,8 +3852,10 @@ mod tests {
             optimizer_config: OptimizerConfig::default(),
             copilot_optimizer_config: CopilotOptimizerConfig::default(),
             codex_responses_lite_fallbacks: Arc::new(RwLock::new(HashMap::new())),
-            non_streaming_timeout,
-            streaming_first_byte_timeout,
+            timeout_policy: ForwarderTimeoutPolicy::from_seconds(
+                non_streaming_timeout.as_secs(),
+                streaming_first_byte_timeout.as_secs(),
+            ),
             max_attempts: 1,
         }
     }
