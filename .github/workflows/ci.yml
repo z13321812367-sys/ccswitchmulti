@@ -11,6 +11,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  workflow-policy:
+    name: Workflow Policy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Reject unsafe shell interpolation
+        run: python scripts/check_workflow_shell_interpolation.py
+
   frontend:
     name: Frontend Checks
     runs-on: ubuntu-latest
