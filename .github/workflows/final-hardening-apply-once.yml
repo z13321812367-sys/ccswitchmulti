@@ -23,7 +23,7 @@ jobs:
       - name: Apply exact global hardening patch
         run: python scripts/apply_final_global_hardening_once.py
 
-      - name: Remove obsolete body snippet helper and test
+      - name: Remove obsolete body snippet helper, test, and import
         shell: bash
         run: |
           set -euo pipefail
@@ -56,10 +56,19 @@ jobs:
           end = min(candidates)
           text = text[:start] + text[end + 1:]
 
-          if "body_snippet(" in text:
-              raise SystemExit("body_snippet references remain after exact removal")
+          stale_import = "        body_looks_like_sse, body_snippet, chat_sse_to_response_value,\n"
+          if text.count(stale_import) != 1:
+              raise SystemExit("expected exactly one stale body_snippet test import")
+          text = text.replace(
+              stale_import,
+              "        body_looks_like_sse, chat_sse_to_response_value,\n",
+              1,
+          )
+
+          if "body_snippet" in text:
+              raise SystemExit("body_snippet identifier remains after exact removal")
           path.write_text(text, encoding="utf-8")
-          print("removed obsolete body_snippet helper and regression test")
+          print("removed obsolete body_snippet helper, regression test, and test import")
           PY
 
       - name: Install Linux system dependencies
