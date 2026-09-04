@@ -13,7 +13,7 @@ permissions:
 jobs:
   apply:
     if: github.repository == 'z13321812367-sys/ccswitchmulti'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout audit branch
         uses: actions/checkout@v6
@@ -24,11 +24,25 @@ jobs:
       - name: Apply exact timeout test migration
         run: python scripts/fix_forwarder_timeout_test_once.py
 
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev \
+            libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+            || sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.0-dev
+          sudo apt-get install -y --no-install-recommends libsoup-3.0-dev \
+            || sudo apt-get install -y --no-install-recommends libsoup2.4-dev
+
       - name: Format Rust
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all
 
       - name: Enforce Rust failure boundaries
         run: python scripts/check_rust_failure_boundaries.py
+
+      - name: Create frontend dist placeholder
+        run: mkdir -p dist
 
       - name: Compile and run affected lib test
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib proxy::forwarder::tests::non_streaming_success_is_buffered_before_marking_provider_successful
