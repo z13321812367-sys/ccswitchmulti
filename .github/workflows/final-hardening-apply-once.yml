@@ -23,6 +23,45 @@ jobs:
       - name: Apply exact global hardening patch
         run: python scripts/apply_final_global_hardening_once.py
 
+      - name: Remove obsolete body snippet helper and test
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("src-tauri/src/proxy/handlers.rs")
+          text = path.read_text(encoding="utf-8")
+
+          prod_start_marker = "/// 取 body 前 `max_chars` 个字符的单行摘要："
+          prod_end_marker = "/// 解析单个 SSE 块的 event 名与 data 负载"
+          if text.count(prod_start_marker) != 1 or text.count(prod_end_marker) != 1:
+              raise SystemExit("body_snippet production markers are not unique")
+          start = text.index(prod_start_marker)
+          end = text.index(prod_end_marker, start)
+          block = text[start:end]
+          if block.count("fn body_snippet(") != 1:
+              raise SystemExit("expected exactly one body_snippet function in production block")
+          text = text[:start] + text[end:]
+
+          test_marker = "    #[test]\n    fn body_snippet_sanitizes_controls_and_truncates() {"
+          if text.count(test_marker) != 1:
+              raise SystemExit("expected exactly one body_snippet regression test")
+          start = text.index(test_marker)
+          next_test = text.find("\n    #[test]\n", start + len(test_marker))
+          module_end = text.find("\n}", start + len(test_marker))
+          candidates = [pos for pos in (next_test, module_end) if pos != -1]
+          if not candidates:
+              raise SystemExit("could not find end boundary for body_snippet regression test")
+          end = min(candidates)
+          text = text[:start] + text[end + 1:]
+
+          if "body_snippet(" in text:
+              raise SystemExit("body_snippet references remain after exact removal")
+          path.write_text(text, encoding="utf-8")
+          print("removed obsolete body_snippet helper and regression test")
+          PY
+
       - name: Install Linux system dependencies
         run: |
           sudo apt-get update
@@ -35,7 +74,7 @@ jobs:
             || sudo apt-get install -y --no-install-recommends libsoup2.4-dev
 
       - name: Format with repository Rust toolchain
-        run: cargo fmt --manifest-path src-tauri/Cargo.toml
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all
 
       - name: Run permanent policy guards
         run: |
@@ -46,11 +85,11 @@ jobs:
       - name: Create frontend dist placeholder
         run: mkdir -p dist
 
-      - name: Clippy
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+      - name: Clippy all targets and features
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
 
       - name: Rust tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+        run: cargo test --manifest-path src-tauri/Cargo.toml --all-features
 
       - name: Remove one-shot drivers and commit verified changes
         run: |
