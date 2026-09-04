@@ -150,11 +150,15 @@ fn persist_override_and_migration_marker(
     let store = open_paths_store(app)?;
 
     match path {
-        Some(value) => store.set(
-            STORE_KEY_APP_CONFIG_DIR,
-            Value::String(value.trim().to_string()),
-        ),
-        None => store.delete(STORE_KEY_APP_CONFIG_DIR),
+        Some(value) => {
+            store.set(
+                STORE_KEY_APP_CONFIG_DIR,
+                Value::String(value.trim().to_string()),
+            );
+        }
+        None => {
+            store.delete(STORE_KEY_APP_CONFIG_DIR);
+        }
     }
     store.set(
         STORE_KEY_APP_CONFIG_DIR_LEGACY_MIGRATED,
@@ -169,15 +173,12 @@ fn migrate_legacy_override_if_needed(app: &tauri::AppHandle) -> Result<Option<Pa
     if legacy_migration_completed(app) {
         return Ok(None);
     }
-    if read_override_from_store(app).is_some() {
-        // 已经存在新格式配置，也标记为迁移完成，防止将来用户主动清除后旧值复活。
-        persist_override_and_migration_marker(
-            app,
-            get_app_config_dir_override()
-                .as_deref()
-                .and_then(|path| path.to_str()),
-        )?;
-        return Ok(None);
+
+    if let Some(existing_path) = read_override_from_store(app) {
+        // 已经存在新格式配置，只补迁移标记，绝不能用尚未初始化的缓存反写 Store。
+        let path_string = existing_path.to_string_lossy().to_string();
+        persist_override_and_migration_marker(app, Some(&path_string))?;
+        return Ok(Some(existing_path));
     }
 
     let Some(legacy_path) = read_legacy_override_from_settings() else {
