@@ -1,0 +1,51 @@
+name: Forwarder Timeout Test Fix Once
+
+on:
+  push:
+    branches:
+      - fix/global-hardening-20260904
+    paths:
+      - .github/workflows/forwarder-timeout-test-fix-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.repository == 'z13321812367-sys/ccswitchmulti'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout audit branch
+        uses: actions/checkout@v6
+        with:
+          ref: fix/global-hardening-20260904
+          fetch-depth: 0
+
+      - name: Apply exact timeout test migration
+        run: python scripts/fix_forwarder_timeout_test_once.py
+
+      - name: Format Rust
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all
+
+      - name: Enforce Rust failure boundaries
+        run: python scripts/check_rust_failure_boundaries.py
+
+      - name: Compile and run affected lib test
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib proxy::forwarder::tests::non_streaming_success_is_buffered_before_marking_provider_successful
+
+      - name: Validate diff
+        run: git diff --check
+
+      - name: Commit exact production-tree change
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src-tauri/src/proxy/forwarder.rs
+          if git diff --cached --quiet; then
+            echo "Expected forwarder.rs change was not produced" >&2
+            exit 1
+          fi
+          git commit -m "test: align forwarder timeout helper with policy"
+          git push origin HEAD:fix/global-hardening-20260904
