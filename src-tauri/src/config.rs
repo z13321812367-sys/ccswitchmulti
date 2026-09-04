@@ -297,7 +297,10 @@ pub fn write_text_file(path: &Path, data: &str) -> Result<(), AppError> {
     atomic_write(path, data.as_bytes())
 }
 
-fn create_atomic_temp_file(parent: &Path, file_name: &str) -> Result<(PathBuf, fs::File), AppError> {
+fn create_atomic_temp_file(
+    parent: &Path,
+    file_name: &str,
+) -> Result<(PathBuf, fs::File), AppError> {
     for _ in 0..ATOMIC_TEMP_CREATE_ATTEMPTS {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -593,7 +596,10 @@ mod tests {
         atomic_write(&path, b"first").expect("first write");
         atomic_write(&path, b"second-complete-value").expect("replacement write");
 
-        assert_eq!(fs::read(&path).expect("read final"), b"second-complete-value");
+        assert_eq!(
+            fs::read(&path).expect("read final"),
+            b"second-complete-value"
+        );
     }
 
     #[test]
@@ -603,8 +609,8 @@ mod tests {
         let mut files = Vec::new();
 
         for _ in 0..32 {
-            let (path, file) = create_atomic_temp_file(dir.path(), "same.json")
-                .expect("unique temp file");
+            let (path, file) =
+                create_atomic_temp_file(dir.path(), "same.json").expect("unique temp file");
             assert!(paths.insert(path.clone()), "duplicate temp path: {path:?}");
             files.push((path, file));
         }
