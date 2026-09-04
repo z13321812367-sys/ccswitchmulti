@@ -1,0 +1,47 @@
+name: Branch Hardening Patch V2
+
+on:
+  push:
+    branches:
+      - fix/global-hardening-20260904
+    paths:
+      - .github/workflows/branch-hardening-patch-v2.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.repository == 'z13321812367-sys/ccswitchmulti'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: fix/global-hardening-20260904
+          fetch-depth: 0
+
+      - name: Apply exact hardening patches
+        run: python scripts/apply_branch_hardening_once.py
+
+      - name: Format Rust
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all
+
+      - name: Verify patch diff
+        run: git diff --check
+
+      - name: Commit hardening changes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            src-tauri/src/codex_desktop.rs \
+            src-tauri/src/settings.rs \
+            src-tauri/src/lib.rs \
+            src-tauri/src/services/webdav_auto_sync.rs \
+            src-tauri/src/services/s3_auto_sync.rs \
+            scripts/check_rust_failure_boundaries.py
+          git diff --cached --check
+          test -n "$(git status --porcelain)"
+          git commit -m "fix: close persistence and sensitive-input failure boundaries"
+          git push origin HEAD:fix/global-hardening-20260904
