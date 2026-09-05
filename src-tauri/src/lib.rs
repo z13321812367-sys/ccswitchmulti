@@ -12,6 +12,7 @@ mod commands;
 mod config;
 mod database;
 mod deeplink;
+mod diagnostics;
 mod error;
 mod gemini_config;
 mod gemini_mcp;
@@ -87,37 +88,6 @@ fn set_windows_app_user_model_id(app: &tauri::AppHandle) {
     }
 }
 
-fn redact_url_for_log(url_str: &str) -> String {
-    match url::Url::parse(url_str) {
-        Ok(url) => {
-            let mut output = format!("{}://", url.scheme());
-            if let Some(host) = url.host_str() {
-                output.push_str(host);
-            }
-            output.push_str(url.path());
-
-            let mut keys: Vec<String> = url.query_pairs().map(|(k, _)| k.to_string()).collect();
-            keys.sort();
-            keys.dedup();
-
-            if !keys.is_empty() {
-                output.push_str("?[keys:");
-                output.push_str(&keys.join(","));
-                output.push(']');
-            }
-
-            output
-        }
-        Err(_) => {
-            let base = url_str.split('#').next().unwrap_or(url_str);
-            match base.split_once('?') {
-                Some((prefix, _)) => format!("{prefix}?[redacted]"),
-                None => base.to_string(),
-            }
-        }
-    }
-}
-
 /// 统一处理 ccswitch:// 深链接 URL
 ///
 /// - 解析 URL
@@ -133,7 +103,7 @@ fn handle_deeplink_url(
         return false;
     }
 
-    let redacted_url = redact_url_for_log(url_str);
+    let redacted_url = crate::diagnostics::redact_url_for_log(url_str);
     log::info!("✓ Deep link URL detected from {source}: {redacted_url}");
     log::debug!(
         "Deep link URL metadata from {source}: length={}, redacted={redacted_url}",
@@ -234,7 +204,7 @@ pub fn run() {
             log::info!("=== Single Instance Callback Triggered ===");
             log::debug!("Args count: {}", args.len());
             for (i, arg) in args.iter().enumerate() {
-                log::debug!("  arg[{i}]: {}", redact_url_for_log(arg));
+                log::debug!("  arg[{i}]: {}", crate::diagnostics::redact_url_for_log(arg));
             }
 
             if crate::lightweight::is_lightweight_mode() {
@@ -925,7 +895,7 @@ pub fn run() {
 
                     for (i, url) in urls.iter().enumerate() {
                         let url_str = url.as_str();
-                        log::debug!("  URL[{i}]: {}", redact_url_for_log(url_str));
+                        log::debug!("  URL[{i}]: {}", crate::diagnostics::redact_url_for_log(url_str));
 
                         if handle_deeplink_url(&app_handle, url_str, true, "on_open_url") {
                             break; // Process only first ccswitch:// URL
@@ -1651,7 +1621,10 @@ pub fn run() {
                 RunEvent::Opened { urls } => {
                     if let Some(url) = urls.first() {
                         let url_str = url.as_str();
-                        log::debug!("RunEvent::Opened URL: {}", redact_url_for_log(url_str));
+                        log::debug!(
+                            "RunEvent::Opened URL: {}",
+                            crate::diagnostics::redact_url_for_log(url_str)
+                        );
 
                         if url_str.starts_with("ccswitch://")
                             && crate::lightweight::is_lightweight_mode()
@@ -2122,12 +2095,11 @@ mod tests {
 
 #[cfg(test)]
 mod sensitive_deeplink_boundary_tests {
-    use super::redact_url_for_log;
 
     #[test]
     fn deep_link_log_redaction_keeps_keys_but_never_secret_values() {
         let raw = "ccswitch://v1/import?resource=provider&name=demo&apiKey=sk-secret&usageAccessToken=token-secret#fragment-secret";
-        let redacted = redact_url_for_log(raw);
+        let redacted = crate::diagnostics::redact_url_for_log(raw);
 
         assert!(redacted.contains("apiKey"));
         assert!(redacted.contains("usageAccessToken"));
@@ -2139,7 +2111,7 @@ mod sensitive_deeplink_boundary_tests {
     #[test]
     fn malformed_deep_link_redaction_drops_query_values() {
         let raw = "ccswitch://v1/import?apiKey=top-secret%ZZ";
-        let redacted = redact_url_for_log(raw);
+        let redacted = crate::diagnostics::redact_url_for_log(raw);
         assert!(!redacted.contains("top-secret"));
         assert!(redacted.contains("?[redacted]") || redacted.contains("?[keys:"));
     }

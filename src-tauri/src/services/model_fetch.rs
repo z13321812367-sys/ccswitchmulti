@@ -181,7 +181,10 @@ pub async fn fetch_models(options: FetchModelsRequest<'_>) -> Result<Vec<Fetched
     let mut last_err: Option<String> = None;
 
     for url in &candidates {
-        log::debug!("[ModelFetch] Trying endpoint: {url}");
+        log::debug!(
+            "[ModelFetch] Trying endpoint: {}",
+            crate::diagnostics::redact_url_for_log(url)
+        );
         let mut request_builder = client
             .get(url)
             .header("Authorization", format!("Bearer {}", options.api_key))

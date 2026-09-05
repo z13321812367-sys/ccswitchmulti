@@ -23,17 +23,36 @@ const ATOMIC_TEMP_CREATE_ATTEMPTS: usize = 16;
 ///
 /// 为了让 Windows CI/本地测试能稳定隔离真实用户数据，可通过 `CC_SWITCH_TEST_HOME`
 /// 显式覆盖 home dir（仅用于测试/调试场景）。
-pub fn get_home_dir() -> PathBuf {
-    if let Ok(home) = std::env::var("CC_SWITCH_TEST_HOME") {
-        let trimmed = home.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
-        }
+fn resolve_home_dir(
+    test_override: Option<&str>,
+    detected: Option<PathBuf>,
+) -> Result<PathBuf, String> {
+    if let Some(home) = test_override.map(str::trim).filter(|home| !home.is_empty()) {
+        return Ok(PathBuf::from(home));
     }
 
-    dirs::home_dir().unwrap_or_else(|| {
-        log::warn!("无法获取用户主目录，回退到当前目录");
-        PathBuf::from(".")
+    match detected {
+        Some(path) if path.is_absolute() => Ok(path),
+        Some(path) => Err(format!(
+            "操作系统返回了非绝对用户主目录路径: {}",
+            path.display()
+        )),
+        None => {
+            Err("无法获取用户主目录；拒绝回退到当前工作目录，以避免配置/数据库静默分叉".to_string())
+        }
+    }
+}
+
+/// 获取用户主目录。
+///
+/// 用户主目录是数据库、设置和多个 CLI 配置路径的共同根。无法解析时必须 fail closed：
+/// 旧行为回退到 `.` 会根据启动方式把同一用户的数据写进任意 CWD，表现为供应商/设置丢失，
+/// 也可能把凭据写进意外目录。
+pub fn get_home_dir() -> PathBuf {
+    let test_override = std::env::var("CC_SWITCH_TEST_HOME").ok();
+    resolve_home_dir(test_override.as_deref(), dirs::home_dir()).unwrap_or_else(|err| {
+        log::error!("{err}");
+        panic!("{err}");
     })
 }
 
@@ -419,6 +438,25 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn home_resolution_fails_closed_when_os_home_is_missing() {
+        let err = resolve_home_dir(None, None).expect_err("missing home must not fall back to cwd");
+        assert!(err.contains("拒绝回退到当前工作目录"));
+    }
+
+    #[test]
+    fn home_resolution_rejects_relative_os_path() {
+        assert!(resolve_home_dir(None, Some(PathBuf::from("relative-home"))).is_err());
+    }
+
+    #[test]
+    fn explicit_test_home_override_remains_supported() {
+        assert_eq!(
+            resolve_home_dir(Some("test-home"), None).unwrap(),
+            PathBuf::from("test-home")
+        );
+    }
     use std::collections::HashSet;
 
     #[test]

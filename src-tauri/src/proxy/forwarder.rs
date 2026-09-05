@@ -2213,7 +2213,10 @@ impl RequestForwarder {
                 );
             }
         }
-        log::info!("[{tag}] >>> 请求 URL: {url} (model={request_model})");
+        log::info!(
+            "[{tag}] >>> 请求 URL: {} (model={request_model})",
+            crate::diagnostics::redact_url_for_log(&url)
+        );
         if log::log_enabled!(log::Level::Debug) {
             log::debug!(
                 "[{tag}] >>> 请求体摘要: bytes={}, body_hash={}",

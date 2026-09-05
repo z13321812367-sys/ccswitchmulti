@@ -1203,8 +1203,10 @@ mod tests {
     fn settings_save_uses_common_atomic_persistence_boundary() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("settings.json");
-        let mut settings = AppSettings::default();
-        settings.show_in_tray = false;
+        let settings = AppSettings {
+            show_in_tray: false,
+            ..Default::default()
+        };
 
         save_settings_file_to_path(&settings, &path).expect("save settings");
         let saved: AppSettings =

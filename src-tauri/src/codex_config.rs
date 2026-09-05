@@ -148,11 +148,16 @@ pub fn write_codex_live_atomic(
 
     // 第二步：写 config.toml（失败则回滚 auth.json）
     if let Err(e) = write_text_file(&config_path, &cfg_text) {
-        // 回滚 auth.json
-        if let Some(bytes) = old_auth {
-            let _ = atomic_write(&auth_path, &bytes);
+        // 回滚 auth.json；二次失败必须与主错误一起返回，不能伪装成已恢复。
+        let rollback = if let Some(bytes) = old_auth {
+            atomic_write(&auth_path, &bytes)
         } else {
-            let _ = delete_file(&auth_path);
+            delete_file(&auth_path)
+        };
+        if let Err(rollback_err) = rollback {
+            return Err(AppError::Config(format!(
+                "写入 Codex config 失败: {e}; auth rollback also failed: {rollback_err}"
+            )));
         }
         return Err(e);
     }
@@ -464,9 +469,7 @@ fn read_test_codex_oauth_context_window_override() -> Option<std::collections::H
     let Ok(Some(value)) = read_json_file_if_exists(&override_path) else {
         return None;
     };
-    let Some(models) = value.as_object() else {
-        return None;
-    };
+    let models = value.as_object()?;
 
     Some(
         models
