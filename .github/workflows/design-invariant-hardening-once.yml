@@ -37,6 +37,19 @@ jobs:
       - name: Apply common product invariants
         run: python scripts/apply_design_invariant_hardening_once.py
 
+      - name: Align structural follow-up with both Skill HOME callers
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("scripts/apply_design_invariant_followup_once.py")
+          text = path.read_text(encoding="utf-8")
+          old = '    "skill app HOME",\n)\n'
+          new = '    "skill app HOME",\n    expected=2,\n)\n'
+          if text.count(old) != 1:
+              raise SystemExit(f"skill HOME expectation marker count={text.count(old)}")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+
       - name: Apply fallible caller and discovery invariants
         run: python scripts/apply_design_invariant_followup_once.py
 
