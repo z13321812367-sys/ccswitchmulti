@@ -20,7 +20,7 @@ jobs:
           ref: fix/global-hardening-20260904
           fetch-depth: 0
 
-      - name: Apply exact HOME and model candidate fixes
+      - name: Apply structure-aware HOME and model candidate fixes
         shell: bash
         run: |
           set -euo pipefail
@@ -29,34 +29,26 @@ jobs:
 
           config_path = Path("src-tauri/src/config.rs")
           config = config_path.read_text(encoding="utf-8")
-          old_home = '''    if let Some(home) = test_override.map(str::trim).filter(|home| !home.is_empty()) {
-              return Ok(PathBuf::from(home));
-          }
-          '''
-          new_home = '''    if let Some(home) = test_override.map(str::trim).filter(|home| !home.is_empty()) {
-              let path = PathBuf::from(home);
-              if path.is_absolute() {
-                  return Ok(path);
-              }
-              return Err(format!(
-                  "CC_SWITCH_TEST_HOME 必须是绝对路径，收到: {}",
-                  path.display()
-              ));
-          }
-          '''
-          if config.count(old_home) != 1:
-              raise SystemExit(f"expected one unvalidated test-home override, found {config.count(old_home)}")
-          config = config.replace(old_home, new_home, 1)
 
-          old_test = '''    #[test]
-              fn explicit_test_home_override_remains_supported() {
-                  assert_eq!(
-                      resolve_home_dir(Some("test-home"), None).unwrap(),
-                      PathBuf::from("test-home")
-                  );
-              }
-          '''
-          new_test = '''    #[test]
+          old_return = "        return Ok(PathBuf::from(home));"
+          new_return = """        let path = PathBuf::from(home);
+                  if path.is_absolute() {
+                      return Ok(path);
+                  }
+                  return Err(format!(
+                      "CC_SWITCH_TEST_HOME 必须是绝对路径，收到: {}",
+                      path.display()
+                  ));"""
+          if config.count(old_return) != 1:
+              raise SystemExit(f"expected one unvalidated test-home return, found {config.count(old_return)}")
+          config = config.replace(old_return, new_return, 1)
+
+          test_start_marker = "    #[test]\n    fn explicit_test_home_override_remains_supported() {"
+          if config.count(test_start_marker) != 1:
+              raise SystemExit("expected one legacy explicit test-home test")
+          test_start = config.index(test_start_marker)
+          test_end = config.index("\n\n    #[test]", test_start + len(test_start_marker))
+          replacement_tests = """    #[test]
               fn explicit_absolute_test_home_override_remains_supported() {
                   let override_home = std::env::temp_dir().join("cc-switch-test-home");
                   let override_text = override_home.to_string_lossy().to_string();
@@ -69,19 +61,15 @@ jobs:
               #[test]
               fn explicit_relative_test_home_override_is_rejected() {
                   assert!(resolve_home_dir(Some("relative-test-home"), None).is_err());
-              }
-          '''
-          if config.count(old_test) != 1:
-              raise SystemExit(f"expected one relative test-home regression test, found {config.count(old_test)}")
-          config = config.replace(old_test, new_test, 1)
+              }"""
+          config = config[:test_start] + replacement_tests + config[test_end:]
           config_path.write_text(config, encoding="utf-8")
 
           model_path = Path("src-tauri/src/services/model_fetch.rs")
           model = model_path.read_text(encoding="utf-8")
 
-          marker = 'const FETCH_TIMEOUT_SECS: u64 = 15;\n'
-          helpers = '''const FETCH_TIMEOUT_SECS: u64 = 15;
-          const MAX_CANDIDATE_FAILURE_DETAILS: usize = 8;
+          timeout_marker = "const FETCH_TIMEOUT_SECS: u64 = 15;\n"
+          helpers = """const MAX_CANDIDATE_FAILURE_DETAILS: usize = 8;
 
           fn should_try_next_models_candidate(status: StatusCode) -> bool {
               status == StatusCode::NOT_FOUND
@@ -110,35 +98,37 @@ jobs:
                   failures.push(detail);
               }
           }
-          '''
-          if model.count(marker) != 1:
-              raise SystemExit(f"expected one fetch-timeout marker, found {model.count(marker)}")
-          model = model.replace(marker, helpers, 1)
 
-          if model.count('    let mut last_err: Option<String> = None;\n') != 1:
-              raise SystemExit("expected legacy last_err accumulator")
+          """
+          if model.count(timeout_marker) != 1:
+              raise SystemExit(f"expected one fetch-timeout marker, found {model.count(timeout_marker)}")
+          model = model.replace(timeout_marker, timeout_marker + helpers, 1)
+
+          old_accumulator = "    let mut last_err: Option<String> = None;\n"
+          if model.count(old_accumulator) != 1:
+              raise SystemExit("expected one legacy last_err accumulator")
           model = model.replace(
-              '    let mut last_err: Option<String> = None;\n',
-              '    let mut candidate_failures: Vec<String> = Vec::new();\n',
+              old_accumulator,
+              "    let mut candidate_failures: Vec<String> = Vec::new();\n",
               1,
           )
 
-          if model.count('    for url in &candidates {\n') != 1:
+          old_loop = "    for url in &candidates {\n"
+          if model.count(old_loop) != 1:
               raise SystemExit("expected one model candidate loop")
           model = model.replace(
-              '    for url in &candidates {\n',
-              '    for (index, url) in candidates.iter().enumerate() {\n        let ordinal = index + 1;\n',
+              old_loop,
+              "    for (index, url) in candidates.iter().enumerate() {\n        let ordinal = index + 1;\n",
               1,
           )
 
-          old_send = '''        let response = match request_builder.send().await {
-              Ok(r) => r,
-              Err(e) => {
-                  return Err(format!("Request failed: {e}"));
-              }
-          };
-          '''
-          new_send = '''        let response = match request_builder.send().await {
+          send_start_marker = "        let response = match request_builder.send().await {"
+          send_end_marker = "\n\n        let status = response.status();"
+          if model.count(send_start_marker) != 1:
+              raise SystemExit("expected one request send block")
+          send_start = model.index(send_start_marker)
+          send_end = model.index(send_end_marker, send_start)
+          new_send = """        let response = match request_builder.send().await {
               Ok(r) => r,
               Err(error) => {
                   let kind = request_error_kind(&error);
@@ -152,41 +142,16 @@ jobs:
                   );
                   continue;
               }
-          };
-          '''
-          if model.count(old_send) != 1:
-              raise SystemExit(f"expected one early transport return, found {model.count(old_send)}")
-          model = model.replace(old_send, new_send, 1)
+          };"""
+          model = model[:send_start] + new_send + model[send_end:]
 
-          old_success = '''        if status.is_success() {
-              let resp: ModelsResponse = response
-                  .json()
-                  .await
-                  .map_err(|e| format!("Failed to parse response: {e}"))?;
-
-              let mut models: Vec<FetchedModel> = resp
-                  .data
-                  .unwrap_or_default()
-                  .into_iter()
-                  .map(|m| FetchedModel {
-                      context_window: extract_context_window(&m.extra),
-                      id: m.id,
-                      owned_by: m.owned_by,
-                  })
-                  .collect();
-
-              enrich_missing_context_windows(&client, url, &mut models).await;
-              models.sort_by(|a, b| a.id.cmp(&b.id));
-              return Ok(models);
-          }
-
-          if status == StatusCode::NOT_FOUND || status == StatusCode::METHOD_NOT_ALLOWED {
-              let body = truncate_body(response.text().await.unwrap_or_default());
-              last_err = Some(format!("HTTP {status}: {body}"));
-              continue;
-          }
-          '''
-          new_success = '''        if status.is_success() {
+          success_start_marker = "        if status.is_success() {"
+          terminal_marker = "\n\n        let body = truncate_body(response.text().await.unwrap_or_default());\n        return Err(format!(\"HTTP {status}: {body}\"));"
+          if model.count(success_start_marker) != 1 or model.count(terminal_marker) != 1:
+              raise SystemExit("model success/terminal status boundaries are not unique")
+          success_start = model.index(success_start_marker)
+          terminal_start = model.index(terminal_marker, success_start)
+          new_success = """        if status.is_success() {
               let body = match response.bytes().await {
                   Ok(body) => body,
                   Err(error) => {
@@ -240,32 +205,26 @@ jobs:
                   format!("candidate {ordinal}: HTTP {status}"),
               );
               continue;
-          }
-          '''
-          if model.count(old_success) != 1:
-              raise SystemExit(f"expected one legacy success/retry block, found {model.count(old_success)}")
-          model = model.replace(old_success, new_success, 1)
+          }"""
+          model = model[:success_start] + new_success + model[terminal_start:]
 
-          old_final = '''    Err(format!(
-              "All candidates failed: {}",
-              last_err.unwrap_or_else(|| "no candidates".to_string())
-          ))
-          '''
-          new_final = '''    let details = if candidate_failures.is_empty() {
+          final_start_marker = "    Err(format!(\n        \"All candidates failed: {}\","
+          if model.count(final_start_marker) != 1:
+              raise SystemExit("expected one legacy final candidate error")
+          final_start = model.index(final_start_marker)
+          final_end = model.index("\n}", final_start)
+          new_final = """    let details = if candidate_failures.is_empty() {
               "no candidate diagnostics".to_string()
           } else {
               candidate_failures.join("; ")
           };
-          Err(format!("All model endpoint candidates failed: {details}"))
-          '''
-          if model.count(old_final) != 1:
-              raise SystemExit(f"expected one legacy final error block, found {model.count(old_final)}")
-          model = model.replace(old_final, new_final, 1)
+          Err(format!("All model endpoint candidates failed: {details}"))"""
+          model = model[:final_start] + new_final + model[final_end:]
 
-          test_anchor = '''    #[test]
-              fn test_candidates_plain_root() {
-          '''
-          tests = '''    #[test]
+          test_anchor = "    #[test]\n    fn test_candidates_plain_root() {"
+          if model.count(test_anchor) != 1:
+              raise SystemExit("expected one model candidate test anchor")
+          extra_tests = """    #[test]
               fn candidate_retry_policy_continues_discovery_only_for_compatible_failures() {
                   assert!(should_try_next_models_candidate(StatusCode::NOT_FOUND));
                   assert!(should_try_next_models_candidate(StatusCode::METHOD_NOT_ALLOWED));
@@ -286,16 +245,13 @@ jobs:
                   assert_eq!(failures.len(), MAX_CANDIDATE_FAILURE_DETAILS);
               }
 
-              #[test]
-              fn test_candidates_plain_root() {
-          '''
-          if model.count(test_anchor) != 1:
-              raise SystemExit(f"expected one model test anchor, found {model.count(test_anchor)}")
-          model = model.replace(test_anchor, tests, 1)
+          """
+          model = model.replace(test_anchor, extra_tests + test_anchor, 1)
 
           forbidden = [
               'return Err(format!("Request failed: {e}"));',
-              '.json()\n                .await\n                .map_err(|e| format!("Failed to parse response: {e}"))?',
+              'last_err = Some(format!("HTTP {status}: {body}"));',
+              '"All candidates failed: {}"',
           ]
           for fragment in forbidden:
               if fragment in model:
