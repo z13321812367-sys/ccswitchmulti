@@ -122,6 +122,39 @@ jobs:
           path.write_text(text.replace(anchor, failure_test + anchor, 1), encoding="utf-8")
           PY
 
+      - name: Scope Hermes config-write transform to production helper
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("scripts/apply_hermes_failure_boundary_once.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''replace_once(
+              path,
+              "    let config_path = get_hermes_config_path();\\n",
+              "    let config_path = try_get_hermes_config_path()?;\\n",
+              "Hermes write config path",
+          )'''
+          new = '''replace_once(
+              path,
+              """fn write_yaml_section_to_config_locked(
+              section_key: &str,
+              value: &serde_yaml::Value,
+          ) -> Result<HermesWriteOutcome, AppError> {
+              let config_path = get_hermes_config_path();
+          """,
+              """fn write_yaml_section_to_config_locked(
+              section_key: &str,
+              value: &serde_yaml::Value,
+          ) -> Result<HermesWriteOutcome, AppError> {
+              let config_path = try_get_hermes_config_path()?;
+          """,
+              "Hermes write config path",
+          )'''
+          if text.count(old) != 1:
+              raise SystemExit(f"Hermes write-transform driver count={text.count(old)}")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+
       - name: Apply Hermes fallible failure boundary
         run: python scripts/apply_hermes_failure_boundary_once.py
 
