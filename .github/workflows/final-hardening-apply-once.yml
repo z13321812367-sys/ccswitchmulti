@@ -23,7 +23,7 @@ jobs:
       - name: Apply exact global hardening patch
         run: python scripts/apply_final_global_hardening_once.py
 
-      - name: Remove obsolete body snippet helper, test, and import
+      - name: Normalize secure body diagnostics and stale test baselines
         shell: bash
         run: |
           set -euo pipefail
@@ -65,10 +65,25 @@ jobs:
               1,
           )
 
+          stale_assert = '''                assert!(msg.contains("<html>\\\\nblocked</html>"), "{msg}");
+'''
+          secure_assert = '''                assert!(msg.contains("body-shape: markup"), "{msg}");
+                assert!(msg.contains("body: bytes=21, sha256="), "{msg}");
+                assert!(!msg.contains("<html>"), "{msg}");
+                assert!(!msg.contains("blocked"), "{msg}");
+'''
+          if text.count(stale_assert) != 1:
+              raise SystemExit(
+                  f"expected one stale raw-body diagnostics assertion, found {text.count(stale_assert)}"
+              )
+          text = text.replace(stale_assert, secure_assert, 1)
+
           if "body_snippet" in text:
               raise SystemExit("body_snippet identifier remains after exact removal")
+          if 'msg.contains("<html>\\\\nblocked</html>")' in text:
+              raise SystemExit("raw upstream body expectation remains in diagnostics test")
           path.write_text(text, encoding="utf-8")
-          print("removed obsolete body_snippet helper, regression test, and test import")
+          print("normalized secure body diagnostics implementation and regression expectations")
           PY
 
       - name: Normalize all-target Clippy baselines
@@ -131,12 +146,19 @@ jobs:
       - name: Clippy all targets and features
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
 
-      - name: Rust tests
+      - name: Rust tests default feature set
+        run: cargo test --manifest-path src-tauri/Cargo.toml --all
+
+      - name: Rust tests all features
         run: cargo test --manifest-path src-tauri/Cargo.toml --all-features
 
-      - name: Remove one-shot drivers and commit verified changes
+      - name: Remove one-shot diagnostics and commit verified changes
         run: |
-          git rm scripts/apply_final_global_hardening_once.py .github/workflows/final-hardening-apply-once.yml
+          git rm \
+            scripts/apply_final_global_hardening_once.py \
+            .github/workflows/final-hardening-apply-once.yml \
+            .github/workflows/final-hardening-diagnose-once.yml \
+            .ci-final-hardening-test-failure.txt
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
