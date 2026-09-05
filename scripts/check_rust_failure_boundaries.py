@@ -24,6 +24,9 @@ FILE_CHECKS = [
     ("services/proxy.rs", re.compile(r"let _ = (?:self\.db\.|crate::settings::|self\.write_|self\.stop\(\)|self\.restore_live_|crate::config::delete_file)"), "proxy state/write/rollback failures must not be silently discarded"),
     ("codex_config.rs", re.compile(r"let _ = (?:atomic_write|delete_file)\("), "Codex config rollback failures must be observable"),
     ("config.rs", re.compile(r'PathBuf::from\("\."\)'), "home/config resolution must never silently fall back to the process CWD"),
+    ("config.rs", re.compile(r"return Ok\(PathBuf::from\(home\)\);"), "explicit home overrides must be validated as absolute before use"),
+    ("services/model_fetch.rs", re.compile(r'Err\(e\)\s*=>\s*\{\s*return Err\(format!\("Request failed:', re.S), "model discovery transport failures must advance to later compatibility candidates"),
+    ("services/model_fetch.rs", re.compile(r'\.json\(\)\s*\.await\s*\.map_err\(\|e\| format!\("Failed to parse response:', re.S), "invalid successful model payloads must not abort compatibility candidate discovery"),
 ]
 
 failures = []
