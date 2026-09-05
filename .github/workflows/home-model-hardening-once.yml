@@ -32,13 +32,13 @@ jobs:
 
           old_return = "        return Ok(PathBuf::from(home));"
           new_return = """        let path = PathBuf::from(home);
-                  if path.is_absolute() {
-                      return Ok(path);
-                  }
-                  return Err(format!(
-                      "CC_SWITCH_TEST_HOME 必须是绝对路径，收到: {}",
-                      path.display()
-                  ));"""
+          if path.is_absolute() {
+              return Ok(path);
+          }
+          return Err(format!(
+              "CC_SWITCH_TEST_HOME 必须是绝对路径，收到: {}",
+              path.display()
+          ));"""
           if config.count(old_return) != 1:
               raise SystemExit(f"expected one unvalidated test-home return, found {config.count(old_return)}")
           config = config.replace(old_return, new_return, 1)
@@ -48,20 +48,28 @@ jobs:
               raise SystemExit("expected one legacy explicit test-home test")
           test_start = config.index(test_start_marker)
           test_end = config.index("\n\n    #[test]", test_start + len(test_start_marker))
+          captured = config[test_start:test_end]
+          hashset_import = "    use std::collections::HashSet;"
+          if captured.count(hashset_import) != 1:
+              raise SystemExit(
+                  f"expected HashSet import inside replaced HOME-test segment, found {captured.count(hashset_import)}"
+              )
           replacement_tests = """    #[test]
-              fn explicit_absolute_test_home_override_remains_supported() {
-                  let override_home = std::env::temp_dir().join("cc-switch-test-home");
-                  let override_text = override_home.to_string_lossy().to_string();
-                  assert_eq!(
-                      resolve_home_dir(Some(&override_text), None).unwrap(),
-                      override_home
-                  );
-              }
+          fn explicit_absolute_test_home_override_remains_supported() {
+              let override_home = std::env::temp_dir().join("cc-switch-test-home");
+              let override_text = override_home.to_string_lossy().to_string();
+              assert_eq!(
+                  resolve_home_dir(Some(&override_text), None).unwrap(),
+                  override_home
+              );
+          }
 
-              #[test]
-              fn explicit_relative_test_home_override_is_rejected() {
-                  assert!(resolve_home_dir(Some("relative-test-home"), None).is_err());
-              }"""
+          #[test]
+          fn explicit_relative_test_home_override_is_rejected() {
+              assert!(resolve_home_dir(Some("relative-test-home"), None).is_err());
+          }
+
+          use std::collections::HashSet;"""
           config = config[:test_start] + replacement_tests + config[test_end:]
           config_path.write_text(config, encoding="utf-8")
 
@@ -225,25 +233,25 @@ jobs:
           if model.count(test_anchor) != 1:
               raise SystemExit("expected one model candidate test anchor")
           extra_tests = """    #[test]
-              fn candidate_retry_policy_continues_discovery_only_for_compatible_failures() {
-                  assert!(should_try_next_models_candidate(StatusCode::NOT_FOUND));
-                  assert!(should_try_next_models_candidate(StatusCode::METHOD_NOT_ALLOWED));
-                  assert!(should_try_next_models_candidate(StatusCode::INTERNAL_SERVER_ERROR));
-                  assert!(should_try_next_models_candidate(StatusCode::BAD_GATEWAY));
-                  assert!(!should_try_next_models_candidate(StatusCode::BAD_REQUEST));
-                  assert!(!should_try_next_models_candidate(StatusCode::UNAUTHORIZED));
-                  assert!(!should_try_next_models_candidate(StatusCode::FORBIDDEN));
-                  assert!(!should_try_next_models_candidate(StatusCode::TOO_MANY_REQUESTS));
-              }
+          fn candidate_retry_policy_continues_discovery_only_for_compatible_failures() {
+              assert!(should_try_next_models_candidate(StatusCode::NOT_FOUND));
+              assert!(should_try_next_models_candidate(StatusCode::METHOD_NOT_ALLOWED));
+              assert!(should_try_next_models_candidate(StatusCode::INTERNAL_SERVER_ERROR));
+              assert!(should_try_next_models_candidate(StatusCode::BAD_GATEWAY));
+              assert!(!should_try_next_models_candidate(StatusCode::BAD_REQUEST));
+              assert!(!should_try_next_models_candidate(StatusCode::UNAUTHORIZED));
+              assert!(!should_try_next_models_candidate(StatusCode::FORBIDDEN));
+              assert!(!should_try_next_models_candidate(StatusCode::TOO_MANY_REQUESTS));
+          }
 
-              #[test]
-              fn candidate_failure_details_are_bounded() {
-                  let mut failures = Vec::new();
-                  for index in 0..(MAX_CANDIDATE_FAILURE_DETAILS + 3) {
-                      record_candidate_failure(&mut failures, format!("candidate {index}"));
-                  }
-                  assert_eq!(failures.len(), MAX_CANDIDATE_FAILURE_DETAILS);
+          #[test]
+          fn candidate_failure_details_are_bounded() {
+              let mut failures = Vec::new();
+              for index in 0..(MAX_CANDIDATE_FAILURE_DETAILS + 3) {
+                  record_candidate_failure(&mut failures, format!("candidate {index}"));
               }
+              assert_eq!(failures.len(), MAX_CANDIDATE_FAILURE_DETAILS);
+          }
 
           """
           model = model.replace(test_anchor, extra_tests + test_anchor, 1)
