@@ -42,6 +42,18 @@ for rel_path, pattern, message in FILE_CHECKS:
     if pattern.search(path.read_text(encoding="utf-8")):
         failures.append(f"{path.relative_to(ROOT)}: {message}")
 
+# User-home resolution is a persistence boundary shared by DB/config/backup/CLI paths. A direct
+# dirs::home_dir() call elsewhere can silently re-introduce CWD/relative fallback semantics or
+# diverge from the validated CC_SWITCH_TEST_HOME behavior, so keep one common implementation.
+for path in RUST_ROOT.rglob("*.rs"):
+    if path.name == "config.rs":
+        continue
+    text = path.read_text(encoding="utf-8")
+    if "dirs::home_dir(" in text:
+        failures.append(
+            f"{path.relative_to(ROOT)}: direct home resolution must use the config common boundary"
+        )
+
 # URL sanitization is a common diagnostics boundary. Specialized copies drift and caused raw
 # deep-link/model-fetch paths to be missed; keep implementations centralized.
 for path in RUST_ROOT.rglob("*.rs"):
