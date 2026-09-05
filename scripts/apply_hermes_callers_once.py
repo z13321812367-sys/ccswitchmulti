@@ -88,6 +88,7 @@ replace_exact(
     "    if !should_sync_hermes_mcp() {\n",
     "    if !should_sync_hermes_mcp()? {\n",
     "Hermes MCP sync caller propagation",
+    expected=2,
 )
 
 # ---------------------------------------------------------------------------
