@@ -207,7 +207,48 @@ jobs:
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
 
       - name: Rust tests default feature set
-        run: cargo test --manifest-path src-tauri/Cargo.toml --all
+        run: |
+          set -o pipefail
+          log="$RUNNER_TEMP/default-rust-tests.log"
+          diagnostic="$RUNNER_TEMP/default-rust-tests-diagnostic.txt"
+          status=0
+          cargo test --manifest-path src-tauri/Cargo.toml --all >"$log" 2>&1 || status=$?
+          if [ "$status" -ne 0 ]; then
+            python - "$log" "$diagnostic" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          source = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace").splitlines()
+          out = []
+          headers = [i for i, line in enumerate(source) if re.match(r"^---- .+ stdout ----$", line)]
+          for start in headers[:4]:
+              end = min(len(source), start + 90)
+              block = source[start:end]
+              if any("panicked at" in line or "assertion" in line or "FAILED" in line for line in block):
+                  out.extend(block)
+                  out.append("")
+          failure_markers = [i for i, line in enumerate(source) if line.strip() == "failures:"]
+          if failure_markers:
+              start = failure_markers[-1]
+              out.extend(source[start:min(len(source), start + 80)])
+          out.append("")
+          out.append("--- tail ---")
+          out.extend(source[-140:])
+          Path(sys.argv[2]).write_text("\n".join(out[-420:]) + "\n", encoding="utf-8")
+          PY
+            cat "$diagnostic"
+          fi
+          exit "$status"
+
+      - name: Upload bounded default-test diagnostic
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: design-invariant-default-test-diagnostic
+          path: ${{ runner.temp }}/default-rust-tests-diagnostic.txt
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Rust tests all features
         run: cargo test --manifest-path src-tauri/Cargo.toml --all-features
