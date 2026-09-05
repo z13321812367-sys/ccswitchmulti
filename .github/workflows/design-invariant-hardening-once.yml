@@ -158,6 +158,24 @@ jobs:
       - name: Apply Hermes fallible failure boundary
         run: python scripts/apply_hermes_failure_boundary_once.py
 
+      - name: Scope Hermes guards to production function bodies
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("scripts/check_rust_failure_boundaries.py")
+          text = path.read_text(encoding="utf-8")
+          old_read = r're.compile(r"pub fn read_hermes_config\([^)]*\) -> Result[\s\S]{0,240}get_hermes_config_path\(\)")'
+          new_read = r're.compile(r"pub fn read_hermes_config\(\) -> Result<serde_yaml::Value, AppError> \{\s*let path = get_hermes_config_path\(\);")'
+          old_write = r're.compile(r"let config_path = get_hermes_config_path\(\);")'
+          new_write = r're.compile(r"fn write_yaml_section_to_config_locked\([\s\S]{0,220}\) -> Result<HermesWriteOutcome, AppError> \{\s*let config_path = get_hermes_config_path\(\);")'
+          if text.count(old_read) != 1:
+              raise SystemExit(f"Hermes read guard count={text.count(old_read)}")
+          if text.count(old_write) != 1:
+              raise SystemExit(f"Hermes write guard count={text.count(old_write)}")
+          text = text.replace(old_read, new_read, 1).replace(old_write, new_write, 1)
+          path.write_text(text, encoding="utf-8")
+          PY
+
       - name: Install Linux system dependencies
         run: |
           sudo apt-get update
