@@ -118,4 +118,30 @@ replace_exact(
     "Hermes default-dir test fallible contract",
 )
 
+# ---------------------------------------------------------------------------
+# Permanent global guard: production modules must never reintroduce the test-only
+# Hermes panic wrappers. hermes_config.rs itself is excluded because it owns the
+# #[cfg(test)] compatibility helpers.
+# ---------------------------------------------------------------------------
+guard = "scripts/check_rust_failure_boundaries.py"
+text = read(guard)
+marker = '''# URL sanitization is a common diagnostics boundary. Specialized copies drift and caused raw
+# deep-link/model-fetch paths to be missed; keep implementations centralized.
+'''
+if text.count(marker) != 1:
+    raise SystemExit(f"Hermes global guard anchor count={text.count(marker)}")
+hermes_guard = '''# Hermes persistence/session roots are fallible production boundaries. The only infallible
+# wrappers are #[cfg(test)] helpers owned by hermes_config.rs; no other module may call/import them.
+for path in RUST_ROOT.rglob("*.rs"):
+    if path.name == "hermes_config.rs":
+        continue
+    text = path.read_text(encoding="utf-8")
+    if re.search(r"(?:crate::)?hermes_config::get_hermes_(?:dir|config_path)\\b", text):
+        failures.append(
+            f"{path.relative_to(ROOT)}: Hermes roots must use fallible try_get_hermes_* APIs"
+        )
+
+'''
+write(guard, text.replace(marker, hermes_guard + marker, 1))
+
 print("Applied Hermes production caller migration")
