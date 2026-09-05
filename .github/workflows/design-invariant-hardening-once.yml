@@ -53,6 +53,19 @@ jobs:
       - name: Apply fallible caller and discovery invariants
         run: python scripts/apply_design_invariant_followup_once.py
 
+      - name: Normalize Windows path literal emitted by follow-up
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("src-tauri/src/commands/misc.rs")
+          text = path.read_text(encoding="utf-8")
+          old = r'std::path::PathBuf::from("C:\Program Files\nodejs")'
+          new = r'std::path::PathBuf::from(r"C:\Program Files\nodejs")'
+          if text.count(old) != 1:
+              raise SystemExit(f"Windows nodejs literal count={text.count(old)}")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+
       - name: Install Linux system dependencies
         run: |
           sudo apt-get update
