@@ -21,30 +21,57 @@ jobs:
           ref: fix/global-hardening-20260904
           fetch-depth: 0
 
-      - name: Normalize design driver guard insertion
+      - name: Keep patch driver focused on product sources
         run: |
           python - <<'PY'
           from pathlib import Path
           path = Path("scripts/apply_design_invariant_hardening_once.py")
           text = path.read_text(encoding="utf-8")
-          start = text.index("old_checks_tail = '''")
-          end = text.index("extra_guard_anchor = '''", start)
-          replacement = '''checks_marker = "]\\n\\nfailures = []"
-          if text.count(checks_marker) != 1:
-              raise SystemExit(f"policy FILE_CHECKS terminator count={text.count(checks_marker)}")
-          extra_checks = r'''\n    ("services/model_fetch.rs", re.compile(r'HTTP \\{status\\}: \\{body\\}'), "model-discovery errors must not expose raw upstream response bodies"),
-              ("app_store.rs", re.compile(r"fn read_override_from_store\\([^)]*\\) -> Option<PathBuf>"), "Store read failure must not collapse into an absent app_config_dir override"),
-              ("app_store.rs", re.compile(r"fn resolve_path\\(raw: &str\\) -> PathBuf"), "app_config_dir parsing must be fallible and reject relative persistence roots"),
-              ("settings.rs", re.compile(r"fn settings_path\\(\\) -> Option<PathBuf>"), "settings path resolution must expose HOME failures instead of a fake Option contract"),'''
-          text = text.replace(checks_marker, extra_checks + "\\n]\\n\\nfailures = []", 1)
-
-          '''
-          text = text[:start] + replacement + text[end:]
+          marker = "# ---------------------------------------------------------------------------\n# Permanent source-level guards encode the design invariants"
+          if text.count(marker) != 1:
+              raise SystemExit(f"design-driver policy boundary count={text.count(marker)}")
+          text = text[:text.index(marker)] + 'print("Applied design-invariant product patch")\n'
           path.write_text(text, encoding="utf-8")
           PY
 
       - name: Apply design invariant hardening
         run: python scripts/apply_design_invariant_hardening_once.py
+
+      - name: Encode design invariants in permanent policy
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("scripts/check_rust_failure_boundaries.py")
+          text = path.read_text(encoding="utf-8")
+
+          marker = "]\n\nfailures = []"
+          if text.count(marker) != 1:
+              raise SystemExit(f"FILE_CHECKS terminator count={text.count(marker)}")
+          extra_checks = """    ("services/model_fetch.rs", re.compile(r'HTTP \\{status\\}: \\{body\\}'), "model-discovery errors must not expose raw upstream response bodies"),
+              ("app_store.rs", re.compile(r"fn read_override_from_store\\([^)]*\\) -> Option<PathBuf>"), "Store read failure must not collapse into an absent app_config_dir override"),
+              ("app_store.rs", re.compile(r"fn resolve_path\\(raw: &str\\) -> PathBuf"), "app_config_dir parsing must be fallible and reject relative persistence roots"),
+              ("settings.rs", re.compile(r"fn settings_path\\(\\) -> Option<PathBuf>"), "settings path resolution must expose HOME failures instead of a fake Option contract"),
+          """
+          text = text.replace(marker, extra_checks + "]\n\nfailures = []", 1)
+
+          anchor = """# User-home resolution is a persistence boundary shared by DB/config/backup/CLI paths. A direct
+          # dirs::home_dir() call elsewhere can silently re-introduce CWD/relative fallback semantics or
+          # diverge from the validated CC_SWITCH_TEST_HOME behavior, so keep one common implementation.
+          """
+          if text.count(anchor) != 1:
+              raise SystemExit(f"home policy anchor count={text.count(anchor)}")
+          extra_guard = """# Persistence roots must never accept a process-relative Store/settings override. These patterns
+          # previously bypassed the HOME guard while still binding DB/config state to the launch CWD.
+          config_text = (RUST_ROOT / "config.rs").read_text(encoding="utf-8")
+          if 'let legacy_dir = PathBuf::from(trimmed).join(".cc-switch")' in config_text:
+              failures.append(
+                  "src-tauri/src/config.rs: Windows legacy HOME must be checked as absolute before DB fallback"
+              )
+
+          """
+          text = text.replace(anchor, extra_guard + anchor, 1)
+          path.write_text(text, encoding="utf-8")
+          PY
 
       - name: Install Linux system dependencies
         run: |
