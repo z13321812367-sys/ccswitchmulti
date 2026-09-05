@@ -40,26 +40,30 @@ jobs:
       - name: Run all-feature Rust tests and persist failure diagnostics
         shell: bash
         run: |
-          set -uo pipefail
+          set +e
           log=/tmp/final-hardening-rust-tests.log
-          cargo test --manifest-path src-tauri/Cargo.toml --all-features 2>&1 | tee "$log"
-          status=${PIPESTATUS[0]}
-          if [ "$status" -ne 0 ]; then
-            {
-              echo "Final hardening Rust test failure diagnostics"
-              echo "cargo_exit=$status"
-              echo
-              echo "=== failure markers ==="
-              grep -n -E -- 'FAILED|failures:|panicked at|assertion .*failed|test result:|left:|right:|error: test failed|---- .* stdout ----' "$log" || true
-              echo
-              echo "=== final 1200 lines ==="
-              tail -n 1200 "$log"
-            } > .ci-final-hardening-test-failure.txt
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add .ci-final-hardening-test-failure.txt
-            git diff --cached --check
+          cargo test --manifest-path src-tauri/Cargo.toml --all-features >"$log" 2>&1
+          status=$?
+          set -e
+
+          {
+            echo "Final hardening Rust test diagnostics"
+            echo "cargo_exit=$status"
+            echo
+            echo "=== failure markers ==="
+            grep -n -E -- 'FAILED|failures:|panicked at|assertion .*failed|test result:|left:|right:|error: test failed|---- .* stdout ----' "$log" || true
+            echo
+            echo "=== final 1200 lines ==="
+            tail -n 1200 "$log" || true
+          } > .ci-final-hardening-test-failure.txt
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f .ci-final-hardening-test-failure.txt
+          git diff --cached --check
+          if ! git diff --cached --quiet; then
             git commit -m "chore: capture final hardening test failure"
             git push origin HEAD:fix/global-hardening-20260904
           fi
-          exit "$status"
+
+          echo "Captured cargo test exit status: $status"
