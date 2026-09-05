@@ -27,12 +27,12 @@ jobs:
           python - <<'PY'
           from pathlib import Path
 
-          def replace_exact(path_str: str, old: str, new: str, expected: int = 1) -> None:
+          def replace_exact(path_str, old, new, expected=1):
               path = Path(path_str)
               text = path.read_text(encoding="utf-8")
               count = text.count(old)
               if count != expected:
-                  raise SystemExit(f"{path_str}: expected {expected} matches, found {count}")
+                  raise SystemExit(f"{path_str}: expected {expected} matches, found {count}: {old!r}")
               path.write_text(text.replace(old, new, expected), encoding="utf-8")
 
           replace_exact(
@@ -57,8 +57,23 @@ jobs:
               })
           }
 
-          /// 崩溃/退出诊断在 HOME 本身不可用时的最后观测目录。
-          /// 该目录只允许用于故障证据，绝不能作为数据库、配置或用户数据的持久化根目录。
+          /// Expand `~`, `~/...`, and `~\\...` through the same validated HOME boundary.
+          /// Missing or malformed HOME is an error; callers must not preserve a literal relative `~` path.
+          pub fn expand_home_path(raw: &str) -> Result<PathBuf, String> {
+              if raw == "~" {
+                  return try_get_home_dir();
+              }
+              if let Some(stripped) = raw.strip_prefix("~/") {
+                  return Ok(try_get_home_dir()?.join(stripped));
+              }
+              if let Some(stripped) = raw.strip_prefix("~\\\\") {
+                  return Ok(try_get_home_dir()?.join(stripped));
+              }
+              Ok(PathBuf::from(raw))
+          }
+
+          /// Last-resort crash/exit observability directory when HOME itself is unavailable.
+          /// This must never be used for the database, settings, provider config, or other user state.
           pub fn emergency_observability_dir() -> PathBuf {
               std::env::temp_dir().join("cc-switch-home-unavailable")
           }
@@ -112,217 +127,78 @@ jobs:
           replace_exact("src-tauri/src/app_exit_monitor.rs", observability_old, observability_new)
           replace_exact("src-tauri/src/panic_hook.rs", observability_old, observability_new)
 
-          resolve_path_old = '''fn resolve_path(raw: &str) -> PathBuf {
-              if raw == "~" {
-                  if let Some(home) = dirs::home_dir() {
-                      return home;
-                  }
-              } else if let Some(stripped) = raw.strip_prefix("~/") {
-                  if let Some(home) = dirs::home_dir() {
-                      return home.join(stripped);
-                  }
-              } else if let Some(stripped) = raw.strip_prefix("~\\\\") {
-                  if let Some(home) = dirs::home_dir() {
-                      return home.join(stripped);
-                  }
-              }
-
-              PathBuf::from(raw)
-          }
-          '''
-          resolve_path_new = '''fn resolve_path(raw: &str) -> PathBuf {
-              if raw == "~" {
-                  return crate::config::get_home_dir();
-              }
-              if let Some(stripped) = raw.strip_prefix("~/") {
-                  return crate::config::get_home_dir().join(stripped);
-              }
-              if let Some(stripped) = raw.strip_prefix("~\\\\") {
-                  return crate::config::get_home_dir().join(stripped);
-              }
-
-              PathBuf::from(raw)
-          }
-          '''
-          replace_exact("src-tauri/src/app_store.rs", resolve_path_old, resolve_path_new)
+          for path_str, fn_name in [
+              ("src-tauri/src/app_store.rs", "resolve_path"),
+              ("src-tauri/src/settings.rs", "resolve_override_path"),
+          ]:
+              path = Path(path_str)
+              text = path.read_text(encoding="utf-8")
+              start = text.index(f"fn {fn_name}(raw: &str) -> PathBuf {{")
+              end = text.index("\n}\n", start) + 3
+              block = text[start:end]
+              if block.count("dirs::home_dir()") != 3:
+                  raise SystemExit(f"{path_str}: expected three legacy HOME lookups in {fn_name}")
+              replacement = f'''fn {fn_name}(raw: &str) -> PathBuf {{
+              crate::config::expand_home_path(raw).unwrap_or_else(|err| {{
+                  log::error!("{{err}}");
+                  panic!("{{err}}");
+              }})
+          }}\n'''
+              path.write_text(text[:start] + replacement + text[end:], encoding="utf-8")
 
           replace_exact(
               "src-tauri/src/claude_plugin.rs",
               '    let home = dirs::home_dir().ok_or_else(|| AppError::Config("无法获取用户主目录".into()))?;\n',
               '    let home = crate::config::try_get_home_dir().map_err(AppError::Config)?;\n',
           )
-
           replace_exact(
               "src-tauri/src/commands/misc.rs",
               '    let home = dirs::home_dir().unwrap_or_default();\n',
               '    let home = crate::config::get_home_dir();\n',
           )
-
           replace_exact(
               "src-tauri/src/database/backup.rs",
-              '''fn current_home_string() -> Option<String> {
-              dirs::home_dir().map(|path| path.to_string_lossy().to_string())
-          }
-          ''',
-              '''fn current_home_string() -> Option<String> {
-              crate::config::try_get_home_dir()
-                  .ok()
-                  .map(|path| path.to_string_lossy().to_string())
-          }
-          ''',
+              '    dirs::home_dir().map(|path| path.to_string_lossy().to_string())\n',
+              '    crate::config::try_get_home_dir().ok().map(|path| path.to_string_lossy().to_string())\n',
           )
-
           replace_exact(
               "src-tauri/src/prompt_files.rs",
-              '''    primary_path
-                  .parent()
-                  .map(|p| p.to_path_buf())
-                  .or_else(|| dirs::home_dir().map(|h| h.join(fallback_dir)))
-                  .ok_or_else(|| {
-          ''',
-              '''    primary_path
-                  .parent()
-                  .map(|p| p.to_path_buf())
-                  .or_else(|| crate::config::try_get_home_dir().ok().map(|h| h.join(fallback_dir)))
-                  .ok_or_else(|| {
-          ''',
+              '        .or_else(|| dirs::home_dir().map(|h| h.join(fallback_dir)))\n',
+              '        .or_else(|| crate::config::try_get_home_dir().ok().map(|h| h.join(fallback_dir)))\n',
           )
-
           replace_exact(
               "src-tauri/src/services/env_manager.rs",
-              '''fn get_backup_dir() -> Result<PathBuf, String> {
-              let home = dirs::home_dir().ok_or("无法获取用户主目录")?;
-              Ok(home.join(".cc-switch").join("backups"))
-          }
-          ''',
-              '''fn get_backup_dir() -> Result<PathBuf, String> {
-              let home = crate::config::try_get_home_dir()?;
-              Ok(home.join(".cc-switch").join("backups"))
-          }
-          ''',
+              '    let home = dirs::home_dir().ok_or("无法获取用户主目录")?;\n',
+              '    let home = crate::config::try_get_home_dir()?;\n',
           )
 
           replace_exact(
               "src-tauri/src/services/skill.rs",
-              '''fn get_agents_skills_dir() -> Option<PathBuf> {
-              dirs::home_dir()
-                  .map(|h| h.join(".agents").join("skills"))
-                  .filter(|p| p.exists())
-          }
-          ''',
-              '''fn get_agents_skills_dir() -> Option<PathBuf> {
-              crate::config::try_get_home_dir()
-                  .ok()
-                  .map(|h| h.join(".agents").join("skills"))
-                  .filter(|p| p.exists())
-          }
-          ''',
+              '    dirs::home_dir()\n        .map(|h| h.join(".agents").join("skills"))\n',
+              '    crate::config::try_get_home_dir()\n        .ok()\n        .map(|h| h.join(".agents").join("skills"))\n',
           )
           replace_exact(
               "src-tauri/src/services/skill.rs",
-              '''    let path = match dirs::home_dir() {
-                  Some(h) => h.join(".agents").join(".skill-lock.json"),
-                  None => {
-                      log::warn!("无法获取 HOME 目录，跳过解析 agents lock 文件");
-                      return HashMap::new();
-                  }
-              };
-          ''',
-              '''    let path = match crate::config::try_get_home_dir() {
-                  Ok(home) => home.join(".agents").join(".skill-lock.json"),
-                  Err(err) => {
-                      log::warn!("无法获取 HOME 目录，跳过解析 agents lock 文件: {err}");
-                      return HashMap::new();
-                  }
-              };
-          ''',
+              '    let path = match dirs::home_dir() {\n        Some(h) => h.join(".agents").join(".skill-lock.json"),\n        None => {\n            log::warn!("无法获取 HOME 目录，跳过解析 agents lock 文件");\n            return HashMap::new();\n        }\n    };\n',
+              '    let path = match crate::config::try_get_home_dir() {\n        Ok(home) => home.join(".agents").join(".skill-lock.json"),\n        Err(err) => {\n            log::warn!("无法获取 HOME 目录，跳过解析 agents lock 文件: {err}");\n            return HashMap::new();\n        }\n    };\n',
           )
           replace_exact(
               "src-tauri/src/services/skill.rs",
-              '''            SkillStorageLocation::Unified => {
-                      let home = dirs::home_dir().context("Cannot determine home directory")?;
-                      home.join(".agents").join("skills")
-                  }
-          ''',
-              '''            SkillStorageLocation::Unified => {
-                      let home = crate::config::try_get_home_dir().map_err(|err| anyhow!(err))?;
-                      home.join(".agents").join("skills")
-                  }
-          ''',
+              '                let home = dirs::home_dir().context("Cannot determine home directory")?;\n',
+              '                let home = crate::config::try_get_home_dir().map_err(|err| anyhow!(err))?;\n',
           )
 
           replace_exact(
               "src-tauri/src/session_manager/providers/opencode.rs",
-              '''    dirs::home_dir()
-                  .map(|h| h.join(".local/share/opencode"))
-                  .unwrap_or_else(|| PathBuf::from(".local/share/opencode"))
-          ''',
-              '''    crate::config::get_home_dir().join(".local/share/opencode")
-          ''',
+              '    dirs::home_dir()\n        .map(|h| h.join(".local/share/opencode"))\n        .unwrap_or_else(|| PathBuf::from(".local/share/opencode"))\n',
+              '    crate::config::get_home_dir().join(".local/share/opencode")\n',
           )
-
-          replace_exact(
-              "src-tauri/src/settings.rs",
-              '''fn resolve_override_path(raw: &str) -> PathBuf {
-              if raw == "~" {
-                  if let Some(home) = dirs::home_dir() {
-                      return home;
-                  }
-              } else if let Some(stripped) = raw.strip_prefix("~/") {
-                  if let Some(home) = dirs::home_dir() {
-                      return home.join(stripped);
-                  }
-              } else if let Some(stripped) = raw.strip_prefix("~\\\\") {
-                  if let Some(home) = dirs::home_dir() {
-                      return home.join(stripped);
-                  }
-              }
-
-              PathBuf::from(raw)
-          }
-          ''',
-              '''fn resolve_override_path(raw: &str) -> PathBuf {
-              if raw == "~" {
-                  return crate::config::get_home_dir();
-              }
-              if let Some(stripped) = raw.strip_prefix("~/") {
-                  return crate::config::get_home_dir().join(stripped);
-              }
-              if let Some(stripped) = raw.strip_prefix("~\\\\") {
-                  return crate::config::get_home_dir().join(stripped);
-              }
-
-              PathBuf::from(raw)
-          }
-          ''',
-          )
-
-          # XDG_DATA_HOME is specified as an absolute path. Ignore malformed relative values so
-          # OpenCode discovery cannot bind to the process CWD.
           replace_exact(
               "src-tauri/src/session_manager/providers/opencode.rs",
-              '''    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-                  if !xdg.is_empty() {
-                      return PathBuf::from(xdg).join("opencode");
-                  }
-              }
-          ''',
-              '''    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-                  let xdg = PathBuf::from(xdg.trim());
-                  if xdg.is_absolute() {
-                      return xdg.join("opencode");
-                  }
-                  if !xdg.as_os_str().is_empty() {
-                      log::warn!(
-                          "Ignoring relative XDG_DATA_HOME for OpenCode discovery: {}",
-                          xdg.display()
-                      );
-                  }
-              }
-          ''',
+              '    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {\n        if !xdg.is_empty() {\n            return PathBuf::from(xdg).join("opencode");\n        }\n    }\n',
+              '    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {\n        let xdg = PathBuf::from(xdg.trim());\n        if xdg.is_absolute() {\n            return xdg.join("opencode");\n        }\n        if !xdg.as_os_str().is_empty() {\n            log::warn!("Ignoring relative XDG_DATA_HOME for OpenCode discovery: {}", xdg.display());\n        }\n    }\n',
           )
 
-          # The permanent guard must pass after the common-boundary migration.
           offenders = []
           for path in Path("src-tauri/src").rglob("*.rs"):
               if path.name == "config.rs":
@@ -369,19 +245,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add \
-            src-tauri/src/config.rs \
-            src-tauri/src/app_exit_monitor.rs \
-            src-tauri/src/panic_hook.rs \
-            src-tauri/src/app_store.rs \
-            src-tauri/src/claude_plugin.rs \
-            src-tauri/src/commands/misc.rs \
-            src-tauri/src/database/backup.rs \
-            src-tauri/src/prompt_files.rs \
-            src-tauri/src/services/env_manager.rs \
-            src-tauri/src/services/skill.rs \
-            src-tauri/src/session_manager/providers/opencode.rs \
-            src-tauri/src/settings.rs
+          git add src-tauri/src
           git diff --cached --check
           git commit -m "fix: centralize home resolution across persistence paths"
           git push origin HEAD:fix/global-hardening-20260904
