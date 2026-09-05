@@ -9,6 +9,7 @@ on:
       - scripts/apply_design_invariant_hardening_once.py
       - scripts/apply_design_invariant_followup_once.py
       - scripts/apply_hermes_failure_boundary_once.py
+      - scripts/apply_hermes_callers_once.py
 
 permissions:
   contents: write
@@ -158,6 +159,9 @@ jobs:
       - name: Apply Hermes fallible failure boundary
         run: python scripts/apply_hermes_failure_boundary_once.py
 
+      - name: Migrate Hermes production callers
+        run: python scripts/apply_hermes_callers_once.py
+
       - name: Scope Hermes guards to production function bodies
         run: |
           python - <<'PY'
@@ -216,6 +220,7 @@ jobs:
             scripts/apply_design_invariant_hardening_once.py \
             scripts/apply_design_invariant_followup_once.py \
             scripts/apply_hermes_failure_boundary_once.py \
+            scripts/apply_hermes_callers_once.py \
             .github/workflows/design-invariant-hardening-once.yml
           git add -A
           git diff --cached --check
