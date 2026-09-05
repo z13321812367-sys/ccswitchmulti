@@ -15,6 +15,8 @@ jobs:
   macos-universal:
     name: Build and upload macOS universal assets
     runs-on: macos-14
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
     steps:
       - name: Checkout release tag
         uses: actions/checkout@v6
@@ -60,68 +62,109 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          expected="${{ inputs.tag }}"
+          expected="$RELEASE_TAG"
           expected="${expected#v}"
           actual="$(node -p "require('./package.json').version")"
           test "$actual" = "$expected"
 
       - name: Prepare Tauri signing key
         shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY_RAW: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD_RAW: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          if [ -z "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" ]; then
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY_RAW:-}" ]; then
             echo "❌ TAURI_SIGNING_PRIVATE_KEY Secret is missing" >&2
             exit 1
           fi
 
-          RAW="${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}"
+          RAW="$TAURI_SIGNING_PRIVATE_KEY_RAW"
           KEY_PATH="$RUNNER_TEMP/tauri_signing.key"
           if echo "$RAW" | head -n1 | grep -q '^untrusted comment:'; then
             printf '%s\n' "$RAW" > "$KEY_PATH"
+          elif DECODED=$(printf '%s' "$RAW" | (base64 --decode 2>/dev/null || base64 -D 2>/dev/null)) \
+            && echo "$DECODED" | head -n1 | grep -q '^untrusted comment:'; then
+            printf '%s\n' "$DECODED" > "$KEY_PATH"
+          elif echo "$RAW" | grep -Eq '^[A-Za-z0-9+/=]+$'; then
+            ONE=$(printf '%s' "$RAW" | tr -d '\r\n')
+            printf '%s\n%s\n' "untrusted comment: tauri signing key" "$ONE" > "$KEY_PATH"
           else
-            if DECODED=$(printf '%s' "$RAW" | (base64 --decode 2>/dev/null || base64 -D 2>/dev/null)) \
-              && echo "$DECODED" | head -n1 | grep -q '^untrusted comment:'; then
-              printf '%s\n' "$DECODED" > "$KEY_PATH"
-            else
-              if echo "$RAW" | grep -Eq '^[A-Za-z0-9+/=]+$'; then
-                ONE=$(printf '%s' "$RAW" | tr -d '\r\n')
-                printf '%s\n%s\n' "untrusted comment: tauri signing key" "$ONE" > "$KEY_PATH"
-              else
-                echo "❌ TAURI_SIGNING_PRIVATE_KEY format is not recognized" >&2
-                exit 1
-              fi
-            fi
+            echo "❌ TAURI_SIGNING_PRIVATE_KEY format is not recognized" >&2
+            exit 1
           fi
 
           if command -v base64 >/dev/null 2>&1; then
             KEY_B64=$(base64 < "$KEY_PATH" | tr -d '\r\n')
-          elif command -v openssl >/dev/null 2>&1; then
-            KEY_B64=$(openssl base64 -A -in "$KEY_PATH")
           else
-            KEY_B64=$(KEY_PATH="$KEY_PATH" node -e "process.stdout.write(require('fs').readFileSync(process.env.KEY_PATH).toString('base64'))")
+            KEY_B64=$(openssl base64 -A -in "$KEY_PATH")
           fi
-          if [ -z "$KEY_B64" ]; then
-            echo "❌ Failed to encode Tauri signing key" >&2
+          test -n "$KEY_B64"
+          echo "TAURI_SIGNING_PRIVATE_KEY=$KEY_B64" >> "$GITHUB_ENV"
+          if [ -n "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD_RAW:-}" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$TAURI_SIGNING_PRIVATE_KEY_PASSWORD_RAW" >> "$GITHUB_ENV"
+          fi
+
+      - name: Import Apple signing certificate
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_CERTIFICATE:-}" ] || [ -z "${APPLE_CERTIFICATE_PASSWORD:-}" ] || [ -z "${KEYCHAIN_PASSWORD:-}" ]; then
+            echo "❌ Apple signing certificate secrets are required for release assets" >&2
             exit 1
           fi
 
-          echo "TAURI_SIGNING_PRIVATE_KEY=$KEY_B64" >> "$GITHUB_ENV"
-          if [ -n "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" ]; then
-            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}" >> "$GITHUB_ENV"
-          fi
+          CERT_PATH="$RUNNER_TEMP/certificate.p12"
+          printf '%s' "$APPLE_CERTIFICATE" | (base64 --decode 2>/dev/null || base64 -D) > "$CERT_PATH"
+          ORIGINAL_DEFAULT_KEYCHAIN=$(security default-keychain -d user | tr -d '"' | xargs)
+          echo "ORIGINAL_DEFAULT_KEYCHAIN=$ORIGINAL_DEFAULT_KEYCHAIN" >> "$GITHUB_ENV"
 
-      - name: Build unsigned macOS bundles
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security default-keychain -s "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+            | grep "Developer ID Application" | grep -oE '"[^"]+"' | head -1 | tr -d '"')
+          if [ -z "$IDENTITY" ]; then
+            echo "❌ No Developer ID Application signing identity found" >&2
+            exit 1
+          fi
+          echo "APPLE_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          rm -f "$CERT_PATH"
+
+      - name: Build signed and notarized macOS bundles
         shell: bash
         timeout-minutes: 60
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          set -euxo pipefail
+          set -euo pipefail
+          if [ -z "${APPLE_SIGNING_IDENTITY:-}" ] || [ -z "${APPLE_ID:-}" ] || [ -z "${APPLE_PASSWORD:-}" ] || [ -z "${APPLE_TEAM_ID:-}" ]; then
+            echo "❌ macOS signing/notarization credentials are required for release assets" >&2
+            exit 1
+          fi
           pnpm tauri build --target universal-apple-darwin
 
-      - name: Stage macOS release assets
+      - name: Stage and verify macOS release assets
         shell: bash
         run: |
           set -euxo pipefail
-          version="${{ inputs.tag }}"
+          version="$RELEASE_TAG"
           version="${version#v}"
           mkdir -p release-assets
 
@@ -138,19 +181,22 @@ jobs:
             fi
           done
 
-          if [ -z "$TAR_GZ" ]; then
-            echo "❌ No macOS updater tarball found" >&2
+          if [ -z "$TAR_GZ" ] || [ -z "$APP_PATH" ]; then
+            echo "❌ Signed macOS updater/app artifact is incomplete" >&2
             exit 1
           fi
-          if [ -z "$APP_PATH" ]; then
-            echo "❌ No macOS .app bundle found" >&2
+          if [ ! -f "$TAR_GZ.sig" ]; then
+            echo "❌ macOS updater signature is missing" >&2
             exit 1
           fi
 
+          xcrun stapler staple "$APP_PATH"
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          spctl -a -t exec -vv "$APP_PATH"
+          xcrun stapler validate "$APP_PATH"
+
           cp "$TAR_GZ" "release-assets/CCSwitchMulti_${version}_universal.tar.gz"
-          if [ -f "$TAR_GZ.sig" ]; then
-            cp "$TAR_GZ.sig" "release-assets/CCSwitchMulti_${version}_universal.tar.gz.sig"
-          fi
+          cp "$TAR_GZ.sig" "release-assets/CCSwitchMulti_${version}_universal.tar.gz.sig"
           ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "release-assets/CCSwitchMulti_${version}_universal.app.zip"
           shasum -a 256 release-assets/*
 
@@ -160,7 +206,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          gh release upload "${{ inputs.tag }}" release-assets/* --clobber --repo "$GITHUB_REPOSITORY"
+          gh release upload "$RELEASE_TAG" release-assets/* --clobber --repo "$GITHUB_REPOSITORY"
 
       - name: Refresh release checksums
         env:
@@ -168,8 +214,19 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          gh release view "${{ inputs.tag }}" --repo "$GITHUB_REPOSITORY" --json assets \
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets \
             --jq '.assets[] | select(.name != "SHA256SUMS.txt") | select(.digest != null and .digest != "") | "\(.digest | sub("^sha256:";"") | ascii_upcase)  \(.name)"' \
             | sort > SHA256SUMS.txt
           cat SHA256SUMS.txt
-          gh release upload "${{ inputs.tag }}" SHA256SUMS.txt --clobber --repo "$GITHUB_REPOSITORY"
+          gh release upload "$RELEASE_TAG" SHA256SUMS.txt --clobber --repo "$GITHUB_REPOSITORY"
+
+      - name: Clean up Apple signing keychain
+        if: always()
+        shell: bash
+        run: |
+          if [ -n "${ORIGINAL_DEFAULT_KEYCHAIN:-}" ]; then
+            security default-keychain -s "$ORIGINAL_DEFAULT_KEYCHAIN" || true
+          fi
+          if [ -f "$RUNNER_TEMP/build.keychain-db" ]; then
+            security delete-keychain "$RUNNER_TEMP/build.keychain-db" || true
+          fi

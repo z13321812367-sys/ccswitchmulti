@@ -256,8 +256,9 @@ impl RequestContext {
     /// 使用共享的 ProviderRouter，确保熔断器状态跨请求保持
     ///
     /// 配置生效规则：
-    /// - 故障转移开启：超时配置正常生效（0 表示禁用超时）
-    /// - 故障转移关闭：超时配置不生效（全部传入 0）
+    /// - 故障转移开启：用户超时配置正常生效（0 表示禁用故障转移/body timeout）；
+    /// - 故障转移关闭：用户超时配置不生效（全部传入 0）；
+    /// - 两种模式都保留独立的 transport response-header safety cap，避免连接永久挂起。
     pub fn create_forwarder(&self, state: &ProxyState) -> RequestForwarder {
         let (non_streaming_timeout, first_byte_timeout, idle_timeout) =
             if self.app_config.auto_failover_enabled {
@@ -276,7 +277,8 @@ impl RequestContext {
                 (0, 0, 0)
             };
 
-        // 故障转移关闭时强制 max_retries=0（仅尝试 1 个 provider），与「不超时 + 不切换」语义一致。
+        // 故障转移关闭时强制 max_retries=0（仅尝试 1 个 provider）。
+        // 用户级 failover/body timeout 被禁用，但 transport safety cap 仍保留。
         let max_retries = if self.app_config.auto_failover_enabled {
             self.app_config.max_retries
         } else {

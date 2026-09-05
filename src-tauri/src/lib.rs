@@ -12,6 +12,7 @@ mod commands;
 mod config;
 mod database;
 mod deeplink;
+mod diagnostics;
 mod error;
 mod gemini_config;
 mod gemini_mcp;
@@ -87,37 +88,6 @@ fn set_windows_app_user_model_id(app: &tauri::AppHandle) {
     }
 }
 
-fn redact_url_for_log(url_str: &str) -> String {
-    match url::Url::parse(url_str) {
-        Ok(url) => {
-            let mut output = format!("{}://", url.scheme());
-            if let Some(host) = url.host_str() {
-                output.push_str(host);
-            }
-            output.push_str(url.path());
-
-            let mut keys: Vec<String> = url.query_pairs().map(|(k, _)| k.to_string()).collect();
-            keys.sort();
-            keys.dedup();
-
-            if !keys.is_empty() {
-                output.push_str("?[keys:");
-                output.push_str(&keys.join(","));
-                output.push(']');
-            }
-
-            output
-        }
-        Err(_) => {
-            let base = url_str.split('#').next().unwrap_or(url_str);
-            match base.split_once('?') {
-                Some((prefix, _)) => format!("{prefix}?[redacted]"),
-                None => base.to_string(),
-            }
-        }
-    }
-}
-
 /// 统一处理 ccswitch:// 深链接 URL
 ///
 /// - 解析 URL
@@ -133,9 +103,12 @@ fn handle_deeplink_url(
         return false;
     }
 
-    let redacted_url = redact_url_for_log(url_str);
+    let redacted_url = crate::diagnostics::redact_url_for_log(url_str);
     log::info!("✓ Deep link URL detected from {source}: {redacted_url}");
-    log::debug!("Deep link URL (raw) from {source}: {url_str}");
+    log::debug!(
+        "Deep link URL metadata from {source}: length={}, redacted={redacted_url}",
+        url_str.len()
+    );
 
     match crate::deeplink::parse_deeplink_url(url_str) {
         Ok(request) => {
@@ -166,12 +139,12 @@ fn handle_deeplink_url(
             }
         }
         Err(e) => {
-            log::error!("✗ Failed to parse deep link URL: {e}");
+            log::error!("✗ Failed to parse deep link URL ({redacted_url}): {e}");
 
             if let Err(emit_err) = app.emit(
                 "deeplink-error",
                 serde_json::json!({
-                    "url": url_str,
+                    "url": redacted_url,
                     "error": e.to_string()
                 }),
             ) {
@@ -231,7 +204,7 @@ pub fn run() {
             log::info!("=== Single Instance Callback Triggered ===");
             log::debug!("Args count: {}", args.len());
             for (i, arg) in args.iter().enumerate() {
-                log::debug!("  arg[{i}]: {}", redact_url_for_log(arg));
+                log::debug!("  arg[{i}]: {}", crate::diagnostics::redact_url_for_log(arg));
             }
 
             if crate::lightweight::is_lightweight_mode() {
@@ -922,7 +895,7 @@ pub fn run() {
 
                     for (i, url) in urls.iter().enumerate() {
                         let url_str = url.as_str();
-                        log::debug!("  URL[{i}]: {}", redact_url_for_log(url_str));
+                        log::debug!("  URL[{i}]: {}", crate::diagnostics::redact_url_for_log(url_str));
 
                         if handle_deeplink_url(&app_handle, url_str, true, "on_open_url") {
                             break; // Process only first ccswitch:// URL
@@ -1643,63 +1616,25 @@ pub fn run() {
                         }
                     }
                 }
-                // 处理通过自定义 URL 协议触发的打开事件（例如 ccswitch://...）
+                // 处理通过自定义 URL 协议触发的打开事件（例如 ccswitch://...）。
+                // 原始 URL 只能进入统一处理器；日志与错误事件都在该边界内脱敏。
                 RunEvent::Opened { urls } => {
                     if let Some(url) = urls.first() {
-                        let url_str = url.to_string();
-                        log::info!("RunEvent::Opened with URL: {url_str}");
+                        let url_str = url.as_str();
+                        log::debug!(
+                            "RunEvent::Opened URL: {}",
+                            crate::diagnostics::redact_url_for_log(url_str)
+                        );
 
-                        if url_str.starts_with("ccswitch://") {
-                            if crate::lightweight::is_lightweight_mode() {
-                                if let Err(e) = crate::lightweight::exit_lightweight_mode(app_handle)
-                                {
-                                    log::error!("退出轻量模式重建窗口失败: {e}");
-                                }
-                            }
-
-                            // 解析并广播深链接事件，复用与 single_instance 相同的逻辑
-                            match crate::deeplink::parse_deeplink_url(&url_str) {
-                                Ok(request) => {
-                                    log::info!(
-                                        "Successfully parsed deep link from RunEvent::Opened: resource={}, app={:?}",
-                                        request.resource,
-                                        request.app
-                                    );
-
-                                    if let Err(e) =
-                                        app_handle.emit("deeplink-import", &request)
-                                    {
-                                        log::error!(
-                                            "Failed to emit deep link event from RunEvent::Opened: {e}"
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    log::error!(
-                                        "Failed to parse deep link URL from RunEvent::Opened: {e}"
-                                    );
-
-                                    if let Err(emit_err) = app_handle.emit(
-                                        "deeplink-error",
-                                        serde_json::json!({
-                                            "url": url_str,
-                                            "error": e.to_string()
-                                        }),
-                                    ) {
-                                        log::error!(
-                                            "Failed to emit deep link error event from RunEvent::Opened: {emit_err}"
-                                        );
-                                    }
-                                }
-                            }
-
-                            // 确保主窗口可见
-                            if let Some(window) = app_handle.get_webview_window("main") {
-                                let _ = window.unminimize();
-                                let _ = window.show();
-                                let _ = window.set_focus();
+                        if url_str.starts_with("ccswitch://")
+                            && crate::lightweight::is_lightweight_mode()
+                        {
+                            if let Err(e) = crate::lightweight::exit_lightweight_mode(app_handle) {
+                                log::error!("退出轻量模式重建窗口失败: {e}");
                             }
                         }
+
+                        handle_deeplink_url(app_handle, url_str, true, "RunEvent::Opened");
                     }
                 }
                 _ => {}
@@ -2155,5 +2090,29 @@ mod tests {
             classify_exit_request(Some(1)),
             ExitRequestAction::CleanupAndExit
         );
+    }
+}
+
+#[cfg(test)]
+mod sensitive_deeplink_boundary_tests {
+
+    #[test]
+    fn deep_link_log_redaction_keeps_keys_but_never_secret_values() {
+        let raw = "ccswitch://v1/import?resource=provider&name=demo&apiKey=sk-secret&usageAccessToken=token-secret#fragment-secret";
+        let redacted = crate::diagnostics::redact_url_for_log(raw);
+
+        assert!(redacted.contains("apiKey"));
+        assert!(redacted.contains("usageAccessToken"));
+        assert!(!redacted.contains("sk-secret"));
+        assert!(!redacted.contains("token-secret"));
+        assert!(!redacted.contains("fragment-secret"));
+    }
+
+    #[test]
+    fn malformed_deep_link_redaction_drops_query_values() {
+        let raw = "ccswitch://v1/import?apiKey=top-secret%ZZ";
+        let redacted = crate::diagnostics::redact_url_for_log(raw);
+        assert!(!redacted.contains("top-secret"));
+        assert!(redacted.contains("?[redacted]") || redacted.contains("?[keys:"));
     }
 }

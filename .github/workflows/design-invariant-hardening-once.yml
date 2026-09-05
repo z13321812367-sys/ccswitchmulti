@@ -1,0 +1,269 @@
+name: Design Invariant Hardening Once
+
+on:
+  push:
+    branches:
+      - fix/global-hardening-20260904
+    paths:
+      - .github/workflows/design-invariant-hardening-once.yml
+      - scripts/apply_design_invariant_hardening_once.py
+      - scripts/apply_design_invariant_followup_once.py
+      - scripts/apply_hermes_failure_boundary_once.py
+      - scripts/apply_hermes_callers_once.py
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-verify:
+    if: github.repository == 'z13321812367-sys/ccswitchmulti'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: fix/global-hardening-20260904
+          fetch-depth: 0
+
+      - name: Keep primary driver focused on product sources
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("scripts/apply_design_invariant_hardening_once.py")
+          text = path.read_text(encoding="utf-8")
+          marker = "# ---------------------------------------------------------------------------\n# Permanent source-level guards encode the design invariants"
+          if text.count(marker) != 1:
+              raise SystemExit(f"design-driver policy boundary count={text.count(marker)}")
+          path.write_text(text[:text.index(marker)] + 'print("Applied design-invariant product patch")\n', encoding="utf-8")
+          PY
+
+      - name: Apply common product invariants
+        run: python scripts/apply_design_invariant_hardening_once.py
+
+      - name: Align structural follow-up with both Skill HOME callers
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("scripts/apply_design_invariant_followup_once.py")
+          text = path.read_text(encoding="utf-8")
+          old = '    "skill app HOME",\n)\n'
+          new = '    "skill app HOME",\n    expected=2,\n)\n'
+          if text.count(old) != 1:
+              raise SystemExit(f"skill HOME expectation marker count={text.count(old)}")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+
+      - name: Apply fallible caller and discovery invariants
+        run: python scripts/apply_design_invariant_followup_once.py
+
+      - name: Normalize Windows path literal emitted by follow-up
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("src-tauri/src/commands/misc.rs")
+          text = path.read_text(encoding="utf-8")
+          old = r'std::path::PathBuf::from("C:\Program Files\nodejs")'
+          new = r'std::path::PathBuf::from(r"C:\Program Files\nodejs")'
+          if text.count(old) != 1:
+              raise SystemExit(f"Windows nodejs literal count={text.count(old)}")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+
+      - name: Make Skill persistence guard reject only infallible wrappers
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("scripts/check_rust_failure_boundaries.py")
+          text = path.read_text(encoding="utf-8")
+          old = r're.compile(r"(?:get_app_config_dir|crate::config::get_home_dir)\(\)")'
+          new = r're.compile(r"\bget_app_config_dir\(\)|crate::config::get_home_dir\(\)")'
+          if text.count(old) != 1:
+              raise SystemExit(f"Skill guard matcher count={text.count(old)}")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+
+      - name: Align OpenCode tests with fallible scan contract
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("src-tauri/src/session_manager/providers/opencode.rs")
+          text = path.read_text(encoding="utf-8")
+          old = "        let sessions = scan_sessions_sqlite();\n"
+          new = "        let sessions = scan_sessions_sqlite().expect(\"scan sqlite sessions\");\n"
+          if text.count(old) != 1:
+              raise SystemExit(f"OpenCode successful scan test count={text.count(old)}")
+          text = text.replace(old, new, 1)
+          anchor = "    #[test]\n    fn load_messages_sqlite_reads_messages_and_parts() {\n"
+          if text.count(anchor) != 1:
+              raise SystemExit(f"OpenCode failure-test anchor count={text.count(anchor)}")
+          failure_test = '''    #[test]
+          #[allow(deprecated)]
+          fn scan_sessions_sqlite_surfaces_schema_errors() {
+              let _guard = opencode_env_lock().lock().expect("lock");
+              let temp = tempdir().expect("tempdir");
+              let original_xdg = std::env::var_os("XDG_DATA_HOME");
+              std::env::set_var("XDG_DATA_HOME", temp.path());
+              let base_dir = temp.path().join("opencode");
+              std::fs::create_dir_all(&base_dir).expect("create base dir");
+              let db_path = base_dir.join("opencode.db");
+              let conn = Connection::open(&db_path).expect("open sqlite db");
+              conn.execute_batch("CREATE TABLE unrelated (id TEXT PRIMARY KEY);")
+                  .expect("create incompatible schema");
+              drop(conn);
+              let result = scan_sessions_sqlite();
+              if let Some(value) = original_xdg {
+                  std::env::set_var("XDG_DATA_HOME", value);
+              } else {
+                  std::env::remove_var("XDG_DATA_HOME");
+              }
+              let err = result.expect_err("missing session table must be observable");
+              assert!(err.contains("Failed to prepare OpenCode session query"), "{err}");
+          }
+
+          '''
+          path.write_text(text.replace(anchor, failure_test + anchor, 1), encoding="utf-8")
+          PY
+
+      - name: Scope Hermes config-write transform to production helper
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("scripts/apply_hermes_failure_boundary_once.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''replace_once(
+              path,
+              "    let config_path = get_hermes_config_path();\\n",
+              "    let config_path = try_get_hermes_config_path()?;\\n",
+              "Hermes write config path",
+          )'''
+          new = '''replace_once(
+              path,
+              """fn write_yaml_section_to_config_locked(
+              section_key: &str,
+              value: &serde_yaml::Value,
+          ) -> Result<HermesWriteOutcome, AppError> {
+              let config_path = get_hermes_config_path();
+          """,
+              """fn write_yaml_section_to_config_locked(
+              section_key: &str,
+              value: &serde_yaml::Value,
+          ) -> Result<HermesWriteOutcome, AppError> {
+              let config_path = try_get_hermes_config_path()?;
+          """,
+              "Hermes write config path",
+          )'''
+          if text.count(old) != 1:
+              raise SystemExit(f"Hermes write-transform driver count={text.count(old)}")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+
+      - name: Apply Hermes fallible failure boundary
+        run: python scripts/apply_hermes_failure_boundary_once.py
+
+      - name: Migrate Hermes production callers
+        run: python scripts/apply_hermes_callers_once.py
+
+      - name: Scope Hermes guards to production function bodies
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("scripts/check_rust_failure_boundaries.py")
+          text = path.read_text(encoding="utf-8")
+          old_read = r're.compile(r"pub fn read_hermes_config\([^)]*\) -> Result[\s\S]{0,240}get_hermes_config_path\(\)")'
+          new_read = r're.compile(r"pub fn read_hermes_config\(\) -> Result<serde_yaml::Value, AppError> \{\s*let path = get_hermes_config_path\(\);")'
+          old_write = r're.compile(r"let config_path = get_hermes_config_path\(\);")'
+          new_write = r're.compile(r"fn write_yaml_section_to_config_locked\([\s\S]{0,220}\) -> Result<HermesWriteOutcome, AppError> \{\s*let config_path = get_hermes_config_path\(\);")'
+          if text.count(old_read) != 1:
+              raise SystemExit(f"Hermes read guard count={text.count(old_read)}")
+          if text.count(old_write) != 1:
+              raise SystemExit(f"Hermes write guard count={text.count(old_write)}")
+          text = text.replace(old_read, new_read, 1).replace(old_write, new_write, 1)
+          path.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev \
+            libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+            || sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.0-dev
+          sudo apt-get install -y --no-install-recommends libsoup-3.0-dev \
+            || sudo apt-get install -y --no-install-recommends libsoup2.4-dev
+
+      - name: Format Rust
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all
+
+      - name: Verify permanent design policies
+        run: |
+          python scripts/check_workflow_shell_interpolation.py
+          python scripts/check_rust_failure_boundaries.py
+          git diff --check
+
+      - name: Create frontend dist placeholder
+        run: mkdir -p dist
+
+      - name: Clippy all targets and features
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+
+      - name: Rust tests default feature set
+        run: |
+          set -o pipefail
+          log="$RUNNER_TEMP/default-rust-tests.log"
+          diagnostic="$RUNNER_TEMP/default-rust-tests-diagnostic.txt"
+          status=0
+          cargo test --manifest-path src-tauri/Cargo.toml --all >"$log" 2>&1 || status=$?
+          if [ "$status" -ne 0 ]; then
+            python - "$log" "$diagnostic" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          source = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace").splitlines()
+          out = []
+          headers = [i for i, line in enumerate(source) if re.match(r"^---- .+ stdout ----$", line)]
+          for start in headers[:4]:
+              end = min(len(source), start + 90)
+              block = source[start:end]
+              if any("panicked at" in line or "assertion" in line or "FAILED" in line for line in block):
+                  out.extend(block)
+                  out.append("")
+          failure_markers = [i for i, line in enumerate(source) if line.strip() == "failures:"]
+          if failure_markers:
+              start = failure_markers[-1]
+              out.extend(source[start:min(len(source), start + 80)])
+          out.append("")
+          out.append("--- tail ---")
+          out.extend(source[-140:])
+          Path(sys.argv[2]).write_text("\n".join(out[-420:]) + "\n", encoding="utf-8")
+          PY
+            cat "$diagnostic"
+          fi
+          exit "$status"
+
+      - name: Upload bounded default-test diagnostic
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: design-invariant-default-test-diagnostic
+          path: ${{ runner.temp }}/default-rust-tests-diagnostic.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Rust tests all features
+        run: cargo test --manifest-path src-tauri/Cargo.toml --all-features
+
+      - name: Commit verified design fixes and remove one-shot machinery
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm \
+            scripts/apply_design_invariant_hardening_once.py \
+            scripts/apply_design_invariant_followup_once.py \
+            scripts/apply_hermes_failure_boundary_once.py \
+            scripts/apply_hermes_callers_once.py \
+            .github/workflows/design-invariant-hardening-once.yml
+          git add -A
+          git diff --cached --check
+          git commit -m "fix: enforce persistence and diagnostic invariants"
+          git push origin HEAD:fix/global-hardening-20260904

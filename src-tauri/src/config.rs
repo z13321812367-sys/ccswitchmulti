@@ -1,10 +1,14 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::fs;
-use std::io::Write;
+use std::fs::{self, OpenOptions};
+use std::io::{ErrorKind, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::AppError;
+
+static ATOMIC_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
+const ATOMIC_TEMP_CREATE_ATTEMPTS: usize = 16;
 
 /// 获取用户主目录，带回退和日志
 ///
@@ -19,18 +23,69 @@ use crate::error::AppError;
 ///
 /// 为了让 Windows CI/本地测试能稳定隔离真实用户数据，可通过 `CC_SWITCH_TEST_HOME`
 /// 显式覆盖 home dir（仅用于测试/调试场景）。
-pub fn get_home_dir() -> PathBuf {
-    if let Ok(home) = std::env::var("CC_SWITCH_TEST_HOME") {
-        let trimmed = home.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
+fn resolve_home_dir(
+    test_override: Option<&str>,
+    detected: Option<PathBuf>,
+) -> Result<PathBuf, String> {
+    if let Some(home) = test_override.map(str::trim).filter(|home| !home.is_empty()) {
+        let path = PathBuf::from(home);
+        if path.is_absolute() {
+            return Ok(path);
         }
+        return Err(format!(
+            "CC_SWITCH_TEST_HOME 必须是绝对路径，收到: {}",
+            path.display()
+        ));
     }
 
-    dirs::home_dir().unwrap_or_else(|| {
-        log::warn!("无法获取用户主目录，回退到当前目录");
-        PathBuf::from(".")
+    match detected {
+        Some(path) if path.is_absolute() => Ok(path),
+        Some(path) => Err(format!(
+            "操作系统返回了非绝对用户主目录路径: {}",
+            path.display()
+        )),
+        None => {
+            Err("无法获取用户主目录；拒绝回退到当前工作目录，以避免配置/数据库静默分叉".to_string())
+        }
+    }
+}
+
+/// 获取用户主目录。
+///
+/// 用户主目录是数据库、设置和多个 CLI 配置路径的共同根。无法解析时必须 fail closed：
+/// 旧行为回退到 `.` 会根据启动方式把同一用户的数据写进任意 CWD，表现为供应商/设置丢失，
+/// 也可能把凭据写进意外目录。
+pub fn try_get_home_dir() -> Result<PathBuf, String> {
+    let test_override = std::env::var("CC_SWITCH_TEST_HOME").ok();
+    resolve_home_dir(test_override.as_deref(), dirs::home_dir())
+}
+
+pub fn get_home_dir() -> PathBuf {
+    try_get_home_dir().unwrap_or_else(|err| {
+        log::error!("{err}");
+        panic!("{err}");
     })
+}
+
+/// Expand `~`, `~/...`, and `~\...` through the same validated HOME boundary.
+/// Missing or malformed HOME is an error; callers must not preserve a literal relative `~` path.
+pub fn expand_home_path(raw: &str) -> Result<PathBuf, String> {
+    if raw == "~" {
+        return try_get_home_dir();
+    }
+    if let Some(stripped) = raw.strip_prefix("~/") {
+        return Ok(try_get_home_dir()?.join(stripped));
+    }
+    if let Some(stripped) = raw.strip_prefix("~\\") {
+        return Ok(try_get_home_dir()?.join(stripped));
+    }
+    Ok(PathBuf::from(raw))
+}
+
+/// Last-resort crash/exit observability directory when HOME itself is unavailable.
+/// This must never be used for the database, settings, provider config, or other user state.
+pub fn emergency_observability_dir() -> PathBuf {
+    std::env::temp_dir().join("cc-switch-home-unavailable")
 }
 
 /// 获取 Claude Code 配置目录路径
@@ -293,67 +348,166 @@ pub fn write_text_file(path: &Path, data: &str) -> Result<(), AppError> {
     atomic_write(path, data.as_bytes())
 }
 
-/// 原子写入：写入临时文件后 rename 替换，避免半写状态
-pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+fn create_atomic_temp_file(
+    parent: &Path,
+    file_name: &str,
+) -> Result<(PathBuf, fs::File), AppError> {
+    for _ in 0..ATOMIC_TEMP_CREATE_ATTEMPTS {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let sequence = ATOMIC_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp = parent.join(format!(
+            ".{file_name}.tmp.{}.{}.{}",
+            std::process::id(),
+            ts,
+            sequence
+        ));
+
+        match OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(file) => return Ok((tmp, file)),
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(AppError::io(&tmp, err)),
+        }
     }
 
+    Err(AppError::Config(format!(
+        "无法为 {file_name} 创建唯一临时文件，已重试 {ATOMIC_TEMP_CREATE_ATTEMPTS} 次"
+    )))
+}
+
+#[cfg(windows)]
+fn replace_file_atomically(tmp: &Path, path: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let source: Vec<u16> = tmp.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let result = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_file_atomically(tmp: &Path, path: &Path) -> std::io::Result<()> {
+    fs::rename(tmp, path)
+}
+
+/// 原子且持久地写入文件。
+///
+/// 契约：
+/// - 临时文件使用 `create_new`，并发写入不会共享/截断同一个临时文件；
+/// - 数据在替换目标之前 `sync_all`，避免进程崩溃留下零长度或半写文件；
+/// - Windows 使用 `MoveFileExW(REPLACE_EXISTING)` 原位替换，绝不先删除旧目标；
+/// - 任何写入/替换错误都会清理临时文件，旧目标保持不变（文件系统自身故障除外）。
+pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
     let parent = path
         .parent()
         .ok_or_else(|| AppError::Config("无效的路径".to_string()))?;
-    let mut tmp = parent.to_path_buf();
+    fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+
     let file_name = path
         .file_name()
         .ok_or_else(|| AppError::Config("无效的文件名".to_string()))?
         .to_string_lossy()
         .to_string();
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    tmp.push(format!("{file_name}.tmp.{ts}"));
-
-    {
-        let mut f = fs::File::create(&tmp).map_err(|e| AppError::io(&tmp, e))?;
-        f.write_all(data).map_err(|e| AppError::io(&tmp, e))?;
-        f.flush().map_err(|e| AppError::io(&tmp, e))?;
-    }
+    let (tmp, mut file) = create_atomic_temp_file(parent, &file_name)?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = fs::metadata(path) {
-            let perm = meta.permissions().mode();
-            let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(perm));
+        let mode = fs::metadata(path)
+            .map(|meta| meta.permissions().mode())
+            .unwrap_or(0o600);
+        if let Err(err) = file.set_permissions(fs::Permissions::from_mode(mode)) {
+            drop(file);
+            let _ = fs::remove_file(&tmp);
+            return Err(AppError::io(&tmp, err));
         }
     }
 
-    #[cfg(windows)]
-    {
-        // Windows 上 rename 目标存在会失败，先移除再重命名（尽量接近原子性）
-        if path.exists() {
-            let _ = fs::remove_file(path);
-        }
-        fs::rename(&tmp, path).map_err(|e| AppError::IoContext {
+    if let Err(err) = file.write_all(data).and_then(|_| file.sync_all()) {
+        drop(file);
+        let _ = fs::remove_file(&tmp);
+        return Err(AppError::io(&tmp, err));
+    }
+    drop(file);
+
+    if let Err(err) = replace_file_atomically(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(AppError::IoContext {
             context: format!("原子替换失败: {} -> {}", tmp.display(), path.display()),
-            source: e,
-        })?;
+            source: err,
+        });
     }
 
-    #[cfg(not(windows))]
-    {
-        fs::rename(&tmp, path).map_err(|e| AppError::IoContext {
-            context: format!("原子替换失败: {} -> {}", tmp.display(), path.display()),
-            source: e,
-        })?;
+    #[cfg(unix)]
+    if let Ok(directory) = fs::File::open(parent) {
+        if let Err(err) = directory.sync_all() {
+            // 文件本身已经成功替换；目录 fsync 在部分文件系统上可能不支持，因此只记录。
+            log::debug!(
+                "目录元数据同步失败（文件内容已成功替换）: path={}, error={err}",
+                parent.display()
+            );
+        }
     }
+
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn home_resolution_fails_closed_when_os_home_is_missing() {
+        let err = resolve_home_dir(None, None).expect_err("missing home must not fall back to cwd");
+        assert!(err.contains("拒绝回退到当前工作目录"));
+    }
+
+    #[test]
+    fn home_resolution_rejects_relative_os_path() {
+        assert!(resolve_home_dir(None, Some(PathBuf::from("relative-home"))).is_err());
+    }
+
+    #[test]
+    fn explicit_absolute_test_home_override_remains_supported() {
+        let override_home = std::env::temp_dir().join("cc-switch-test-home");
+        let override_text = override_home.to_string_lossy().to_string();
+        assert_eq!(
+            resolve_home_dir(Some(&override_text), None).unwrap(),
+            override_home
+        );
+    }
+
+    #[test]
+    fn explicit_relative_test_home_override_is_rejected() {
+        assert!(resolve_home_dir(Some("relative-test-home"), None).is_err());
+    }
+
+    #[test]
+    fn emergency_observability_dir_is_named_temp_fallback() {
+        let path = emergency_observability_dir();
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("cc-switch-home-unavailable")
+        );
+        assert!(path.is_absolute());
+    }
+
+    use std::collections::HashSet;
 
     #[test]
     fn derive_mcp_path_from_override_uses_config_dir_for_custom_path() {
@@ -520,6 +674,49 @@ mod tests {
             serde_json::to_string(&sorted_a).unwrap(),
             serde_json::to_string(&sorted_b).unwrap(),
         );
+    }
+
+    #[test]
+    fn atomic_write_replaces_complete_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("settings.json");
+
+        atomic_write(&path, b"first").expect("first write");
+        atomic_write(&path, b"second-complete-value").expect("replacement write");
+
+        assert_eq!(
+            fs::read(&path).expect("read final"),
+            b"second-complete-value"
+        );
+    }
+
+    #[test]
+    fn atomic_temp_creation_is_collision_safe() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut paths = HashSet::new();
+        let mut files = Vec::new();
+
+        for _ in 0..32 {
+            let (path, file) =
+                create_atomic_temp_file(dir.path(), "same.json").expect("unique temp file");
+            assert!(paths.insert(path.clone()), "duplicate temp path: {path:?}");
+            files.push((path, file));
+        }
+
+        drop(files);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_creates_private_new_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("secret.json");
+        atomic_write(&path, b"secret").expect("write private file");
+
+        let mode = fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }
 

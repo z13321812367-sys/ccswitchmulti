@@ -400,6 +400,105 @@ impl ProxyService {
             .ok_or_else(|| format!("{app_type:?} 当前供应商不存在，无法接管 Live 配置"))
     }
 
+    fn with_recovery_errors(primary: impl Into<String>, recovery_errors: Vec<String>) -> String {
+        let primary = primary.into();
+        if recovery_errors.is_empty() {
+            primary
+        } else {
+            format!(
+                "{primary}; recovery also failed: {}",
+                recovery_errors.join(" | ")
+            )
+        }
+    }
+
+    async fn finalize_takeover_shutdown_if_unused(&self) -> Result<(), String> {
+        let any_enabled = self
+            .db
+            .is_live_takeover_active()
+            .await
+            .map_err(|e| format!("检查接管状态失败: {e}"))?;
+        if any_enabled {
+            return Ok(());
+        }
+
+        self.db
+            .set_live_takeover_active(false)
+            .await
+            .map_err(|e| format!("清除兼容接管标志失败: {e}"))?;
+        if self.is_running().await {
+            self.stop()
+                .await
+                .map_err(|e| format!("最后一个接管关闭后停止代理失败: {e}"))?;
+        }
+        Ok(())
+    }
+
+    async fn recover_after_takeover_failure(
+        &self,
+        primary: impl Into<String>,
+        started_proxy_before_takeover: bool,
+    ) -> String {
+        let mut recovery_errors = Vec::new();
+        match self.restore_live_configs().await {
+            Ok(()) => {
+                if let Err(e) = self.db.set_live_takeover_active(false).await {
+                    recovery_errors.push(format!("清除接管标志失败: {e}"));
+                }
+                if let Err(e) = self.db.delete_all_live_backups().await {
+                    recovery_errors.push(format!("清理 Live 备份失败: {e}"));
+                }
+            }
+            Err(e) => {
+                // 保留 marker + backup，供下次启动继续恢复。
+                recovery_errors.push(format!("恢复原始 Live 配置失败，已保留恢复库存: {e}"));
+            }
+        }
+        if started_proxy_before_takeover {
+            if let Err(e) = self.stop().await {
+                recovery_errors.push(format!("停止临时启动的代理失败: {e}"));
+            }
+        }
+        Self::with_recovery_errors(primary, recovery_errors)
+    }
+
+    async fn rollback_provider_switch_takeover(
+        &self,
+        app_type: &AppType,
+        previous_current: Option<&str>,
+        previous_enabled: bool,
+    ) -> Vec<String> {
+        let app_type_str = app_type.as_str();
+        let mut errors = Vec::new();
+
+        // set_current_provider with a non-existent empty id clears the DB is_current flag,
+        // which restores the legitimate previous None state as well as Some(id).
+        if let Err(e) = self
+            .db
+            .set_current_provider(app_type_str, previous_current.unwrap_or(""))
+        {
+            errors.push(format!("恢复 DB current provider 失败: {e}"));
+        }
+        if let Err(e) = crate::settings::set_current_provider(app_type, previous_current) {
+            errors.push(format!("恢复本地 current provider 失败: {e}"));
+        }
+
+        match self.db.get_proxy_config_for_app(app_type_str).await {
+            Ok(mut config) => {
+                config.enabled = previous_enabled;
+                if let Err(e) = self.db.update_proxy_config_for_app(config).await {
+                    errors.push(format!("恢复 {app_type_str} enabled 状态失败: {e}"));
+                }
+            }
+            Err(e) => errors.push(format!("读取 {app_type_str} rollback 配置失败: {e}")),
+        }
+
+        if let Err(e) = self.restore_live_config_for_app_inner(app_type).await {
+            errors.push(format!("恢复 {app_type_str} Live 配置失败: {e}"));
+        }
+        errors
+    }
+
     /// 设置 AppHandle（在应用初始化时调用）
     pub fn set_app_handle(&self, handle: tauri::AppHandle) {
         futures::executor::block_on(async {
@@ -460,8 +559,11 @@ impl ProxyService {
             .persist_ephemeral_listen_port_if_needed(&config, info.port)
             .await
         {
-            let _ = server.stop().await;
-            return Err(e);
+            let mut recovery_errors = Vec::new();
+            if let Err(stop_err) = server.stop().await {
+                recovery_errors.push(format!("持久化临时端口失败后停止代理失败: {stop_err}"));
+            }
+            return Err(Self::with_recovery_errors(e, recovery_errors));
         }
 
         // 5. 保存服务器实例
@@ -578,53 +680,39 @@ impl ProxyService {
         // 3. 在写入接管配置之前先落盘接管标志：
         //    这样即使在接管过程中断电/kill，下次启动也能检测到并自动恢复。
         if let Err(e) = self.db.set_live_takeover_active(true).await {
+            let mut recovery_errors = Vec::new();
             if let Err(clean_err) = self.db.delete_all_live_backups().await {
-                log::warn!("清理 Live 备份失败: {clean_err}");
+                recovery_errors.push(format!("清理 Live 备份失败: {clean_err}"));
             }
             if started_proxy_before_takeover {
-                let _ = self.stop().await;
+                if let Err(stop_err) = self.stop().await {
+                    recovery_errors.push(format!("停止临时启动的代理失败: {stop_err}"));
+                }
             }
-            return Err(format!("设置接管状态失败: {e}"));
+            return Err(Self::with_recovery_errors(
+                format!("设置接管状态失败: {e}"),
+                recovery_errors,
+            ));
         }
 
         // 4. 接管各应用的 Live 配置（写入代理地址，清空 Token）
         if let Err(e) = self.takeover_live_configs().await {
-            // 接管失败（可能是部分写入），尝试恢复原始配置；若恢复失败则保留标志与备份，等待下次启动自动恢复。
+            // 接管失败（可能是部分写入），统一恢复并把任何二次失败附加到主错误。
             log::error!("接管 Live 配置失败，尝试恢复原始配置: {e}");
-            match self.restore_live_configs().await {
-                Ok(()) => {
-                    let _ = self.db.set_live_takeover_active(false).await;
-                    let _ = self.db.delete_all_live_backups().await;
-                }
-                Err(restore_err) => {
-                    log::error!("恢复原始配置失败，将保留备份以便下次启动恢复: {restore_err}");
-                }
-            }
-            if started_proxy_before_takeover {
-                let _ = self.stop().await;
-            }
-            return Err(e);
+            return Err(self
+                .recover_after_takeover_failure(e, started_proxy_before_takeover)
+                .await);
         }
 
         // 5. 启动代理服务器
         match self.start().await {
             Ok(info) => Ok(info),
             Err(e) => {
-                // 启动失败，恢复原始配置
+                // 启动失败，统一恢复原始配置；回滚失败不能覆盖或隐藏主错误。
                 log::error!("代理启动失败，尝试恢复原始配置: {e}");
-                match self.restore_live_configs().await {
-                    Ok(()) => {
-                        let _ = self.db.set_live_takeover_active(false).await;
-                        let _ = self.db.delete_all_live_backups().await;
-                    }
-                    Err(restore_err) => {
-                        log::error!("恢复原始配置失败，将保留备份以便下次启动恢复: {restore_err}");
-                    }
-                }
-                if started_proxy_before_takeover {
-                    let _ = self.stop().await;
-                }
-                Err(e)
+                Err(self
+                    .recover_after_takeover_failure(e, started_proxy_before_takeover)
+                    .await)
             }
         }
     }
@@ -727,8 +815,13 @@ impl ProxyService {
 
                 // 4) 同步 Live Token 到数据库（仅当前 app）
                 if let Err(e) = self.sync_live_to_provider(&app).await {
-                    let _ = self.db.delete_live_backup(app_type_str).await;
-                    return Err(e);
+                    let recovery_errors = match self.db.delete_live_backup(app_type_str).await {
+                        Ok(()) => Vec::new(),
+                        Err(clean_err) => {
+                            vec![format!("清理 {app_type_str} Live 备份失败: {clean_err}")]
+                        }
+                    };
+                    return Err(Self::with_recovery_errors(e, recovery_errors));
                 }
             }
 
@@ -737,8 +830,16 @@ impl ProxyService {
                 log::error!("{app_type_str} 接管 Live 配置失败，尝试恢复: {e}");
                 match self.restore_live_config_for_app_inner(&app).await {
                     Ok(()) => {
-                        // 恢复成功才清理备份，避免失败场景下丢失唯一可回滚来源
-                        let _ = self.db.delete_live_backup(app_type_str).await;
+                        // 恢复成功才清理备份；清理失败也必须可观测。
+                        self.db
+                            .delete_live_backup(app_type_str)
+                            .await
+                            .map_err(|clean_err| {
+                                Self::with_recovery_errors(
+                                    e.clone(),
+                                    vec![format!("清理 {app_type_str} Live 备份失败: {clean_err}")],
+                                )
+                            })?;
                     }
                     Err(restore_err) => {
                         log::error!(
@@ -761,8 +862,10 @@ impl ProxyService {
                 .await
                 .map_err(|e| format!("设置 {app_type_str} enabled 状态失败: {e}"))?;
 
-            // 7) 兼容旧逻辑：写入 any-of 标志（失败不影响功能）
-            let _ = self.db.set_live_takeover_active(true).await;
+            // 7) 兼容旧逻辑：主真值是 per-app enabled；旧 marker 失败不阻断，但必须可观测。
+            if let Err(e) = self.db.set_live_takeover_active(true).await {
+                log::warn!("写入兼容接管标志失败（per-app enabled 已生效）: {e}");
+            }
 
             // 8) Warn if the current provider is official (risk of account ban via proxy)
             if let Ok(Some(current_id)) =
@@ -839,22 +942,7 @@ impl ProxyService {
 
         // 5) 若无其它接管，更新旧标志，并停止代理服务
         // 检查是否还有其它 app 的 enabled = true
-        let any_enabled = self
-            .db
-            .is_live_takeover_active()
-            .await
-            .map_err(|e| format!("检查接管状态失败: {e}"))?;
-
-        if !any_enabled {
-            let _ = self.db.set_live_takeover_active(false).await;
-
-            if self.is_running().await {
-                // 此时没有任何 app 处于接管状态，停止服务即可
-                let _ = self.stop().await;
-            }
-        }
-
-        Ok(())
+        self.finalize_takeover_shutdown_if_unused().await
     }
 
     /// 在 provider 切换锁内关闭单个 app 的代理接管。
@@ -915,21 +1003,7 @@ impl ProxyService {
             .await
             .map_err(|e| format!("娓呴櫎 {app_type_str} 鍋ュ悍鐘舵€佸け璐? {e}"))?;
 
-        let any_enabled = self
-            .db
-            .is_live_takeover_active()
-            .await
-            .map_err(|e| format!("妫€鏌ユ帴绠＄姸鎬佸け璐? {e}"))?;
-
-        if !any_enabled {
-            let _ = self.db.set_live_takeover_active(false).await;
-
-            if self.is_running().await {
-                let _ = self.stop().await;
-            }
-        }
-
-        Ok(())
+        self.finalize_takeover_shutdown_if_unused().await
     }
 
     /// 在 ProviderService 已经持有 app 切换锁时启用单应用接管，并切到指定 provider。
@@ -955,6 +1029,7 @@ impl ProxyService {
             .get_proxy_config_for_app(app_type_str)
             .await
             .map_err(|e| format!("读取 {app_type_str} 接管配置失败: {e}"))?;
+        let previous_enabled = current_config.enabled;
         let has_backup = self
             .db
             .get_live_backup(app_type_str)
@@ -972,8 +1047,13 @@ impl ProxyService {
             } else {
                 self.backup_live_config_strict(app_type).await?;
                 if let Err(e) = self.sync_live_to_provider(app_type).await {
-                    let _ = self.db.delete_live_backup(app_type_str).await;
-                    return Err(e);
+                    let recovery_errors = match self.db.delete_live_backup(app_type_str).await {
+                        Ok(()) => Vec::new(),
+                        Err(clean_err) => {
+                            vec![format!("清理 {app_type_str} Live 备份失败: {clean_err}")]
+                        }
+                    };
+                    return Err(Self::with_recovery_errors(e, recovery_errors));
                 }
             }
         }
@@ -985,12 +1065,14 @@ impl ProxyService {
             .map_err(|e| format!("更新本地当前 provider 失败: {e}"))?;
 
         if let Err(e) = self.takeover_live_config_strict(app_type).await {
-            if let Some(previous_id) = previous_current.as_deref() {
-                let _ = self.db.set_current_provider(app_type_str, previous_id);
-                let _ = crate::settings::set_current_provider(app_type, Some(previous_id));
-            }
-            let _ = self.restore_live_config_for_app_inner(app_type).await;
-            return Err(e);
+            let recovery_errors = self
+                .rollback_provider_switch_takeover(
+                    app_type,
+                    previous_current.as_deref(),
+                    previous_enabled,
+                )
+                .await;
+            return Err(Self::with_recovery_errors(e, recovery_errors));
         }
         let provider = self
             .db
@@ -1010,7 +1092,9 @@ impl ProxyService {
             .update_proxy_config_for_app(updated_config)
             .await
             .map_err(|e| format!("设置 {app_type_str} 接管状态失败: {e}"))?;
-        let _ = self.db.set_live_takeover_active(true).await;
+        if let Err(e) = self.db.set_live_takeover_active(true).await {
+            log::warn!("写入兼容接管标志失败（per-app enabled 已生效）: {e}");
+        }
 
         if let Some(server) = self.server.read().await.as_ref() {
             server
@@ -1022,16 +1106,14 @@ impl ProxyService {
             .verify_takeover_activation_after_write(app_type, provider_id)
             .await
         {
-            if let Some(previous_id) = previous_current.as_deref() {
-                let _ = self.db.set_current_provider(app_type_str, previous_id);
-                let _ = crate::settings::set_current_provider(app_type, Some(previous_id));
-            }
-            if let Ok(mut config) = self.db.get_proxy_config_for_app(app_type_str).await {
-                config.enabled = false;
-                let _ = self.db.update_proxy_config_for_app(config).await;
-            }
-            let _ = self.restore_live_config_for_app_inner(app_type).await;
-            return Err(e);
+            let recovery_errors = self
+                .rollback_provider_switch_takeover(
+                    app_type,
+                    previous_current.as_deref(),
+                    previous_enabled,
+                )
+                .await;
+            return Err(Self::with_recovery_errors(e, recovery_errors));
         }
 
         Ok(())
@@ -1372,10 +1454,16 @@ impl ProxyService {
 
         // 3. 更新 proxy_config 表中的 live_takeover_active 标志（兼容旧版）
         //    注意：保留 proxy_config.enabled 状态，下次启动时自动恢复
-        if let Ok(mut config) = self.db.get_proxy_config().await {
-            config.live_takeover_active = false;
-            let _ = self.db.update_proxy_config(config).await;
-        }
+        let mut config = self
+            .db
+            .get_proxy_config()
+            .await
+            .map_err(|e| format!("读取兼容代理状态失败: {e}"))?;
+        config.live_takeover_active = false;
+        self.db
+            .update_proxy_config(config)
+            .await
+            .map_err(|e| format!("清除兼容代理接管状态失败: {e}"))?;
 
         // 4. 删除备份（Live 配置已恢复，备份不再需要）
         self.db
@@ -1677,7 +1765,9 @@ impl ProxyService {
                             ClaudeTakeoverAuthPolicy::PreserveExistingOrAuthToken,
                         );
                     }
-                    let _ = self.write_claude_live(&live_config);
+                    if let Err(e) = self.write_claude_live(&live_config) {
+                        log::warn!("best-effort 更新 Claude Live 接管配置失败: {e}");
+                    }
                 }
             }
             AppType::Codex => {
@@ -1706,10 +1796,12 @@ impl ProxyService {
                         codex_provider.as_ref(),
                     );
 
-                    let _ = self.write_codex_takeover_live_for_provider(
+                    if let Err(e) = self.write_codex_takeover_live_for_provider(
                         &live_config,
                         codex_provider.as_ref(),
-                    );
+                    ) {
+                        log::warn!("best-effort 更新 Codex Live 接管配置失败: {e}");
+                    }
                 }
             }
             AppType::Gemini => {
@@ -1724,7 +1816,9 @@ impl ProxyService {
                         });
                     }
 
-                    let _ = self.write_gemini_live(&live_config);
+                    if let Err(e) = self.write_gemini_live(&live_config) {
+                        log::warn!("best-effort 更新 Gemini Live 接管配置失败: {e}");
+                    }
                 }
             }
             _ => {}
@@ -2964,7 +3058,8 @@ impl ProxyService {
 
                 let auth_path = get_codex_auth_path();
                 if auth.as_object().is_some_and(|obj| obj.is_empty()) {
-                    let _ = crate::config::delete_file(&auth_path);
+                    crate::config::delete_file(&auth_path)
+                        .map_err(|e| format!("删除 Codex auth 失败: {e}"))?;
                     let config_path = get_codex_config_path();
                     crate::config::write_text_file(&config_path, cfg)
                         .map_err(|e| format!("写入 Codex config 失败: {e}"))?;
@@ -3081,8 +3176,11 @@ impl ProxyService {
                 .persist_ephemeral_listen_port_if_needed(&new_config, info.port)
                 .await
             {
-                let _ = new_server.stop().await;
-                return Err(e);
+                let mut recovery_errors = Vec::new();
+                if let Err(stop_err) = new_server.stop().await {
+                    recovery_errors.push(format!("持久化重启端口失败后停止新代理失败: {stop_err}"));
+                }
+                return Err(Self::with_recovery_errors(e, recovery_errors));
             }
 
             *server_guard = Some(new_server);

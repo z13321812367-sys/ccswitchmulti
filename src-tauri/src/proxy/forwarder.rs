@@ -19,6 +19,7 @@ use super::{
     thinking_rectifier::{
         normalize_thinking_type, rectify_anthropic_request, should_rectify_thinking_signature,
     },
+    timeout_policy::{ForwarderTimeoutPolicy, STREAMING_REQUEST_SAFETY_TIMEOUT},
     types::{CopilotOptimizerConfig, OptimizerConfig, ProxyStatus, RectifierConfig},
     ProxyError,
 };
@@ -128,10 +129,9 @@ pub struct RequestForwarder {
     /// 去掉 `x-openai-internal-codex-responses-lite`，过期后重新带头探测，避免每次
     /// 请求都先失败一次，也避免永久禁用未来可能支持 Lite 的上游。
     codex_responses_lite_fallbacks: Arc<RwLock<HashMap<String, Instant>>>,
-    /// 非流式请求超时（秒）
-    non_streaming_timeout: std::time::Duration,
-    /// 流式请求响应头等待超时（秒）
-    streaming_first_byte_timeout: std::time::Duration,
+    /// 显式区分用户/故障转移 timeout 与传输层安全上限，禁止再用 Duration::ZERO
+    /// 同时表达“禁用用户 timeout”和“使用 600s transport fallback”两种不同语义。
+    timeout_policy: ForwarderTimeoutPolicy,
     /// 单个客户端请求最多尝试的 provider 数。
     ///
     /// 由 `AppProxyConfig.max_retries` (UI: "请求失败时的重试次数, 0-10") 派生：
@@ -224,8 +224,8 @@ impl RequestForwarder {
             optimizer_config,
             copilot_optimizer_config,
             codex_responses_lite_fallbacks: Arc::new(RwLock::new(HashMap::new())),
-            non_streaming_timeout: std::time::Duration::from_secs(non_streaming_timeout),
-            streaming_first_byte_timeout: std::time::Duration::from_secs(
+            timeout_policy: ForwarderTimeoutPolicy::from_seconds(
+                non_streaming_timeout,
                 streaming_first_byte_timeout,
             ),
             max_attempts,
@@ -2213,7 +2213,10 @@ impl RequestForwarder {
                 );
             }
         }
-        log::info!("[{tag}] >>> 请求 URL: {url} (model={request_model})");
+        log::info!(
+            "[{tag}] >>> 请求 URL: {} (model={request_model})",
+            crate::diagnostics::redact_url_for_log(&url)
+        );
         if log::log_enabled!(log::Level::Debug) {
             log::debug!(
                 "[{tag}] >>> 请求体摘要: bytes={}, body_hash={}",
@@ -2222,11 +2225,12 @@ impl RequestForwarder {
             );
         }
 
-        // 确定超时
-        let timeout = if self.non_streaming_timeout.is_zero() {
-            std::time::Duration::from_secs(600) // 默认 600 秒
+        // 传输层安全上限与用户/故障转移 timeout 是两种独立语义。
+        // 即使用户配置 0（禁用故障转移 timeout），等待上游响应头也不能无限挂起。
+        let transport_header_timeout = if request_is_streaming {
+            self.timeout_policy.streaming_header_transport_timeout()
         } else {
-            self.non_streaming_timeout
+            self.timeout_policy.non_streaming_transport_timeout()
         };
 
         // 获取全局代理 URL
@@ -2262,7 +2266,23 @@ impl RequestForwarder {
                     ("request_bytes", request_bytes_len.to_string()),
                     ("header_count", ordered_headers.len().to_string()),
                     ("streaming", request_is_streaming.to_string()),
-                    ("timeout_ms", timeout.as_millis().to_string()),
+                    (
+                        "transport_header_timeout_ms",
+                        transport_header_timeout.as_millis().to_string(),
+                    ),
+                    (
+                        "failover_timeout_enabled",
+                        (if request_is_streaming {
+                            self.timeout_policy
+                                .streaming_first_byte_failover_timeout()
+                                .is_some()
+                        } else {
+                            self.timeout_policy
+                                .non_streaming_failover_timeout()
+                                .is_some()
+                        })
+                        .to_string(),
+                    ),
                     (
                         "uses_upstream_proxy",
                         upstream_proxy_url.is_some().to_string(),
@@ -2285,10 +2305,9 @@ impl RequestForwarder {
                     headers,
                     extensions,
                     body_bytes,
-                    timeout,
+                    transport_header_timeout,
                     request_is_streaming,
-                    self.non_streaming_timeout,
-                    self.streaming_first_byte_timeout,
+                    self.timeout_policy,
                     is_socks_proxy,
                     preserve_exact_header_case,
                     upstream_proxy_url.as_deref(),
@@ -2510,13 +2529,12 @@ impl RequestForwarder {
             return self.prime_streaming_response(response).await;
         }
 
-        if self.non_streaming_timeout.is_zero() {
+        let Some(body_timeout) = self.timeout_policy.non_streaming_failover_timeout() else {
             return Ok(response);
-        }
+        };
 
         let status = response.status();
         let headers = response.headers().clone();
-        let body_timeout = self.non_streaming_timeout;
         let body = tokio::time::timeout(body_timeout, response.bytes())
             .await
             .map_err(|_| {
@@ -2533,13 +2551,12 @@ impl RequestForwarder {
         &self,
         response: ProxyResponse,
     ) -> Result<ProxyResponse, ProxyError> {
-        if self.streaming_first_byte_timeout.is_zero() {
+        let Some(timeout) = self.timeout_policy.streaming_first_byte_failover_timeout() else {
             return Ok(response);
-        }
+        };
 
         let status = response.status();
         let headers = response.headers().clone();
-        let timeout = self.streaming_first_byte_timeout;
         let mut stream = Box::pin(response.bytes_stream());
 
         let first = tokio::time::timeout(timeout, stream.next())
@@ -3190,10 +3207,9 @@ async fn send_forwarder_upstream_request(
     headers: http::HeaderMap,
     extensions: Extensions,
     body_bytes: Vec<u8>,
-    timeout: std::time::Duration,
+    transport_header_timeout: std::time::Duration,
     request_is_streaming: bool,
-    non_streaming_timeout: std::time::Duration,
-    streaming_first_byte_timeout: std::time::Duration,
+    timeout_policy: ForwarderTimeoutPolicy,
     is_socks_proxy: bool,
     preserve_exact_header_case: bool,
     upstream_proxy_url: Option<&str>,
@@ -3205,26 +3221,23 @@ async fn send_forwarder_upstream_request(
         let client = super::http_client::get();
         let mut request = client.request(method.clone(), &url);
         if request_is_streaming {
-            request = request.timeout(std::time::Duration::from_secs(24 * 60 * 60));
-        } else if !non_streaming_timeout.is_zero() {
-            request = request.timeout(non_streaming_timeout);
+            request = request.timeout(STREAMING_REQUEST_SAFETY_TIMEOUT);
+        } else {
+            // Explicit per-request value keeps Reqwest aligned with the Hyper path even when
+            // the user disables failover timeouts. Do not depend on the shared client's default.
+            request = request.timeout(timeout_policy.non_streaming_transport_timeout());
         }
         for (key, value) in &headers {
             request = request.header(key, value);
         }
         let send = request.body(body_bytes).send();
         let send_result = if request_is_streaming {
-            let header_timeout = if streaming_first_byte_timeout.is_zero() {
-                timeout
-            } else {
-                streaming_first_byte_timeout
-            };
-            match tokio::time::timeout(header_timeout, send).await {
+            match tokio::time::timeout(transport_header_timeout, send).await {
                 Ok(result) => result,
                 Err(_) => {
                     return Err(ProxyError::Timeout(format!(
-                        "流式响应首包超时: {}s（上游未返回响应头）",
-                        header_timeout.as_secs()
+                        "流式响应头等待超时: {}s（上游未返回响应头）",
+                        transport_header_timeout.as_secs()
                     )));
                 }
             }
@@ -3245,7 +3258,7 @@ async fn send_forwarder_upstream_request(
         headers,
         extensions,
         body_bytes,
-        timeout,
+        transport_header_timeout,
         upstream_proxy_url,
     )
     .await
@@ -3842,8 +3855,10 @@ mod tests {
             optimizer_config: OptimizerConfig::default(),
             copilot_optimizer_config: CopilotOptimizerConfig::default(),
             codex_responses_lite_fallbacks: Arc::new(RwLock::new(HashMap::new())),
-            non_streaming_timeout,
-            streaming_first_byte_timeout,
+            timeout_policy: ForwarderTimeoutPolicy::from_seconds(
+                non_streaming_timeout.as_secs(),
+                streaming_first_byte_timeout.as_secs(),
+            ),
             max_attempts: 1,
         }
     }
