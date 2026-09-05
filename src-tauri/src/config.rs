@@ -28,7 +28,14 @@ fn resolve_home_dir(
     detected: Option<PathBuf>,
 ) -> Result<PathBuf, String> {
     if let Some(home) = test_override.map(str::trim).filter(|home| !home.is_empty()) {
-        return Ok(PathBuf::from(home));
+        let path = PathBuf::from(home);
+        if path.is_absolute() {
+            return Ok(path);
+        }
+        return Err(format!(
+            "CC_SWITCH_TEST_HOME 必须是绝对路径，收到: {}",
+            path.display()
+        ));
     }
 
     match detected {
@@ -451,12 +458,20 @@ mod tests {
     }
 
     #[test]
-    fn explicit_test_home_override_remains_supported() {
+    fn explicit_absolute_test_home_override_remains_supported() {
+        let override_home = std::env::temp_dir().join("cc-switch-test-home");
+        let override_text = override_home.to_string_lossy().to_string();
         assert_eq!(
-            resolve_home_dir(Some("test-home"), None).unwrap(),
-            PathBuf::from("test-home")
+            resolve_home_dir(Some(&override_text), None).unwrap(),
+            override_home
         );
     }
+
+    #[test]
+    fn explicit_relative_test_home_override_is_rejected() {
+        assert!(resolve_home_dir(Some("relative-test-home"), None).is_err());
+    }
+
     use std::collections::HashSet;
 
     #[test]

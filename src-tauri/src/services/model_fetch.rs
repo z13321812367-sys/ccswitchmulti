@@ -59,6 +59,35 @@ struct ModelEntry {
 }
 
 const FETCH_TIMEOUT_SECS: u64 = 15;
+const MAX_CANDIDATE_FAILURE_DETAILS: usize = 8;
+
+fn should_try_next_models_candidate(status: StatusCode) -> bool {
+    status == StatusCode::NOT_FOUND
+        || status == StatusCode::METHOD_NOT_ALLOWED
+        || status.is_server_error()
+}
+
+fn request_error_kind(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_request() {
+        "request"
+    } else if error.is_body() {
+        "body"
+    } else if error.is_decode() {
+        "decode"
+    } else {
+        "transport"
+    }
+}
+
+fn record_candidate_failure(failures: &mut Vec<String>, detail: String) {
+    if failures.len() < MAX_CANDIDATE_FAILURE_DETAILS {
+        failures.push(detail);
+    }
+}
 
 /// 智谱官方模型概览 markdown。
 ///
@@ -178,9 +207,10 @@ pub async fn fetch_models(options: FetchModelsRequest<'_>) -> Result<Vec<Fetched
         options.models_url_override,
     )?;
     let client = crate::proxy::http_client::get();
-    let mut last_err: Option<String> = None;
+    let mut candidate_failures: Vec<String> = Vec::new();
 
-    for url in &candidates {
+    for (index, url) in candidates.iter().enumerate() {
+        let ordinal = index + 1;
         log::debug!(
             "[ModelFetch] Trying endpoint: {}",
             crate::diagnostics::redact_url_for_log(url)
@@ -196,22 +226,57 @@ pub async fn fetch_models(options: FetchModelsRequest<'_>) -> Result<Vec<Fetched
         }
         let response = match request_builder.send().await {
             Ok(r) => r,
-            Err(e) => {
-                return Err(format!("Request failed: {e}"));
+            Err(error) => {
+                let kind = request_error_kind(&error);
+                log::debug!(
+                    "[ModelFetch] candidate {ordinal}/{} transport failure: {kind}",
+                    candidates.len()
+                );
+                record_candidate_failure(
+                    &mut candidate_failures,
+                    format!("candidate {ordinal}: transport {kind}"),
+                );
+                continue;
             }
         };
 
         let status = response.status();
 
         if status.is_success() {
-            let resp: ModelsResponse = response
-                .json()
-                .await
-                .map_err(|e| format!("Failed to parse response: {e}"))?;
+            let body = match response.bytes().await {
+                Ok(body) => body,
+                Err(error) => {
+                    let kind = request_error_kind(&error);
+                    record_candidate_failure(
+                        &mut candidate_failures,
+                        format!("candidate {ordinal}: response body {kind}"),
+                    );
+                    continue;
+                }
+            };
+            let resp: ModelsResponse = match serde_json::from_slice(&body) {
+                Ok(resp) => resp,
+                Err(error) => {
+                    log::debug!(
+                        "[ModelFetch] candidate {ordinal}/{} returned invalid JSON: {error}",
+                        candidates.len()
+                    );
+                    record_candidate_failure(
+                        &mut candidate_failures,
+                        format!("candidate {ordinal}: invalid JSON ({error})"),
+                    );
+                    continue;
+                }
+            };
+            let Some(data) = resp.data else {
+                record_candidate_failure(
+                    &mut candidate_failures,
+                    format!("candidate {ordinal}: response missing data array"),
+                );
+                continue;
+            };
 
-            let mut models: Vec<FetchedModel> = resp
-                .data
-                .unwrap_or_default()
+            let mut models: Vec<FetchedModel> = data
                 .into_iter()
                 .map(|m| FetchedModel {
                     context_window: extract_context_window(&m.extra),
@@ -225,9 +290,11 @@ pub async fn fetch_models(options: FetchModelsRequest<'_>) -> Result<Vec<Fetched
             return Ok(models);
         }
 
-        if status == StatusCode::NOT_FOUND || status == StatusCode::METHOD_NOT_ALLOWED {
-            let body = truncate_body(response.text().await.unwrap_or_default());
-            last_err = Some(format!("HTTP {status}: {body}"));
+        if should_try_next_models_candidate(status) {
+            record_candidate_failure(
+                &mut candidate_failures,
+                format!("candidate {ordinal}: HTTP {status}"),
+            );
             continue;
         }
 
@@ -235,10 +302,12 @@ pub async fn fetch_models(options: FetchModelsRequest<'_>) -> Result<Vec<Fetched
         return Err(format!("HTTP {status}: {body}"));
     }
 
-    Err(format!(
-        "All candidates failed: {}",
-        last_err.unwrap_or_else(|| "no candidates".to_string())
-    ))
+    let details = if candidate_failures.is_empty() {
+        "no candidate diagnostics".to_string()
+    } else {
+        candidate_failures.join("; ")
+    };
+    Err(format!("All model endpoint candidates failed: {details}"))
 }
 
 /// 构造「模型列表端点」的候选 URL 列表
@@ -895,6 +964,33 @@ fn ends_with_version_segment(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn candidate_retry_policy_continues_discovery_only_for_compatible_failures() {
+        assert!(should_try_next_models_candidate(StatusCode::NOT_FOUND));
+        assert!(should_try_next_models_candidate(
+            StatusCode::METHOD_NOT_ALLOWED
+        ));
+        assert!(should_try_next_models_candidate(
+            StatusCode::INTERNAL_SERVER_ERROR
+        ));
+        assert!(should_try_next_models_candidate(StatusCode::BAD_GATEWAY));
+        assert!(!should_try_next_models_candidate(StatusCode::BAD_REQUEST));
+        assert!(!should_try_next_models_candidate(StatusCode::UNAUTHORIZED));
+        assert!(!should_try_next_models_candidate(StatusCode::FORBIDDEN));
+        assert!(!should_try_next_models_candidate(
+            StatusCode::TOO_MANY_REQUESTS
+        ));
+    }
+
+    #[test]
+    fn candidate_failure_details_are_bounded() {
+        let mut failures = Vec::new();
+        for index in 0..(MAX_CANDIDATE_FAILURE_DETAILS + 3) {
+            record_candidate_failure(&mut failures, format!("candidate {index}"));
+        }
+        assert_eq!(failures.len(), MAX_CANDIDATE_FAILURE_DETAILS);
+    }
 
     #[test]
     fn test_candidates_plain_root() {
