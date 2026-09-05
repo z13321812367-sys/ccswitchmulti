@@ -66,6 +66,19 @@ jobs:
           path.write_text(text.replace(old, new, 1), encoding="utf-8")
           PY
 
+      - name: Make Skill persistence guard reject only infallible wrappers
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("scripts/check_rust_failure_boundaries.py")
+          text = path.read_text(encoding="utf-8")
+          old = r're.compile(r"(?:get_app_config_dir|crate::config::get_home_dir)\(\)")'
+          new = r're.compile(r"\bget_app_config_dir\(\)|crate::config::get_home_dir\(\)")'
+          if text.count(old) != 1:
+              raise SystemExit(f"Skill guard matcher count={text.count(old)}")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+
       - name: Install Linux system dependencies
         run: |
           sudo apt-get update
