@@ -374,17 +374,18 @@ fn parse_branch_from_source_url(source_url: Option<&str>) -> Option<String> {
 
 /// 获取 `~/.agents/skills/` 目录（存在时返回）
 fn get_agents_skills_dir() -> Option<PathBuf> {
-    dirs::home_dir()
+    crate::config::try_get_home_dir()
+        .ok()
         .map(|h| h.join(".agents").join("skills"))
         .filter(|p| p.exists())
 }
 
 /// 解析 `~/.agents/.skill-lock.json`，返回 skill_name -> 仓库信息
 fn parse_agents_lock() -> HashMap<String, LockRepoInfo> {
-    let path = match dirs::home_dir() {
-        Some(h) => h.join(".agents").join(".skill-lock.json"),
-        None => {
-            log::warn!("无法获取 HOME 目录，跳过解析 agents lock 文件");
+    let path = match crate::config::try_get_home_dir() {
+        Ok(home) => home.join(".agents").join(".skill-lock.json"),
+        Err(err) => {
+            log::warn!("无法获取 HOME 目录，跳过解析 agents lock 文件: {err}");
             return HashMap::new();
         }
     };
@@ -1159,7 +1160,7 @@ impl SkillService {
         let new_dir = match target {
             SkillStorageLocation::CcSwitch => get_app_config_dir().join("skills"),
             SkillStorageLocation::Unified => {
-                let home = dirs::home_dir().context("Cannot determine home directory")?;
+                let home = crate::config::try_get_home_dir().map_err(|err| anyhow!(err))?;
                 home.join(".agents").join("skills")
             }
         };

@@ -55,12 +55,37 @@ fn resolve_home_dir(
 /// 用户主目录是数据库、设置和多个 CLI 配置路径的共同根。无法解析时必须 fail closed：
 /// 旧行为回退到 `.` 会根据启动方式把同一用户的数据写进任意 CWD，表现为供应商/设置丢失，
 /// 也可能把凭据写进意外目录。
-pub fn get_home_dir() -> PathBuf {
+pub fn try_get_home_dir() -> Result<PathBuf, String> {
     let test_override = std::env::var("CC_SWITCH_TEST_HOME").ok();
-    resolve_home_dir(test_override.as_deref(), dirs::home_dir()).unwrap_or_else(|err| {
+    resolve_home_dir(test_override.as_deref(), dirs::home_dir())
+}
+
+pub fn get_home_dir() -> PathBuf {
+    try_get_home_dir().unwrap_or_else(|err| {
         log::error!("{err}");
         panic!("{err}");
     })
+}
+
+/// Expand `~`, `~/...`, and `~\...` through the same validated HOME boundary.
+/// Missing or malformed HOME is an error; callers must not preserve a literal relative `~` path.
+pub fn expand_home_path(raw: &str) -> Result<PathBuf, String> {
+    if raw == "~" {
+        return try_get_home_dir();
+    }
+    if let Some(stripped) = raw.strip_prefix("~/") {
+        return Ok(try_get_home_dir()?.join(stripped));
+    }
+    if let Some(stripped) = raw.strip_prefix("~\\") {
+        return Ok(try_get_home_dir()?.join(stripped));
+    }
+    Ok(PathBuf::from(raw))
+}
+
+/// Last-resort crash/exit observability directory when HOME itself is unavailable.
+/// This must never be used for the database, settings, provider config, or other user state.
+pub fn emergency_observability_dir() -> PathBuf {
+    std::env::temp_dir().join("cc-switch-home-unavailable")
 }
 
 /// 获取 Claude Code 配置目录路径
@@ -470,6 +495,16 @@ mod tests {
     #[test]
     fn explicit_relative_test_home_override_is_rejected() {
         assert!(resolve_home_dir(Some("relative-test-home"), None).is_err());
+    }
+
+    #[test]
+    fn emergency_observability_dir_is_named_temp_fallback() {
+        let path = emergency_observability_dir();
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("cc-switch-home-unavailable")
+        );
+        assert!(path.is_absolute());
     }
 
     use std::collections::HashSet;

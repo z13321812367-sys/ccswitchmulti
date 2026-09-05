@@ -15,13 +15,18 @@ const PROVIDER_ID: &str = "opencode";
 /// `~/.local/share/opencode/`.
 pub(crate) fn get_opencode_base_dir() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-        if !xdg.is_empty() {
-            return PathBuf::from(xdg).join("opencode");
+        let xdg = PathBuf::from(xdg.trim());
+        if xdg.is_absolute() {
+            return xdg.join("opencode");
+        }
+        if !xdg.as_os_str().is_empty() {
+            log::warn!(
+                "Ignoring relative XDG_DATA_HOME for OpenCode discovery: {}",
+                xdg.display()
+            );
         }
     }
-    dirs::home_dir()
-        .map(|h| h.join(".local/share/opencode"))
-        .unwrap_or_else(|| PathBuf::from(".local/share/opencode"))
+    crate::config::get_home_dir().join(".local/share/opencode")
 }
 
 /// Return the OpenCode JSON storage directory (legacy flat-file layout).
