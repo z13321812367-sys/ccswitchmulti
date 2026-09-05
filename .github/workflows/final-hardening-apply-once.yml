@@ -65,13 +65,13 @@ jobs:
               1,
           )
 
-          stale_assert = '''                assert!(msg.contains("<html>\\\\nblocked</html>"), "{msg}");
-'''
-          secure_assert = '''                assert!(msg.contains("body-shape: markup"), "{msg}");
-                assert!(msg.contains("body: bytes=21, sha256="), "{msg}");
-                assert!(!msg.contains("<html>"), "{msg}");
-                assert!(!msg.contains("blocked"), "{msg}");
-'''
+          stale_assert = r'                assert!(msg.contains("<html>\\nblocked</html>"), "{msg}");' + "\n"
+          secure_assert = (
+              '                assert!(msg.contains("body-shape: markup"), "{msg}");\n'
+              '                assert!(msg.contains("body: bytes=21, sha256="), "{msg}");\n'
+              '                assert!(!msg.contains("<html>"), "{msg}");\n'
+              '                assert!(!msg.contains("blocked"), "{msg}");\n'
+          )
           if text.count(stale_assert) != 1:
               raise SystemExit(
                   f"expected one stale raw-body diagnostics assertion, found {text.count(stale_assert)}"
@@ -80,7 +80,7 @@ jobs:
 
           if "body_snippet" in text:
               raise SystemExit("body_snippet identifier remains after exact removal")
-          if 'msg.contains("<html>\\\\nblocked</html>")' in text:
+          if stale_assert in text:
               raise SystemExit("raw upstream body expectation remains in diagnostics test")
           path.write_text(text, encoding="utf-8")
           print("normalized secure body diagnostics implementation and regression expectations")
