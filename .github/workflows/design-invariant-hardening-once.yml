@@ -21,6 +21,28 @@ jobs:
           ref: fix/global-hardening-20260904
           fetch-depth: 0
 
+      - name: Normalize design driver guard insertion
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("scripts/apply_design_invariant_hardening_once.py")
+          text = path.read_text(encoding="utf-8")
+          start = text.index("old_checks_tail = '''")
+          end = text.index("extra_guard_anchor = '''", start)
+          replacement = '''checks_marker = "]\\n\\nfailures = []"
+          if text.count(checks_marker) != 1:
+              raise SystemExit(f"policy FILE_CHECKS terminator count={text.count(checks_marker)}")
+          extra_checks = r'''\n    ("services/model_fetch.rs", re.compile(r'HTTP \\{status\\}: \\{body\\}'), "model-discovery errors must not expose raw upstream response bodies"),
+              ("app_store.rs", re.compile(r"fn read_override_from_store\\([^)]*\\) -> Option<PathBuf>"), "Store read failure must not collapse into an absent app_config_dir override"),
+              ("app_store.rs", re.compile(r"fn resolve_path\\(raw: &str\\) -> PathBuf"), "app_config_dir parsing must be fallible and reject relative persistence roots"),
+              ("settings.rs", re.compile(r"fn settings_path\\(\\) -> Option<PathBuf>"), "settings path resolution must expose HOME failures instead of a fake Option contract"),'''
+          text = text.replace(checks_marker, extra_checks + "\\n]\\n\\nfailures = []", 1)
+
+          '''
+          text = text[:start] + replacement + text[end:]
+          path.write_text(text, encoding="utf-8")
+          PY
+
       - name: Apply design invariant hardening
         run: python scripts/apply_design_invariant_hardening_once.py
 
