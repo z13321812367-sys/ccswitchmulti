@@ -1,4 +1,4 @@
-name: Home Model Hardening Once
+name: Home Boundary Cleanup Once
 
 on:
   push:
@@ -20,251 +20,317 @@ jobs:
           ref: fix/global-hardening-20260904
           fetch-depth: 0
 
-      - name: Apply structure-aware HOME and model candidate fixes
+      - name: Route all HOME resolution through config boundary
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
           from pathlib import Path
 
-          config_path = Path("src-tauri/src/config.rs")
-          config = config_path.read_text(encoding="utf-8")
+          def replace_exact(path_str: str, old: str, new: str, expected: int = 1) -> None:
+              path = Path(path_str)
+              text = path.read_text(encoding="utf-8")
+              count = text.count(old)
+              if count != expected:
+                  raise SystemExit(f"{path_str}: expected {expected} matches, found {count}")
+              path.write_text(text.replace(old, new, expected), encoding="utf-8")
 
-          old_return = "        return Ok(PathBuf::from(home));"
-          new_return = """        let path = PathBuf::from(home);
-          if path.is_absolute() {
-              return Ok(path);
+          replace_exact(
+              "src-tauri/src/config.rs",
+              '''pub fn get_home_dir() -> PathBuf {
+              let test_override = std::env::var("CC_SWITCH_TEST_HOME").ok();
+              resolve_home_dir(test_override.as_deref(), dirs::home_dir()).unwrap_or_else(|err| {
+                  log::error!("{err}");
+                  panic!("{err}");
+              })
           }
-          return Err(format!(
-              "CC_SWITCH_TEST_HOME 必须是绝对路径，收到: {}",
-              path.display()
-          ));"""
-          if config.count(old_return) != 1:
-              raise SystemExit(f"expected one unvalidated test-home return, found {config.count(old_return)}")
-          config = config.replace(old_return, new_return, 1)
-
-          test_start_marker = "    #[test]\n    fn explicit_test_home_override_remains_supported() {"
-          if config.count(test_start_marker) != 1:
-              raise SystemExit("expected one legacy explicit test-home test")
-          test_start = config.index(test_start_marker)
-          test_end = config.index("\n\n    #[test]", test_start + len(test_start_marker))
-          captured = config[test_start:test_end]
-          hashset_import = "    use std::collections::HashSet;"
-          if captured.count(hashset_import) != 1:
-              raise SystemExit(
-                  f"expected HashSet import inside replaced HOME-test segment, found {captured.count(hashset_import)}"
-              )
-          replacement_tests = """    #[test]
-          fn explicit_absolute_test_home_override_remains_supported() {
-              let override_home = std::env::temp_dir().join("cc-switch-test-home");
-              let override_text = override_home.to_string_lossy().to_string();
-              assert_eq!(
-                  resolve_home_dir(Some(&override_text), None).unwrap(),
-                  override_home
-              );
+          ''',
+              '''pub fn try_get_home_dir() -> Result<PathBuf, String> {
+              let test_override = std::env::var("CC_SWITCH_TEST_HOME").ok();
+              resolve_home_dir(test_override.as_deref(), dirs::home_dir())
           }
 
-          #[test]
-          fn explicit_relative_test_home_override_is_rejected() {
-              assert!(resolve_home_dir(Some("relative-test-home"), None).is_err());
+          pub fn get_home_dir() -> PathBuf {
+              try_get_home_dir().unwrap_or_else(|err| {
+                  log::error!("{err}");
+                  panic!("{err}");
+              })
           }
 
-          use std::collections::HashSet;"""
-          config = config[:test_start] + replacement_tests + config[test_end:]
-          config_path.write_text(config, encoding="utf-8")
-
-          model_path = Path("src-tauri/src/services/model_fetch.rs")
-          model = model_path.read_text(encoding="utf-8")
-
-          timeout_marker = "const FETCH_TIMEOUT_SECS: u64 = 15;\n"
-          helpers = """const MAX_CANDIDATE_FAILURE_DETAILS: usize = 8;
-
-          fn should_try_next_models_candidate(status: StatusCode) -> bool {
-              status == StatusCode::NOT_FOUND
-                  || status == StatusCode::METHOD_NOT_ALLOWED
-                  || status.is_server_error()
+          /// 崩溃/退出诊断在 HOME 本身不可用时的最后观测目录。
+          /// 该目录只允许用于故障证据，绝不能作为数据库、配置或用户数据的持久化根目录。
+          pub fn emergency_observability_dir() -> PathBuf {
+              std::env::temp_dir().join("cc-switch-home-unavailable")
           }
-
-          fn request_error_kind(error: &reqwest::Error) -> &'static str {
-              if error.is_timeout() {
-                  "timeout"
-              } else if error.is_connect() {
-                  "connect"
-              } else if error.is_request() {
-                  "request"
-              } else if error.is_body() {
-                  "body"
-              } else if error.is_decode() {
-                  "decode"
-              } else {
-                  "transport"
-              }
-          }
-
-          fn record_candidate_failure(failures: &mut Vec<String>, detail: String) {
-              if failures.len() < MAX_CANDIDATE_FAILURE_DETAILS {
-                  failures.push(detail);
-              }
-          }
-
-          """
-          if model.count(timeout_marker) != 1:
-              raise SystemExit(f"expected one fetch-timeout marker, found {model.count(timeout_marker)}")
-          model = model.replace(timeout_marker, timeout_marker + helpers, 1)
-
-          old_accumulator = "    let mut last_err: Option<String> = None;\n"
-          if model.count(old_accumulator) != 1:
-              raise SystemExit("expected one legacy last_err accumulator")
-          model = model.replace(
-              old_accumulator,
-              "    let mut candidate_failures: Vec<String> = Vec::new();\n",
-              1,
+          ''',
           )
 
-          old_loop = "    for url in &candidates {\n"
-          if model.count(old_loop) != 1:
-              raise SystemExit("expected one model candidate loop")
-          model = model.replace(
-              old_loop,
-              "    for (index, url) in candidates.iter().enumerate() {\n        let ordinal = index + 1;\n",
-              1,
+          replace_exact(
+              "src-tauri/src/config.rs",
+              '''    #[test]
+              fn explicit_relative_test_home_override_is_rejected() {
+                  assert!(resolve_home_dir(Some("relative-test-home"), None).is_err());
+              }
+          ''',
+              '''    #[test]
+              fn explicit_relative_test_home_override_is_rejected() {
+                  assert!(resolve_home_dir(Some("relative-test-home"), None).is_err());
+              }
+
+              #[test]
+              fn emergency_observability_dir_is_named_temp_fallback() {
+                  let path = emergency_observability_dir();
+                  assert_eq!(
+                      path.file_name().and_then(|name| name.to_str()),
+                      Some("cc-switch-home-unavailable")
+                  );
+                  assert!(path.is_absolute());
+              }
+          ''',
           )
 
-          send_start_marker = "        let response = match request_builder.send().await {"
-          send_end_marker = "\n\n        let status = response.status();"
-          if model.count(send_start_marker) != 1:
-              raise SystemExit("expected one request send block")
-          send_start = model.index(send_start_marker)
-          send_end = model.index(send_end_marker, send_start)
-          new_send = """        let response = match request_builder.send().await {
-              Ok(r) => r,
-              Err(error) => {
-                  let kind = request_error_kind(&error);
-                  log::debug!(
-                      "[ModelFetch] candidate {ordinal}/{} transport failure: {kind}",
-                      candidates.len()
-                  );
-                  record_candidate_failure(
-                      &mut candidate_failures,
-                      format!("candidate {ordinal}: transport {kind}"),
-                  );
-                  continue;
-              }
-          };"""
-          model = model[:send_start] + new_send + model[send_end:]
-
-          success_start_marker = "        if status.is_success() {"
-          terminal_marker = "\n\n        let body = truncate_body(response.text().await.unwrap_or_default());\n        return Err(format!(\"HTTP {status}: {body}\"));"
-          if model.count(success_start_marker) != 1 or model.count(terminal_marker) != 1:
-              raise SystemExit("model success/terminal status boundaries are not unique")
-          success_start = model.index(success_start_marker)
-          terminal_start = model.index(terminal_marker, success_start)
-          new_success = """        if status.is_success() {
-              let body = match response.bytes().await {
-                  Ok(body) => body,
-                  Err(error) => {
-                      let kind = request_error_kind(&error);
-                      record_candidate_failure(
-                          &mut candidate_failures,
-                          format!("candidate {ordinal}: response body {kind}"),
+          observability_old = '''fn default_app_config_dir() -> PathBuf {
+              dirs::home_dir()
+                  .unwrap_or_else(|| PathBuf::from("."))
+                  .join(".cc-switch")
+          }
+          '''
+          observability_new = '''fn default_app_config_dir() -> PathBuf {
+              match crate::config::try_get_home_dir() {
+                  Ok(home) => home.join(".cc-switch"),
+                  Err(err) => {
+                      let fallback = crate::config::emergency_observability_dir();
+                      eprintln!(
+                          "[CC-Switch] HOME unavailable for crash/exit diagnostics: {err}; using {}",
+                          fallback.display()
                       );
-                      continue;
+                      fallback
+                  }
+              }
+          }
+          '''
+          replace_exact("src-tauri/src/app_exit_monitor.rs", observability_old, observability_new)
+          replace_exact("src-tauri/src/panic_hook.rs", observability_old, observability_new)
+
+          resolve_path_old = '''fn resolve_path(raw: &str) -> PathBuf {
+              if raw == "~" {
+                  if let Some(home) = dirs::home_dir() {
+                      return home;
+                  }
+              } else if let Some(stripped) = raw.strip_prefix("~/") {
+                  if let Some(home) = dirs::home_dir() {
+                      return home.join(stripped);
+                  }
+              } else if let Some(stripped) = raw.strip_prefix("~\\\\") {
+                  if let Some(home) = dirs::home_dir() {
+                      return home.join(stripped);
+                  }
+              }
+
+              PathBuf::from(raw)
+          }
+          '''
+          resolve_path_new = '''fn resolve_path(raw: &str) -> PathBuf {
+              if raw == "~" {
+                  return crate::config::get_home_dir();
+              }
+              if let Some(stripped) = raw.strip_prefix("~/") {
+                  return crate::config::get_home_dir().join(stripped);
+              }
+              if let Some(stripped) = raw.strip_prefix("~\\\\") {
+                  return crate::config::get_home_dir().join(stripped);
+              }
+
+              PathBuf::from(raw)
+          }
+          '''
+          replace_exact("src-tauri/src/app_store.rs", resolve_path_old, resolve_path_new)
+
+          replace_exact(
+              "src-tauri/src/claude_plugin.rs",
+              '    let home = dirs::home_dir().ok_or_else(|| AppError::Config("无法获取用户主目录".into()))?;\n',
+              '    let home = crate::config::try_get_home_dir().map_err(AppError::Config)?;\n',
+          )
+
+          replace_exact(
+              "src-tauri/src/commands/misc.rs",
+              '    let home = dirs::home_dir().unwrap_or_default();\n',
+              '    let home = crate::config::get_home_dir();\n',
+          )
+
+          replace_exact(
+              "src-tauri/src/database/backup.rs",
+              '''fn current_home_string() -> Option<String> {
+              dirs::home_dir().map(|path| path.to_string_lossy().to_string())
+          }
+          ''',
+              '''fn current_home_string() -> Option<String> {
+              crate::config::try_get_home_dir()
+                  .ok()
+                  .map(|path| path.to_string_lossy().to_string())
+          }
+          ''',
+          )
+
+          replace_exact(
+              "src-tauri/src/prompt_files.rs",
+              '''    primary_path
+                  .parent()
+                  .map(|p| p.to_path_buf())
+                  .or_else(|| dirs::home_dir().map(|h| h.join(fallback_dir)))
+                  .ok_or_else(|| {
+          ''',
+              '''    primary_path
+                  .parent()
+                  .map(|p| p.to_path_buf())
+                  .or_else(|| crate::config::try_get_home_dir().ok().map(|h| h.join(fallback_dir)))
+                  .ok_or_else(|| {
+          ''',
+          )
+
+          replace_exact(
+              "src-tauri/src/services/env_manager.rs",
+              '''fn get_backup_dir() -> Result<PathBuf, String> {
+              let home = dirs::home_dir().ok_or("无法获取用户主目录")?;
+              Ok(home.join(".cc-switch").join("backups"))
+          }
+          ''',
+              '''fn get_backup_dir() -> Result<PathBuf, String> {
+              let home = crate::config::try_get_home_dir()?;
+              Ok(home.join(".cc-switch").join("backups"))
+          }
+          ''',
+          )
+
+          replace_exact(
+              "src-tauri/src/services/skill.rs",
+              '''fn get_agents_skills_dir() -> Option<PathBuf> {
+              dirs::home_dir()
+                  .map(|h| h.join(".agents").join("skills"))
+                  .filter(|p| p.exists())
+          }
+          ''',
+              '''fn get_agents_skills_dir() -> Option<PathBuf> {
+              crate::config::try_get_home_dir()
+                  .ok()
+                  .map(|h| h.join(".agents").join("skills"))
+                  .filter(|p| p.exists())
+          }
+          ''',
+          )
+          replace_exact(
+              "src-tauri/src/services/skill.rs",
+              '''    let path = match dirs::home_dir() {
+                  Some(h) => h.join(".agents").join(".skill-lock.json"),
+                  None => {
+                      log::warn!("无法获取 HOME 目录，跳过解析 agents lock 文件");
+                      return HashMap::new();
                   }
               };
-              let resp: ModelsResponse = match serde_json::from_slice(&body) {
-                  Ok(resp) => resp,
-                  Err(error) => {
-                      log::debug!(
-                          "[ModelFetch] candidate {ordinal}/{} returned invalid JSON: {error}",
-                          candidates.len()
-                      );
-                      record_candidate_failure(
-                          &mut candidate_failures,
-                          format!("candidate {ordinal}: invalid JSON ({error})"),
-                      );
-                      continue;
+          ''',
+              '''    let path = match crate::config::try_get_home_dir() {
+                  Ok(home) => home.join(".agents").join(".skill-lock.json"),
+                  Err(err) => {
+                      log::warn!("无法获取 HOME 目录，跳过解析 agents lock 文件: {err}");
+                      return HashMap::new();
                   }
               };
-              let Some(data) = resp.data else {
-                  record_candidate_failure(
-                      &mut candidate_failures,
-                      format!("candidate {ordinal}: response missing data array"),
-                  );
-                  continue;
-              };
+          ''',
+          )
+          replace_exact(
+              "src-tauri/src/services/skill.rs",
+              '''            SkillStorageLocation::Unified => {
+                      let home = dirs::home_dir().context("Cannot determine home directory")?;
+                      home.join(".agents").join("skills")
+                  }
+          ''',
+              '''            SkillStorageLocation::Unified => {
+                      let home = crate::config::try_get_home_dir().map_err(|err| anyhow!(err))?;
+                      home.join(".agents").join("skills")
+                  }
+          ''',
+          )
 
-              let mut models: Vec<FetchedModel> = data
-                  .into_iter()
-                  .map(|m| FetchedModel {
-                      context_window: extract_context_window(&m.extra),
-                      id: m.id,
-                      owned_by: m.owned_by,
-                  })
-                  .collect();
+          replace_exact(
+              "src-tauri/src/session_manager/providers/opencode.rs",
+              '''    dirs::home_dir()
+                  .map(|h| h.join(".local/share/opencode"))
+                  .unwrap_or_else(|| PathBuf::from(".local/share/opencode"))
+          ''',
+              '''    crate::config::get_home_dir().join(".local/share/opencode")
+          ''',
+          )
 
-              enrich_missing_context_windows(&client, url, &mut models).await;
-              models.sort_by(|a, b| a.id.cmp(&b.id));
-              return Ok(models);
-          }
-
-          if should_try_next_models_candidate(status) {
-              record_candidate_failure(
-                  &mut candidate_failures,
-                  format!("candidate {ordinal}: HTTP {status}"),
-              );
-              continue;
-          }"""
-          model = model[:success_start] + new_success + model[terminal_start:]
-
-          final_start_marker = "    Err(format!(\n        \"All candidates failed: {}\","
-          if model.count(final_start_marker) != 1:
-              raise SystemExit("expected one legacy final candidate error")
-          final_start = model.index(final_start_marker)
-          final_end = model.index("\n}", final_start)
-          new_final = """    let details = if candidate_failures.is_empty() {
-              "no candidate diagnostics".to_string()
-          } else {
-              candidate_failures.join("; ")
-          };
-          Err(format!("All model endpoint candidates failed: {details}"))"""
-          model = model[:final_start] + new_final + model[final_end:]
-
-          test_anchor = "    #[test]\n    fn test_candidates_plain_root() {"
-          if model.count(test_anchor) != 1:
-              raise SystemExit("expected one model candidate test anchor")
-          extra_tests = """    #[test]
-          fn candidate_retry_policy_continues_discovery_only_for_compatible_failures() {
-              assert!(should_try_next_models_candidate(StatusCode::NOT_FOUND));
-              assert!(should_try_next_models_candidate(StatusCode::METHOD_NOT_ALLOWED));
-              assert!(should_try_next_models_candidate(StatusCode::INTERNAL_SERVER_ERROR));
-              assert!(should_try_next_models_candidate(StatusCode::BAD_GATEWAY));
-              assert!(!should_try_next_models_candidate(StatusCode::BAD_REQUEST));
-              assert!(!should_try_next_models_candidate(StatusCode::UNAUTHORIZED));
-              assert!(!should_try_next_models_candidate(StatusCode::FORBIDDEN));
-              assert!(!should_try_next_models_candidate(StatusCode::TOO_MANY_REQUESTS));
-          }
-
-          #[test]
-          fn candidate_failure_details_are_bounded() {
-              let mut failures = Vec::new();
-              for index in 0..(MAX_CANDIDATE_FAILURE_DETAILS + 3) {
-                  record_candidate_failure(&mut failures, format!("candidate {index}"));
+          replace_exact(
+              "src-tauri/src/settings.rs",
+              '''fn resolve_override_path(raw: &str) -> PathBuf {
+              if raw == "~" {
+                  if let Some(home) = dirs::home_dir() {
+                      return home;
+                  }
+              } else if let Some(stripped) = raw.strip_prefix("~/") {
+                  if let Some(home) = dirs::home_dir() {
+                      return home.join(stripped);
+                  }
+              } else if let Some(stripped) = raw.strip_prefix("~\\\\") {
+                  if let Some(home) = dirs::home_dir() {
+                      return home.join(stripped);
+                  }
               }
-              assert_eq!(failures.len(), MAX_CANDIDATE_FAILURE_DETAILS);
+
+              PathBuf::from(raw)
           }
+          ''',
+              '''fn resolve_override_path(raw: &str) -> PathBuf {
+              if raw == "~" {
+                  return crate::config::get_home_dir();
+              }
+              if let Some(stripped) = raw.strip_prefix("~/") {
+                  return crate::config::get_home_dir().join(stripped);
+              }
+              if let Some(stripped) = raw.strip_prefix("~\\\\") {
+                  return crate::config::get_home_dir().join(stripped);
+              }
 
-          """
-          model = model.replace(test_anchor, extra_tests + test_anchor, 1)
+              PathBuf::from(raw)
+          }
+          ''',
+          )
 
-          forbidden = [
-              'return Err(format!("Request failed: {e}"));',
-              'last_err = Some(format!("HTTP {status}: {body}"));',
-              '"All candidates failed: {}"',
-          ]
-          for fragment in forbidden:
-              if fragment in model:
-                  raise SystemExit(f"legacy model candidate failure boundary remains: {fragment}")
-          model_path.write_text(model, encoding="utf-8")
+          # XDG_DATA_HOME is specified as an absolute path. Ignore malformed relative values so
+          # OpenCode discovery cannot bind to the process CWD.
+          replace_exact(
+              "src-tauri/src/session_manager/providers/opencode.rs",
+              '''    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+                  if !xdg.is_empty() {
+                      return PathBuf::from(xdg).join("opencode");
+                  }
+              }
+          ''',
+              '''    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+                  let xdg = PathBuf::from(xdg.trim());
+                  if xdg.is_absolute() {
+                      return xdg.join("opencode");
+                  }
+                  if !xdg.as_os_str().is_empty() {
+                      log::warn!(
+                          "Ignoring relative XDG_DATA_HOME for OpenCode discovery: {}",
+                          xdg.display()
+                      );
+                  }
+              }
+          ''',
+          )
+
+          # The permanent guard must pass after the common-boundary migration.
+          offenders = []
+          for path in Path("src-tauri/src").rglob("*.rs"):
+              if path.name == "config.rs":
+                  continue
+              if "dirs::home_dir(" in path.read_text(encoding="utf-8"):
+                  offenders.append(str(path))
+          if offenders:
+              raise SystemExit(f"direct dirs::home_dir remains: {offenders}")
           PY
 
       - name: Install Linux system dependencies
@@ -299,11 +365,23 @@ jobs:
       - name: Rust tests all features
         run: cargo test --manifest-path src-tauri/Cargo.toml --all-features
 
-      - name: Commit verified source fixes
+      - name: Commit verified HOME boundary migration
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src-tauri/src/config.rs src-tauri/src/services/model_fetch.rs
+          git add \
+            src-tauri/src/config.rs \
+            src-tauri/src/app_exit_monitor.rs \
+            src-tauri/src/panic_hook.rs \
+            src-tauri/src/app_store.rs \
+            src-tauri/src/claude_plugin.rs \
+            src-tauri/src/commands/misc.rs \
+            src-tauri/src/database/backup.rs \
+            src-tauri/src/prompt_files.rs \
+            src-tauri/src/services/env_manager.rs \
+            src-tauri/src/services/skill.rs \
+            src-tauri/src/session_manager/providers/opencode.rs \
+            src-tauri/src/settings.rs
           git diff --cached --check
-          git commit -m "fix: fail closed home override and retry model candidates"
+          git commit -m "fix: centralize home resolution across persistence paths"
           git push origin HEAD:fix/global-hardening-20260904
