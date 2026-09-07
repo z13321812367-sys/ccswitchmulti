@@ -159,4 +159,5 @@ finalizer.write_text(
     encoding="utf-8",
 )
 
+# This file is intentionally touched whenever the chained finalizer contract changes.
 print("Applied Hermes production caller migration")
