@@ -65,7 +65,7 @@ jobs:
           old = r'std::path::PathBuf::from("C:\Program Files\nodejs")'
           new = r'std::path::PathBuf::from(r"C:\Program Files\nodejs")'
           if text.count(old) != 1:
-              raise SystemExit(f"Windows nodejs literal count={text.count(old)})")
+              raise SystemExit(f"Windows nodejs literal count={text.count(old)}")
           path.write_text(text.replace(old, new, 1), encoding="utf-8")
           PY
 
@@ -166,6 +166,45 @@ jobs:
       - name: Apply typed failure-semantics redesign
         run: python scripts/apply_failure_semantics_redesign_once.py
 
+      - name: Complete typed-root implementation migration
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          semantics = Path("src-tauri/src/failure_semantics.rs")
+          text = semantics.read_text(encoding="utf-8")
+          # `thiserror` reserves a field literally named `source` for chained errors.
+          # This field is a human-readable root origin, so name it `origin` instead.
+          text = text.replace("source", "origin")
+          semantics.write_text(text, encoding="utf-8")
+
+          config = Path("src-tauri/src/config.rs")
+          text = config.read_text(encoding="utf-8")
+          old = '        source: "user home".to_string(),\n'
+          new = '        origin: "user home".to_string(),\n'
+          if text.count(old) != 1:
+              raise SystemExit(f"typed HOME origin field count={text.count(old)}")
+          config.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          misc = Path("src-tauri/src/commands/misc.rs")
+          text = misc.read_text(encoding="utf-8")
+          replacements = [
+              (
+                  "opencode_extra_search_paths(&home, install_dir, xdg_bin_dir, gopath)",
+                  "opencode_extra_search_paths(Some(&home), install_dir, xdg_bin_dir, gopath)",
+              ),
+              (
+                  "opencode_extra_search_paths(&home, same_dir.clone(), same_dir, None)",
+                  "opencode_extra_search_paths(Some(&home), same_dir.clone(), same_dir, None)",
+              ),
+          ]
+          for old, new in replacements:
+              if text.count(old) != 1:
+                  raise SystemExit(f"OpenCode optional HOME caller count={text.count(old)}: {old}")
+              text = text.replace(old, new, 1)
+          misc.write_text(text, encoding="utf-8")
+          PY
+
       - name: Scope Hermes guards to production function bodies
         run: |
           python - <<'PY'
@@ -211,6 +250,7 @@ jobs:
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
 
       - name: Rust tests default feature set
+        id: default_rust_tests
         run: |
           set -o pipefail
           log="$RUNNER_TEMP/default-rust-tests.log"
@@ -246,7 +286,7 @@ jobs:
           exit "$status"
 
       - name: Upload bounded default-test diagnostic
-        if: failure()
+        if: steps.default_rust_tests.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
           name: design-invariant-default-test-diagnostic
