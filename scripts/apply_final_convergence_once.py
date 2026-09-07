@@ -71,8 +71,8 @@ write(app_store_path, text)
 runpy.run_path("scripts/apply_session_scan_semantics_once.py", run_name="__main__")
 
 # OpenClaw sessions are gateway-managed and deliberately have no CLI resume
-# command. The first draft of the parse migration encoded a non-existent resume
-# command in its exact-match anchor; correct the migration driver, not the product.
+# command. Also, parse_session is followed by prune_sessions_index(), not the
+# test module. Correct the migration driver's exact anchors before executing it.
 parse_driver = Path("scripts/apply_session_parse_semantics_once.py")
 parse_text = parse_driver.read_text(encoding="utf-8")
 old_openclaw_resume = 'resume_command: Some(format!("openclaw --session {session_id}")),'
@@ -81,10 +81,54 @@ if parse_text.count(old_openclaw_resume) != 2:
     raise SystemExit(
         f"OpenClaw parse-driver resume anchor count={parse_text.count(old_openclaw_resume)}"
     )
-parse_driver.write_text(
-    parse_text.replace(old_openclaw_resume, new_openclaw_resume),
-    encoding="utf-8",
-)
+parse_text = parse_text.replace(old_openclaw_resume, new_openclaw_resume)
+
+old_anchor = ''''''        resume_command: None, // OpenClaw sessions are gateway-managed, no CLI resume
+    })
+}
+
+#[cfg(test)]''',''''''
+new_anchor = ''''''        resume_command: None, // OpenClaw sessions are gateway-managed, no CLI resume
+    })
+}
+
+fn prune_sessions_index(''''''
+if parse_text.count(old_anchor) != 1:
+    raise SystemExit(f"OpenClaw parse-driver source anchor count={parse_text.count(old_anchor)}")
+parse_text = parse_text.replace(old_anchor, new_anchor, 1)
+
+old_replacement = ''''''        resume_command: None, // OpenClaw sessions are gateway-managed, no CLI resume
+    })
+}
+
+#[cfg(test)]
+fn parse_session(
+    path: &Path,
+    display_names: Option<&HashMap<String, String>>,
+) -> Option<SessionMeta> {
+    parse_session_checked(path, display_names).ok()
+}
+
+#[cfg(test)]''',''''''
+new_replacement = ''''''        resume_command: None, // OpenClaw sessions are gateway-managed, no CLI resume
+    })
+}
+
+#[cfg(test)]
+fn parse_session(
+    path: &Path,
+    display_names: Option<&HashMap<String, String>>,
+) -> Option<SessionMeta> {
+    parse_session_checked(path, display_names).ok()
+}
+
+fn prune_sessions_index(''''''
+if parse_text.count(old_replacement) != 1:
+    raise SystemExit(
+        f"OpenClaw parse-driver replacement anchor count={parse_text.count(old_replacement)}"
+    )
+parse_text = parse_text.replace(old_replacement, new_replacement, 1)
+parse_driver.write_text(parse_text, encoding="utf-8")
 runpy.run_path("scripts/apply_session_parse_semantics_once.py", run_name="__main__")
 
 # These are one-shot migration mechanics. On a successful verified run they
