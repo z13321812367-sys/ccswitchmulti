@@ -83,46 +83,38 @@ if parse_text.count(old_openclaw_resume) != 2:
     )
 parse_text = parse_text.replace(old_openclaw_resume, new_openclaw_resume)
 
-old_anchor = ''''''        resume_command: None, // OpenClaw sessions are gateway-managed, no CLI resume
-    })
-}
-
-#[cfg(test)]''',''''''
-new_anchor = ''''''        resume_command: None, // OpenClaw sessions are gateway-managed, no CLI resume
-    })
-}
-
-fn prune_sessions_index(''''''
+old_anchor = (
+    "'''        resume_command: None, // OpenClaw sessions are gateway-managed, no CLI resume\n"
+    "    })\n}\n\n#[cfg(test)]''',"
+)
+new_anchor = (
+    "'''        resume_command: None, // OpenClaw sessions are gateway-managed, no CLI resume\n"
+    "    })\n}\n\nfn prune_sessions_index(''',"
+)
 if parse_text.count(old_anchor) != 1:
     raise SystemExit(f"OpenClaw parse-driver source anchor count={parse_text.count(old_anchor)}")
 parse_text = parse_text.replace(old_anchor, new_anchor, 1)
 
-old_replacement = ''''''        resume_command: None, // OpenClaw sessions are gateway-managed, no CLI resume
-    })
-}
-
-#[cfg(test)]
-fn parse_session(
-    path: &Path,
-    display_names: Option<&HashMap<String, String>>,
-) -> Option<SessionMeta> {
-    parse_session_checked(path, display_names).ok()
-}
-
-#[cfg(test)]''',''''''
-new_replacement = ''''''        resume_command: None, // OpenClaw sessions are gateway-managed, no CLI resume
-    })
-}
-
-#[cfg(test)]
-fn parse_session(
-    path: &Path,
-    display_names: Option<&HashMap<String, String>>,
-) -> Option<SessionMeta> {
-    parse_session_checked(path, display_names).ok()
-}
-
-fn prune_sessions_index(''''''
+old_replacement = (
+    "'''        resume_command: None, // OpenClaw sessions are gateway-managed, no CLI resume\n"
+    "    })\n}\n\n#[cfg(test)]\n"
+    "fn parse_session(\n"
+    "    path: &Path,\n"
+    "    display_names: Option<&HashMap<String, String>>,\n"
+    ") -> Option<SessionMeta> {\n"
+    "    parse_session_checked(path, display_names).ok()\n"
+    "}\n\n#[cfg(test)]''',"
+)
+new_replacement = (
+    "'''        resume_command: None, // OpenClaw sessions are gateway-managed, no CLI resume\n"
+    "    })\n}\n\n#[cfg(test)]\n"
+    "fn parse_session(\n"
+    "    path: &Path,\n"
+    "    display_names: Option<&HashMap<String, String>>,\n"
+    ") -> Option<SessionMeta> {\n"
+    "    parse_session_checked(path, display_names).ok()\n"
+    "}\n\nfn prune_sessions_index(''',"
+)
 if parse_text.count(old_replacement) != 1:
     raise SystemExit(
         f"OpenClaw parse-driver replacement anchor count={parse_text.count(old_replacement)}"
