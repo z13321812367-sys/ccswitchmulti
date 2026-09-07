@@ -64,6 +64,22 @@ text = remove_region(
 )
 write(app_store_path, text)
 
+# Structural scanner replacements emit their own closing brace. Their original
+# end markers must start AFTER that brace, otherwise replace_region preserves a
+# second `}`. Fix the migration driver before applying it.
+scan_driver = Path("scripts/apply_session_scan_semantics_once.py")
+scan_text = scan_driver.read_text(encoding="utf-8")
+for old, new, label in [
+    ('"\\n}\\n\\n#[cfg(test)]"', '"\\n\\n#[cfg(test)]"', "Codex traversal boundary"),
+    ('"\\n}\\n\\nfn remove_path_if_exists"', '"\\n\\nfn remove_path_if_exists"', "Claude traversal boundary"),
+    ('"\\n}\\n\\nfn parse_session("', '"\\n\\nfn parse_session("', "OpenClaw index boundary"),
+]:
+    count = scan_text.count(old)
+    if count != 1:
+        raise SystemExit(f"{label}: expected 1 driver marker, found {count}")
+    scan_text = scan_text.replace(old, new, 1)
+scan_driver.write_text(scan_text, encoding="utf-8")
+
 # Session scanning is a separate domain from provider installation discovery.
 # First make structural failures observable; then distinguish dirty individual
 # history files from intentional filters without letting one dirty file take
