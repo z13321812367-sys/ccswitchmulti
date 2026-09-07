@@ -48,7 +48,7 @@ text = replace_once(
 )
 text = remove_region(
     text,
-    "/// Expand `~`, `~/...`, and `~\\\\...` through the same validated HOME boundary.\n",
+    "/// Expand `~`, `~/...`",
     "/// Resolve a user-configurable persistence/configuration root.\n",
     "remove obsolete expand_home_path compatibility helper",
 )
