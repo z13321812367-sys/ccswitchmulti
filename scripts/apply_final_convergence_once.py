@@ -69,6 +69,22 @@ write(app_store_path, text)
 # history files from intentional filters without letting one dirty file take
 # down the whole provider.
 runpy.run_path("scripts/apply_session_scan_semantics_once.py", run_name="__main__")
+
+# OpenClaw sessions are gateway-managed and deliberately have no CLI resume
+# command. The first draft of the parse migration encoded a non-existent resume
+# command in its exact-match anchor; correct the migration driver, not the product.
+parse_driver = Path("scripts/apply_session_parse_semantics_once.py")
+parse_text = parse_driver.read_text(encoding="utf-8")
+old_openclaw_resume = 'resume_command: Some(format!("openclaw --session {session_id}")),'
+new_openclaw_resume = 'resume_command: None, // OpenClaw sessions are gateway-managed, no CLI resume'
+if parse_text.count(old_openclaw_resume) != 2:
+    raise SystemExit(
+        f"OpenClaw parse-driver resume anchor count={parse_text.count(old_openclaw_resume)}"
+    )
+parse_driver.write_text(
+    parse_text.replace(old_openclaw_resume, new_openclaw_resume),
+    encoding="utf-8",
+)
 runpy.run_path("scripts/apply_session_parse_semantics_once.py", run_name="__main__")
 
 # These are one-shot migration mechanics. On a successful verified run they
