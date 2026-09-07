@@ -159,5 +159,5 @@ finalizer.write_text(
     encoding="utf-8",
 )
 
-# This file is intentionally touched whenever the chained finalizer contract changes.
+# Retrigger marker: OpenClaw parse-driver anchor now matches gateway-managed sessions.
 print("Applied Hermes production caller migration")
