@@ -159,5 +159,5 @@ finalizer.write_text(
     encoding="utf-8",
 )
 
-# Retrigger marker: validate generated Session boundaries before native dependency setup.
+# Retrigger marker: structural replacement now consumes the old function close explicitly.
 print("Applied Hermes production caller migration")
