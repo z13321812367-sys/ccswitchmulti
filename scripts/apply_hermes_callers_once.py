@@ -159,5 +159,5 @@ finalizer.write_text(
     encoding="utf-8",
 )
 
-# Retrigger marker: insert the OpenClaw test adapter before prune_sessions_index.
+# Retrigger marker: structural scanner end markers now consume closing braces once.
 print("Applied Hermes production caller migration")
