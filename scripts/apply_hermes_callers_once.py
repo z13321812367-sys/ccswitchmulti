@@ -159,5 +159,5 @@ finalizer.write_text(
     encoding="utf-8",
 )
 
-# Retrigger marker: OpenClaw parse-driver anchor now matches gateway-managed sessions.
+# Retrigger marker: insert the OpenClaw test adapter before prune_sessions_index.
 print("Applied Hermes production caller migration")
