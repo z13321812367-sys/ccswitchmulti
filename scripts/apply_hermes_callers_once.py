@@ -159,5 +159,5 @@ finalizer.write_text(
     encoding="utf-8",
 )
 
-# Retrigger marker: structural replacement now consumes the old function close explicitly.
+# Retrigger marker: rerun strict convergence after removing unused Gemini/OpenCode parser wrappers.
 print("Applied Hermes production caller migration")
