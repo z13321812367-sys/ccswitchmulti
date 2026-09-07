@@ -47,6 +47,27 @@ def assert_balanced_region(path: str, start: str, end: str, label: str) -> None:
         raise SystemExit(f"{label}: generated brace imbalance {opens} open / {closes} close")
 
 
+def assert_traversal_boundaries(stage: str) -> None:
+    assert_balanced_region(
+        "src-tauri/src/session_manager/providers/codex.rs",
+        "fn collect_jsonl_files(",
+        "#[cfg(test)]",
+        f"Codex collect_jsonl_files ({stage})",
+    )
+    assert_balanced_region(
+        "src-tauri/src/session_manager/providers/claude.rs",
+        "fn collect_jsonl_files(",
+        "fn remove_path_if_exists",
+        f"Claude collect_jsonl_files ({stage})",
+    )
+    assert_balanced_region(
+        "src-tauri/src/session_manager/providers/openclaw.rs",
+        "fn load_display_names(",
+        "fn parse_session",
+        f"OpenClaw load_display_names ({stage})",
+    )
+
+
 # The typed root APIs have replaced these production helpers. Keep the two
 # deterministic pure helpers only for the tests that still exercise injected
 # path inputs; remove the obsolete expansion and infallible Store adapter.
@@ -82,31 +103,28 @@ text = remove_region(
 )
 write(app_store_path, text)
 
-# Structural scanner replacements emit their own closing brace. Their original
-# end markers must start AFTER that brace, otherwise replace_region preserves a
-# second `}`. Fix the migration driver before applying it.
+# The structural migration's replacement blocks include their own final `}`.
+# Its generic replace_region originally retained an end marker beginning with
+# `\n}`, duplicating that close. Consume exactly that old function close while
+# retaining everything after it (test/module annotations or the next helper).
 scan_driver = Path("scripts/apply_session_scan_semantics_once.py")
 scan_text = scan_driver.read_text(encoding="utf-8")
-for old, new, label in [
-    ('"\\n}\\n\\n#[cfg(test)]"', '"\\n\\n#[cfg(test)]"', "Codex traversal boundary"),
-    ('"\\n}\\n\\nfn remove_path_if_exists"', '"\\n\\nfn remove_path_if_exists"', "Claude traversal boundary"),
-    ('"\\n}\\n\\nfn parse_session("', '"\\n\\nfn parse_session("', "OpenClaw index boundary"),
-]:
-    count = scan_text.count(old)
-    if count != 1:
-        raise SystemExit(f"{label}: expected 1 driver marker, found {count}")
-    scan_text = scan_text.replace(old, new, 1)
-scan_driver.write_text(scan_text, encoding="utf-8")
+old_replace = "    write(path, text[:i] + new + text[j:])\n"
+new_replace = '''    if end.startswith("\\n}") and new.rstrip().endswith("}"):
+        j += 2
+    write(path, text[:i] + new + text[j:])
+'''
+if scan_text.count(old_replace) != 1:
+    raise SystemExit(f"session structural replace_region body count={scan_text.count(old_replace)}")
+scan_driver.write_text(scan_text.replace(old_replace, new_replace, 1), encoding="utf-8")
 
 # Session scanning is a separate domain from provider installation discovery.
-# First make structural failures observable; then distinguish dirty individual
-# history files from intentional filters without letting one dirty file take
-# down the whole provider.
 runpy.run_path("scripts/apply_session_scan_semantics_once.py", run_name="__main__")
+assert_traversal_boundaries("after structural migration")
 
 # OpenClaw sessions are gateway-managed and deliberately have no CLI resume
 # command. Also, parse_session is followed by prune_sessions_index(), not the
-# test module. Correct the migration driver's exact anchors before executing it.
+# test module. Correct the dirty-parser migration driver's exact anchors.
 parse_driver = Path("scripts/apply_session_parse_semantics_once.py")
 parse_text = parse_driver.read_text(encoding="utf-8")
 old_openclaw_resume = 'resume_command: Some(format!("openclaw --session {session_id}")),'
@@ -156,31 +174,10 @@ if parse_text.count(old_replacement) != 1:
 parse_text = parse_text.replace(old_replacement, new_replacement, 1)
 parse_driver.write_text(parse_text, encoding="utf-8")
 runpy.run_path("scripts/apply_session_parse_semantics_once.py", run_name="__main__")
-
-# Validate generated traversal/helper function boundaries immediately, before a
-# full runner spends time installing native dependencies. These checks are only
-# diagnostics for the one-shot migration machinery, not product semantics.
-assert_balanced_region(
-    "src-tauri/src/session_manager/providers/codex.rs",
-    "fn collect_jsonl_files(",
-    "#[cfg(test)]",
-    "Codex collect_jsonl_files",
-)
-assert_balanced_region(
-    "src-tauri/src/session_manager/providers/claude.rs",
-    "fn collect_jsonl_files(",
-    "fn remove_path_if_exists",
-    "Claude collect_jsonl_files",
-)
-assert_balanced_region(
-    "src-tauri/src/session_manager/providers/openclaw.rs",
-    "fn load_display_names(",
-    "fn parse_session_checked(",
-    "OpenClaw load_display_names",
-)
+assert_traversal_boundaries("after dirty-history migration")
 
 # These are one-shot migration mechanics. On a successful verified run they
-# should disappear from the resulting branch along with the existing drivers.
+# disappear from the resulting branch along with the existing drivers.
 for temporary in [
     "scripts/apply_session_scan_semantics_once.py",
     "scripts/apply_session_parse_semantics_once.py",
