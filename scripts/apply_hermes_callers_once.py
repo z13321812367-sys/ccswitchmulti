@@ -145,4 +145,18 @@ for path in RUST_ROOT.rglob("*.rs"):
 '''
 write(guard, text.replace(marker, hermes_guard + marker, 1))
 
+# Arm the final convergence stage only after the typed root redesign has run.
+# This keeps root-contract migration and Session-domain migration independently
+# attributable while still finishing them in the same verified one-shot run.
+finalizer = Path("scripts/apply_failure_semantics_redesign_once.py")
+finalizer_text = finalizer.read_text(encoding="utf-8")
+hook_marker = "# chained-final-design-convergence"
+if hook_marker in finalizer_text:
+    raise SystemExit("final design convergence hook already installed")
+finalizer.write_text(
+    finalizer_text
+    + '''\n\n# chained-final-design-convergence\nimport runpy\nrunpy.run_path("scripts/apply_final_convergence_once.py", run_name="__main__")\n''',
+    encoding="utf-8",
+)
+
 print("Applied Hermes production caller migration")
