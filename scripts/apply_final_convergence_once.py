@@ -29,6 +29,24 @@ def remove_region(text: str, start: str, end: str, label: str) -> str:
     return text[:i] + text[j:]
 
 
+def assert_balanced_region(path: str, start: str, end: str, label: str) -> None:
+    text = read(path)
+    if start not in text:
+        raise SystemExit(f"{label}: start marker missing after migration")
+    i = text.index(start)
+    if end not in text[i:]:
+        raise SystemExit(f"{label}: end marker missing after migration")
+    j = text.index(end, i)
+    block = text[i:j]
+    opens = block.count("{")
+    closes = block.count("}")
+    if opens != closes:
+        print(f"--- generated {label} block ---")
+        print(block)
+        print(f"--- end generated {label} block; braces={opens}/{closes} ---")
+        raise SystemExit(f"{label}: generated brace imbalance {opens} open / {closes} close")
+
+
 # The typed root APIs have replaced these production helpers. Keep the two
 # deterministic pure helpers only for the tests that still exercise injected
 # path inputs; remove the obsolete expansion and infallible Store adapter.
@@ -138,6 +156,28 @@ if parse_text.count(old_replacement) != 1:
 parse_text = parse_text.replace(old_replacement, new_replacement, 1)
 parse_driver.write_text(parse_text, encoding="utf-8")
 runpy.run_path("scripts/apply_session_parse_semantics_once.py", run_name="__main__")
+
+# Validate generated traversal/helper function boundaries immediately, before a
+# full runner spends time installing native dependencies. These checks are only
+# diagnostics for the one-shot migration machinery, not product semantics.
+assert_balanced_region(
+    "src-tauri/src/session_manager/providers/codex.rs",
+    "fn collect_jsonl_files(",
+    "#[cfg(test)]",
+    "Codex collect_jsonl_files",
+)
+assert_balanced_region(
+    "src-tauri/src/session_manager/providers/claude.rs",
+    "fn collect_jsonl_files(",
+    "fn remove_path_if_exists",
+    "Claude collect_jsonl_files",
+)
+assert_balanced_region(
+    "src-tauri/src/session_manager/providers/openclaw.rs",
+    "fn load_display_names(",
+    "fn parse_session_checked(",
+    "OpenClaw load_display_names",
+)
 
 # These are one-shot migration mechanics. On a successful verified run they
 # should disappear from the resulting branch along with the existing drivers.
