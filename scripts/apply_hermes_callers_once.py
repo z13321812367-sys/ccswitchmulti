@@ -159,5 +159,5 @@ finalizer.write_text(
     encoding="utf-8",
 )
 
-# Retrigger marker: structural scanner end markers now consume closing braces once.
+# Retrigger marker: validate generated Session boundaries before native dependency setup.
 print("Applied Hermes production caller migration")
