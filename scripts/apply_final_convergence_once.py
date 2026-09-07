@@ -176,6 +176,34 @@ parse_driver.write_text(parse_text, encoding="utf-8")
 runpy.run_path("scripts/apply_session_parse_semantics_once.py", run_name="__main__")
 assert_traversal_boundaries("after dirty-history migration")
 
+# Gemini and OpenCode no longer have any test consumers for the legacy Option
+# parser shape. Remove those wrappers instead of suppressing dead-code warnings.
+for path, wrapper, label in [
+    (
+        "src-tauri/src/session_manager/providers/gemini.rs",
+        '''#[cfg(test)]
+fn parse_session(path: &Path) -> Option<SessionMeta> {
+    parse_session_checked(path).ok()
+}
+
+''',
+        "remove obsolete Gemini parser compatibility wrapper",
+    ),
+    (
+        "src-tauri/src/session_manager/providers/opencode.rs",
+        '''#[cfg(test)]
+fn parse_session(storage: &Path, path: &Path) -> Option<SessionMeta> {
+    parse_session_checked(storage, path).ok()
+}
+
+''',
+        "remove obsolete OpenCode parser compatibility wrapper",
+    ),
+]:
+    text = read(path)
+    text = replace_once(text, wrapper, "", label)
+    write(path, text)
+
 # These are one-shot migration mechanics. On a successful verified run they
 # disappear from the resulting branch along with the existing drivers.
 for temporary in [
