@@ -44,8 +44,8 @@ const HERMES_EXTRA_FIELDS: &[&str] = &[
 // ============================================================================
 
 /// Check if Hermes MCP sync should proceed
-fn should_sync_hermes_mcp() -> bool {
-    hermes_config::get_hermes_dir().exists()
+fn should_sync_hermes_mcp() -> Result<bool, AppError> {
+    Ok(hermes_config::try_get_hermes_dir()?.exists())
 }
 
 // ============================================================================
@@ -178,7 +178,7 @@ pub fn sync_single_server_to_hermes(
     id: &str,
     server_spec: &Value,
 ) -> Result<(), AppError> {
-    if !should_sync_hermes_mcp() {
+    if !should_sync_hermes_mcp()? {
         return Ok(());
     }
 
@@ -234,7 +234,7 @@ fn merge_hermes_spec(existing: &Value, new_spec: &Value) -> Value {
 
 /// Remove a single MCP server from Hermes live config
 pub fn remove_server_from_hermes(id: &str) -> Result<(), AppError> {
-    if !should_sync_hermes_mcp() {
+    if !should_sync_hermes_mcp()? {
         return Ok(());
     }
 

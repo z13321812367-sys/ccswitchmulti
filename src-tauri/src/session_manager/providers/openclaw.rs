@@ -8,7 +8,7 @@ use serde_json::Value;
 use crate::openclaw_config::get_openclaw_dir;
 use crate::{
     config::write_json_file,
-    session_manager::{SessionMessage, SessionMeta},
+    session_manager::{SessionMessage, SessionMeta, SessionScanError},
 };
 
 use super::utils::{
@@ -27,21 +27,18 @@ fn strip_message_id_suffix(text: &str) -> &str {
     }
 }
 
-pub fn scan_sessions() -> Vec<SessionMeta> {
+pub fn scan_sessions() -> Result<Vec<SessionMeta>, SessionScanError> {
     let agents_dir = get_openclaw_dir().join("agents");
     if !agents_dir.exists() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
+    let agent_entries = std::fs::read_dir(&agents_dir)
+        .map_err(|err| SessionScanError::storage("OpenClaw", &agents_dir, err))?;
     let mut sessions = Vec::new();
-
-    // Traverse each agent directory
-    let agent_entries = match std::fs::read_dir(&agents_dir) {
-        Ok(entries) => entries,
-        Err(_) => return sessions,
-    };
-
-    for agent_entry in agent_entries.flatten() {
+    for agent_entry in agent_entries {
+        let agent_entry =
+            agent_entry.map_err(|err| SessionScanError::storage("OpenClaw", &agents_dir, err))?;
         let agent_path = agent_entry.path();
         if !agent_path.is_dir() {
             continue;
@@ -51,27 +48,27 @@ pub fn scan_sessions() -> Vec<SessionMeta> {
         if !sessions_dir.is_dir() {
             continue;
         }
-
-        let session_entries = match std::fs::read_dir(&sessions_dir) {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
-
+        let session_entries = std::fs::read_dir(&sessions_dir)
+            .map_err(|err| SessionScanError::storage("OpenClaw", &sessions_dir, err))?;
         let display_names = load_display_names(&sessions_dir);
 
-        for entry in session_entries.flatten() {
+        for entry in session_entries {
+            let entry =
+                entry.map_err(|err| SessionScanError::storage("OpenClaw", &sessions_dir, err))?;
             let path = entry.path();
             if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
                 continue;
             }
-
-            if let Some(meta) = parse_session(&path, Some(&display_names)) {
-                sessions.push(meta);
+            match parse_session_checked(&path, Some(&display_names)) {
+                Ok(meta) => sessions.push(meta),
+                Err(err) => log::warn!(
+                    "Skipping unreadable OpenClaw session {}: {err}",
+                    path.display()
+                ),
             }
         }
     }
-
-    sessions
+    Ok(sessions)
 }
 
 pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
@@ -80,10 +77,12 @@ pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
     let mut messages = Vec::new();
 
     for line in reader.lines() {
-        let line = match line {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
+        let line = line.map_err(|err| {
+            format!(
+                "Failed to read openclaw session line from {}: {err}",
+                path.display()
+            )
+        })?;
         let value: Value = match serde_json::from_str(&line) {
             Ok(parsed) => parsed,
             Err(_) => continue,
@@ -123,12 +122,7 @@ pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
 }
 
 pub fn delete_session(_root: &Path, path: &Path, session_id: &str) -> Result<bool, String> {
-    let meta = parse_session(path, None).ok_or_else(|| {
-        format!(
-            "Failed to parse OpenClaw session metadata: {}",
-            path.display()
-        )
-    })?;
+    let meta = parse_session_checked(path, None)?;
 
     if meta.session_id != session_id {
         return Err(format!(
@@ -158,16 +152,29 @@ pub fn delete_session(_root: &Path, path: &Path, session_id: &str) -> Result<boo
 fn load_display_names(sessions_dir: &Path) -> HashMap<String, String> {
     let index_path = sessions_dir.join("sessions.json");
     let content = match std::fs::read_to_string(&index_path) {
-        Ok(c) => c,
-        Err(_) => return HashMap::new(),
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return HashMap::new(),
+        Err(err) => {
+            log::warn!(
+                "OpenClaw optional session index unreadable at {}: {err}",
+                index_path.display()
+            );
+            return HashMap::new();
+        }
     };
     let index: serde_json::Map<String, Value> = match serde_json::from_str(&content) {
-        Ok(m) => m,
-        Err(_) => return HashMap::new(),
+        Ok(index) => index,
+        Err(err) => {
+            log::warn!(
+                "OpenClaw optional session index malformed at {}: {err}",
+                index_path.display()
+            );
+            return HashMap::new();
+        }
     };
 
     let mut map = HashMap::new();
-    for (_key, entry) in &index {
+    for entry in index.values() {
         if let (Some(id), Some(name)) = (
             entry.get("sessionId").and_then(Value::as_str),
             entry.get("displayName").and_then(Value::as_str),
@@ -180,11 +187,12 @@ fn load_display_names(sessions_dir: &Path) -> HashMap<String, String> {
     map
 }
 
-fn parse_session(
+fn parse_session_checked(
     path: &Path,
     display_names: Option<&HashMap<String, String>>,
-) -> Option<SessionMeta> {
-    let (head, tail) = read_head_tail_lines(path, 10, 30).ok()?;
+) -> Result<SessionMeta, String> {
+    let (head, tail) = read_head_tail_lines(path, 10, 30)
+        .map_err(|err| format!("Failed to read OpenClaw session {}: {err}", path.display()))?;
 
     let mut session_id: Option<String> = None;
     let mut cwd: Option<String> = None;
@@ -270,7 +278,12 @@ fn parse_session(
             .and_then(|s| s.to_str())
             .map(|s| s.to_string())
     });
-    let session_id = session_id?;
+    let session_id = session_id.ok_or_else(|| {
+        format!(
+            "OpenClaw session has no usable session id: {}",
+            path.display()
+        )
+    })?;
 
     // Title priority: displayName (from sessions.json) > first user message > dir basename
     let title = display_names
@@ -286,7 +299,7 @@ fn parse_session(
 
     let summary = summary.map(|text| truncate_summary(&text, 160));
 
-    Some(SessionMeta {
+    Ok(SessionMeta {
         provider_id: PROVIDER_ID.to_string(),
         session_id: session_id.clone(),
         title,
@@ -297,6 +310,14 @@ fn parse_session(
         source_path: Some(path.to_string_lossy().to_string()),
         resume_command: None, // OpenClaw sessions are gateway-managed, no CLI resume
     })
+}
+
+#[cfg(test)]
+fn parse_session(
+    path: &Path,
+    display_names: Option<&HashMap<String, String>>,
+) -> Option<SessionMeta> {
+    parse_session_checked(path, display_names).ok()
 }
 
 fn prune_sessions_index(

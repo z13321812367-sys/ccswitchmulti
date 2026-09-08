@@ -16,7 +16,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::timeout;
 
 use crate::app_config::{AppType, InstalledSkill, SkillApps, UnmanagedSkill};
-use crate::config::get_app_config_dir;
 use crate::database::Database;
 use crate::error::format_skill_error;
 
@@ -481,9 +480,11 @@ impl SkillService {
     pub fn get_ssot_dir() -> Result<PathBuf> {
         let location = crate::settings::get_skill_storage_location();
         let dir = match location {
-            SkillStorageLocation::CcSwitch => get_app_config_dir().join("skills"),
+            SkillStorageLocation::CcSwitch => crate::config::try_get_app_config_dir()
+                .map_err(|err| anyhow!(err))?
+                .join("skills"),
             SkillStorageLocation::Unified => {
-                let home = crate::config::get_home_dir();
+                let home = crate::config::try_get_home_dir().map_err(|err| anyhow!(err))?;
                 home.join(".agents").join("skills")
             }
         };
@@ -493,7 +494,9 @@ impl SkillService {
 
     /// 获取 Skill 卸载备份目录（~/.cc-switch/skill-backups/）
     fn get_backup_dir() -> Result<PathBuf> {
-        let dir = get_app_config_dir().join("skill-backups");
+        let dir = crate::config::try_get_app_config_dir()
+            .map_err(|err| anyhow!(err))?
+            .join("skill-backups");
         fs::create_dir_all(&dir)?;
         Ok(dir)
     }
@@ -536,7 +539,7 @@ impl SkillService {
         }
 
         // 默认路径：回退到用户主目录下的标准位置
-        let home = crate::config::get_home_dir();
+        let home = crate::config::try_get_home_dir().map_err(|err| anyhow!(err))?;
 
         Ok(match app {
             AppType::Claude => home.join(".claude").join("skills"),
@@ -545,7 +548,9 @@ impl SkillService {
             AppType::Gemini => home.join(".gemini").join("skills"),
             AppType::OpenCode => home.join(".config").join("opencode").join("skills"),
             AppType::OpenClaw => home.join(".openclaw").join("skills"),
-            AppType::Hermes => crate::hermes_config::get_hermes_dir().join("skills"),
+            AppType::Hermes => crate::hermes_config::try_get_hermes_dir()
+                .map_err(|err| anyhow!(err))?
+                .join("skills"),
         })
     }
 
@@ -1158,7 +1163,9 @@ impl SkillService {
         // 1. 解析旧目录和新目录（不改设置）
         let old_dir = Self::get_ssot_dir()?;
         let new_dir = match target {
-            SkillStorageLocation::CcSwitch => get_app_config_dir().join("skills"),
+            SkillStorageLocation::CcSwitch => crate::config::try_get_app_config_dir()
+                .map_err(|err| anyhow!(err))?
+                .join("skills"),
             SkillStorageLocation::Unified => {
                 let home = crate::config::try_get_home_dir().map_err(|err| anyhow!(err))?;
                 home.join(".agents").join("skills")

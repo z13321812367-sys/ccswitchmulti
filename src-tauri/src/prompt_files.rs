@@ -24,7 +24,7 @@ pub fn prompt_file_path(app: &AppType) -> Result<PathBuf, AppError> {
         AppType::Gemini => get_gemini_dir(),
         AppType::OpenCode => get_opencode_dir(),
         AppType::OpenClaw => get_openclaw_dir(),
-        AppType::Hermes => crate::hermes_config::get_hermes_dir(),
+        AppType::Hermes => crate::hermes_config::try_get_hermes_dir()?,
         AppType::ClaudeDesktop => unreachable!("handled above"),
     };
 

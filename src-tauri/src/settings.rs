@@ -546,58 +546,64 @@ impl Default for AppSettings {
     }
 }
 
+fn normalize_config_dir_override(field: &str, value: Option<String>) -> Option<String> {
+    let raw = value?.trim().to_string();
+    if raw.is_empty() {
+        return None;
+    }
+    match crate::config::resolve_persistence_path(&raw, field) {
+        Ok(path) => Some(path.to_string_lossy().to_string()),
+        Err(err) => {
+            log::error!("Ignoring invalid persisted {field}: {err}");
+            None
+        }
+    }
+}
+
+fn validate_config_dir_overrides(settings: &AppSettings) -> Result<(), AppError> {
+    let values = [
+        ("claude_config_dir", settings.claude_config_dir.as_deref()),
+        ("codex_config_dir", settings.codex_config_dir.as_deref()),
+        ("gemini_config_dir", settings.gemini_config_dir.as_deref()),
+        (
+            "opencode_config_dir",
+            settings.opencode_config_dir.as_deref(),
+        ),
+        (
+            "openclaw_config_dir",
+            settings.openclaw_config_dir.as_deref(),
+        ),
+        ("hermes_config_dir", settings.hermes_config_dir.as_deref()),
+    ];
+    for (field, raw) in values {
+        if let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) {
+            crate::config::resolve_persistence_path(raw, field).map_err(AppError::InvalidInput)?;
+        }
+    }
+    Ok(())
+}
+
 impl AppSettings {
-    fn settings_path() -> Option<PathBuf> {
-        // settings.json 保留用于旧版本迁移和无数据库场景
-        Some(
-            crate::config::get_home_dir()
-                .join(".cc-switch")
-                .join("settings.json"),
-        )
+    fn settings_path() -> Result<PathBuf, AppError> {
+        Ok(crate::config::try_get_home_dir()
+            .map_err(AppError::Config)?
+            .join(".cc-switch")
+            .join("settings.json"))
     }
 
     fn normalize_paths(&mut self) {
-        self.claude_config_dir = self
-            .claude_config_dir
-            .as_ref()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
-
-        self.codex_config_dir = self
-            .codex_config_dir
-            .as_ref()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
-
-        self.gemini_config_dir = self
-            .gemini_config_dir
-            .as_ref()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
-
-        self.opencode_config_dir = self
-            .opencode_config_dir
-            .as_ref()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
-
-        self.openclaw_config_dir = self
-            .openclaw_config_dir
-            .as_ref()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
-
-        self.hermes_config_dir = self
-            .hermes_config_dir
-            .as_ref()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
+        self.claude_config_dir =
+            normalize_config_dir_override("claude_config_dir", self.claude_config_dir.take());
+        self.codex_config_dir =
+            normalize_config_dir_override("codex_config_dir", self.codex_config_dir.take());
+        self.gemini_config_dir =
+            normalize_config_dir_override("gemini_config_dir", self.gemini_config_dir.take());
+        self.opencode_config_dir =
+            normalize_config_dir_override("opencode_config_dir", self.opencode_config_dir.take());
+        self.openclaw_config_dir =
+            normalize_config_dir_override("openclaw_config_dir", self.openclaw_config_dir.take());
+        self.hermes_config_dir =
+            normalize_config_dir_override("hermes_config_dir", self.hermes_config_dir.take());
 
         self.language = self
             .language
@@ -622,10 +628,13 @@ impl AppSettings {
     }
 
     fn load_from_file() -> Self {
-        let Some(path) = Self::settings_path() else {
-            return Self::default();
-        };
-        Self::load_from_path(&path)
+        match Self::settings_path() {
+            Ok(path) => Self::load_from_path(&path),
+            Err(err) => {
+                log::error!("无法解析 settings.json 路径，将使用内存默认设置且禁止持久化: {err}");
+                Self::default()
+            }
+        }
     }
 
     fn load_from_path(path: &Path) -> Self {
@@ -689,9 +698,7 @@ fn preserve_corrupt_settings_file(path: &Path, content: &str) {
 }
 
 fn save_settings_file(settings: &AppSettings) -> Result<(), AppError> {
-    let Some(path) = AppSettings::settings_path() else {
-        return Err(AppError::Config("无法获取用户主目录".to_string()));
-    };
+    let path = AppSettings::settings_path()?;
     save_settings_file_to_path(settings, &path)
 }
 
@@ -714,11 +721,14 @@ fn settings_store() -> &'static RwLock<AppSettings> {
     SETTINGS_STORE.get_or_init(|| RwLock::new(AppSettings::load_from_file()))
 }
 
-fn resolve_override_path(raw: &str) -> PathBuf {
-    crate::config::expand_home_path(raw).unwrap_or_else(|err| {
-        log::error!("{err}");
-        panic!("{err}");
-    })
+fn resolve_override_path(raw: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        Some(path)
+    } else {
+        log::error!("settings path invariant violated by relative override: {raw}");
+        None
+    }
 }
 
 pub fn get_settings() -> AppSettings {
@@ -744,6 +754,7 @@ pub fn get_settings_for_frontend() -> AppSettings {
 }
 
 pub fn update_settings(mut new_settings: AppSettings) -> Result<(), AppError> {
+    validate_config_dir_overrides(&new_settings)?;
     new_settings.normalize_paths();
     save_settings_file(&new_settings)?;
 
@@ -899,7 +910,7 @@ pub fn get_claude_override_dir() -> Option<PathBuf> {
     settings
         .claude_config_dir
         .as_ref()
-        .map(|p| resolve_override_path(p))
+        .and_then(|p| resolve_override_path(p))
 }
 
 pub fn get_codex_override_dir() -> Option<PathBuf> {
@@ -907,7 +918,7 @@ pub fn get_codex_override_dir() -> Option<PathBuf> {
     settings
         .codex_config_dir
         .as_ref()
-        .map(|p| resolve_override_path(p))
+        .and_then(|p| resolve_override_path(p))
 }
 
 pub fn get_gemini_override_dir() -> Option<PathBuf> {
@@ -915,7 +926,7 @@ pub fn get_gemini_override_dir() -> Option<PathBuf> {
     settings
         .gemini_config_dir
         .as_ref()
-        .map(|p| resolve_override_path(p))
+        .and_then(|p| resolve_override_path(p))
 }
 
 pub fn get_opencode_override_dir() -> Option<PathBuf> {
@@ -923,7 +934,7 @@ pub fn get_opencode_override_dir() -> Option<PathBuf> {
     settings
         .opencode_config_dir
         .as_ref()
-        .map(|p| resolve_override_path(p))
+        .and_then(|p| resolve_override_path(p))
 }
 
 pub fn get_openclaw_override_dir() -> Option<PathBuf> {
@@ -931,7 +942,7 @@ pub fn get_openclaw_override_dir() -> Option<PathBuf> {
     settings
         .openclaw_config_dir
         .as_ref()
-        .map(|p| resolve_override_path(p))
+        .and_then(|p| resolve_override_path(p))
 }
 
 pub fn get_hermes_override_dir() -> Option<PathBuf> {
@@ -939,7 +950,7 @@ pub fn get_hermes_override_dir() -> Option<PathBuf> {
     settings
         .hermes_config_dir
         .as_ref()
-        .map(|p| resolve_override_path(p))
+        .and_then(|p| resolve_override_path(p))
 }
 
 pub fn preserve_codex_official_auth_on_switch() -> bool {

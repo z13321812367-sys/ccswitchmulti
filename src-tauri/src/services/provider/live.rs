@@ -1219,7 +1219,7 @@ pub fn read_live_settings(app_type: AppType) -> Result<Value, AppError> {
             Ok(config)
         }
         AppType::Hermes => {
-            let config_path = crate::hermes_config::get_hermes_config_path();
+            let config_path = crate::hermes_config::try_get_hermes_config_path()?;
             if !config_path.exists() {
                 return Err(AppError::localized(
                     "hermes.config.missing",
@@ -1672,7 +1672,7 @@ pub fn remove_hermes_provider_from_live(provider_id: &str) -> Result<(), AppErro
     use crate::hermes_config;
 
     // Check if Hermes config directory exists
-    if !hermes_config::get_hermes_dir().exists() {
+    if !hermes_config::try_get_hermes_dir()?.exists() {
         log::debug!("Hermes config directory doesn't exist, skipping removal of '{provider_id}'");
         return Ok(());
     }

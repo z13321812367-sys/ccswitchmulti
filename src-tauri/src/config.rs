@@ -6,9 +6,19 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::AppError;
+use crate::failure_semantics::{require_absolute_root, RootResolutionError};
 
 static ATOMIC_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 const ATOMIC_TEMP_CREATE_ATTEMPTS: usize = 16;
+
+#[cfg(test)]
+fn require_absolute_path(path: PathBuf, label: &str) -> Result<PathBuf, String> {
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Err(format!("{label} 必须是绝对路径，收到: {}", path.display()))
+    }
+}
 
 /// 获取用户主目录，带回退和日志
 ///
@@ -23,31 +33,19 @@ const ATOMIC_TEMP_CREATE_ATTEMPTS: usize = 16;
 ///
 /// 为了让 Windows CI/本地测试能稳定隔离真实用户数据，可通过 `CC_SWITCH_TEST_HOME`
 /// 显式覆盖 home dir（仅用于测试/调试场景）。
+#[cfg(test)]
 fn resolve_home_dir(
     test_override: Option<&str>,
     detected: Option<PathBuf>,
 ) -> Result<PathBuf, String> {
     if let Some(home) = test_override.map(str::trim).filter(|home| !home.is_empty()) {
-        let path = PathBuf::from(home);
-        if path.is_absolute() {
-            return Ok(path);
-        }
-        return Err(format!(
-            "CC_SWITCH_TEST_HOME 必须是绝对路径，收到: {}",
-            path.display()
-        ));
+        return require_absolute_path(PathBuf::from(home), "CC_SWITCH_TEST_HOME");
     }
 
-    match detected {
-        Some(path) if path.is_absolute() => Ok(path),
-        Some(path) => Err(format!(
-            "操作系统返回了非绝对用户主目录路径: {}",
-            path.display()
-        )),
-        None => {
-            Err("无法获取用户主目录；拒绝回退到当前工作目录，以避免配置/数据库静默分叉".to_string())
-        }
-    }
+    let path = detected.ok_or_else(|| {
+        "无法获取用户主目录；拒绝回退到当前工作目录，以避免配置/数据库静默分叉".to_string()
+    })?;
+    require_absolute_path(path, "操作系统返回的用户主目录")
 }
 
 /// 获取用户主目录。
@@ -55,9 +53,25 @@ fn resolve_home_dir(
 /// 用户主目录是数据库、设置和多个 CLI 配置路径的共同根。无法解析时必须 fail closed：
 /// 旧行为回退到 `.` 会根据启动方式把同一用户的数据写进任意 CWD，表现为供应商/设置丢失，
 /// 也可能把凭据写进意外目录。
+pub fn try_get_home_dir_typed() -> Result<PathBuf, RootResolutionError> {
+    if let Ok(raw) = std::env::var("CC_SWITCH_TEST_HOME") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return require_absolute_root(PathBuf::from(trimmed), "CC_SWITCH_TEST_HOME");
+        }
+    }
+
+    let detected = dirs::home_dir().ok_or_else(|| RootResolutionError::Unavailable {
+        origin: "user home".to_string(),
+        detail: "operating system did not provide a home directory; CWD fallback is forbidden"
+            .to_string(),
+    })?;
+    require_absolute_root(detected, "operating-system user home")
+}
+
+/// Compatibility adapter. New persistence code should keep RootResolutionError typed.
 pub fn try_get_home_dir() -> Result<PathBuf, String> {
-    let test_override = std::env::var("CC_SWITCH_TEST_HOME").ok();
-    resolve_home_dir(test_override.as_deref(), dirs::home_dir())
+    try_get_home_dir_typed().map_err(|err| err.to_string())
 }
 
 pub fn get_home_dir() -> PathBuf {
@@ -67,19 +81,31 @@ pub fn get_home_dir() -> PathBuf {
     })
 }
 
-/// Expand `~`, `~/...`, and `~\...` through the same validated HOME boundary.
-/// Missing or malformed HOME is an error; callers must not preserve a literal relative `~` path.
-pub fn expand_home_path(raw: &str) -> Result<PathBuf, String> {
-    if raw == "~" {
-        return try_get_home_dir();
+/// Resolve a user-configurable persistence/configuration root.
+///
+/// Unlike generic path expansion, this contract never permits process-CWD-relative roots.
+/// Callers may accept `~`, but the resolved value must be absolute before it can select a
+/// database, backup, settings, or external CLI configuration tree.
+pub fn resolve_persistence_path_typed(
+    raw: &str,
+    label: &str,
+) -> Result<PathBuf, RootResolutionError> {
+    let trimmed = raw.trim();
+    if trimmed == "~" {
+        return try_get_home_dir_typed();
     }
-    if let Some(stripped) = raw.strip_prefix("~/") {
-        return Ok(try_get_home_dir()?.join(stripped));
+    if let Some(stripped) = trimmed.strip_prefix("~/") {
+        return Ok(try_get_home_dir_typed()?.join(stripped));
     }
-    if let Some(stripped) = raw.strip_prefix("~\\") {
-        return Ok(try_get_home_dir()?.join(stripped));
+    if let Some(stripped) = trimmed.strip_prefix("~\\") {
+        return Ok(try_get_home_dir_typed()?.join(stripped));
     }
-    Ok(PathBuf::from(raw))
+    require_absolute_root(PathBuf::from(trimmed), label)
+}
+
+/// Compatibility adapter for legacy String-error APIs.
+pub fn resolve_persistence_path(raw: &str, label: &str) -> Result<PathBuf, String> {
+    resolve_persistence_path_typed(raw, label).map_err(|err| err.to_string())
 }
 
 /// Last-resort crash/exit observability directory when HOME itself is unavailable.
@@ -235,17 +261,15 @@ pub fn get_claude_settings_path() -> PathBuf {
 }
 
 /// 获取应用配置目录路径 (~/.cc-switch)
-pub fn get_app_config_dir() -> PathBuf {
-    if let Some(custom) = crate::app_store::get_app_config_dir_override() {
-        return custom;
+pub fn try_get_app_config_dir_app() -> Result<PathBuf, AppError> {
+    if let Some(custom) = crate::app_store::try_get_app_config_dir_override()? {
+        return Ok(require_absolute_root(custom, "app_config_dir override")?);
     }
 
-    let default_dir = get_home_dir().join(".cc-switch");
+    let default_dir = try_get_home_dir_typed()?.join(".cc-switch");
 
-    // 兼容 v3.10.3：当用户环境存在 `HOME` 且与真实用户目录不同，
-    // v3.10.3 可能在 `HOME/.cc-switch/` 下创建/使用了数据库。
-    // 这里仅在“默认位置没有数据库”时回退到旧位置，避免再次出现“供应商消失”问题，
-    // 同时也避免新安装因为 `HOME` 被设置而写入非预期路径。
+    // v3.10.3 HOME is only a historical discovery candidate, not an active root selector.
+    // Invalid legacy candidates are ignored; they must never override a valid OS home root.
     #[cfg(windows)]
     {
         let default_db = default_dir.join("cc-switch.db");
@@ -253,21 +277,42 @@ pub fn get_app_config_dir() -> PathBuf {
             if let Ok(home_env) = std::env::var("HOME") {
                 let trimmed = home_env.trim();
                 if !trimmed.is_empty() {
-                    let legacy_dir = PathBuf::from(trimmed).join(".cc-switch");
-                    if legacy_dir.join("cc-switch.db").exists() {
-                        log::info!(
-                            "Detected v3.10.3 legacy database at {}, using it instead of {}",
-                            legacy_dir.display(),
-                            default_dir.display()
+                    let legacy_home = PathBuf::from(trimmed);
+                    if legacy_home.is_absolute() {
+                        let legacy_dir = legacy_home.join(".cc-switch");
+                        if legacy_dir.join("cc-switch.db").exists() {
+                            log::info!(
+                                "Detected v3.10.3 legacy database at {}, using it instead of {}",
+                                legacy_dir.display(),
+                                default_dir.display()
+                            );
+                            return Ok(legacy_dir);
+                        }
+                    } else {
+                        log::warn!(
+                            "Ignoring relative legacy HOME discovery candidate: {}",
+                            legacy_home.display()
                         );
-                        return legacy_dir;
                     }
                 }
             }
         }
     }
 
-    default_dir
+    Ok(default_dir)
+}
+
+pub fn try_get_app_config_dir() -> Result<PathBuf, String> {
+    try_get_app_config_dir_app().map_err(|err| err.to_string())
+}
+
+/// Compatibility wrapper for legacy infallible path APIs. New fallible persistence operations
+/// should call `try_get_app_config_dir` so configuration errors remain typed instead of panicking.
+pub fn get_app_config_dir() -> PathBuf {
+    try_get_app_config_dir().unwrap_or_else(|err| {
+        log::error!("{err}");
+        panic!("{err}");
+    })
 }
 
 /// 获取应用配置文件路径
@@ -495,6 +540,18 @@ mod tests {
     #[test]
     fn explicit_relative_test_home_override_is_rejected() {
         assert!(resolve_home_dir(Some("relative-test-home"), None).is_err());
+    }
+
+    #[test]
+    fn persistence_roots_reject_process_relative_paths() {
+        assert!(resolve_persistence_path("relative/profile", "test root").is_err());
+    }
+
+    #[test]
+    fn persistence_roots_accept_absolute_paths() {
+        let path = std::env::temp_dir().join("cc-switch-persistence-root");
+        let raw = path.to_string_lossy().to_string();
+        assert_eq!(resolve_persistence_path(&raw, "test root").unwrap(), path);
     }
 
     #[test]

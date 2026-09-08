@@ -4,10 +4,10 @@ use crate::session_manager;
 
 #[tauri::command]
 pub async fn list_sessions() -> Result<Vec<session_manager::SessionMeta>, String> {
-    let sessions = tauri::async_runtime::spawn_blocking(session_manager::scan_sessions)
+    tauri::async_runtime::spawn_blocking(session_manager::scan_sessions)
         .await
-        .map_err(|e| format!("Failed to scan sessions: {e}"))?;
-    Ok(sessions)
+        .map_err(|err| format!("Failed to scan sessions task: {err}"))?
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]

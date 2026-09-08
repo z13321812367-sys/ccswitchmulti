@@ -14,6 +14,7 @@ mod database;
 mod deeplink;
 mod diagnostics;
 mod error;
+mod failure_semantics;
 mod gemini_config;
 mod gemini_mcp;
 pub mod hermes_config;
@@ -288,11 +289,13 @@ pub fn run() {
         .setup(|app| {
             let _ = rustls::crypto::ring::default_provider().install_default();
 
-            // 预先刷新 Store 覆盖配置，确保后续路径读取正确（日志/数据库等）
-            app_store::refresh_app_config_dir_override(app.handle());
-            let app_config_dir = crate::config::get_app_config_dir();
+            // 预先刷新 Store 覆盖配置，确保后续路径读取正确（日志/数据库等）。
+            // Store/路径损坏不能伪装成“无 override”后切到另一个数据库根。
+            app_store::refresh_app_config_dir_override(app.handle())?;
+            let app_config_dir = crate::config::try_get_app_config_dir()
+                .map_err(crate::error::AppError::Config)?;
             panic_hook::init_app_config_dir(app_config_dir.clone());
-            app_exit_monitor::init_app_config_dir(app_config_dir);
+            app_exit_monitor::init_app_config_dir(app_config_dir.clone());
             #[cfg(target_os = "windows")]
             set_windows_app_user_model_id(app.handle());
 
@@ -356,7 +359,6 @@ pub fn run() {
             }
 
             // 初始化数据库
-            let app_config_dir = crate::config::get_app_config_dir();
             let db_path = app_config_dir.join("cc-switch.db");
             let json_path = app_config_dir.join("config.json");
 

@@ -21,7 +21,7 @@ pub fn read_head_tail_lines(
     // For small files, read all lines once and split
     if file_len < 16_384 {
         let reader = BufReader::new(file);
-        let all: Vec<String> = reader.lines().map_while(Result::ok).collect();
+        let all: Vec<String> = reader.lines().collect::<io::Result<Vec<_>>>()?;
         let head = all.iter().take(head_n).cloned().collect();
         let skip = all.len().saturating_sub(tail_n);
         let tail = all.into_iter().skip(skip).collect();
@@ -30,14 +30,17 @@ pub fn read_head_tail_lines(
 
     // Read head lines from the beginning
     let reader = BufReader::new(file);
-    let head: Vec<String> = reader.lines().take(head_n).map_while(Result::ok).collect();
+    let head: Vec<String> = reader
+        .lines()
+        .take(head_n)
+        .collect::<io::Result<Vec<_>>>()?;
 
     // Seek to last ~16 KB for tail lines
     let seek_pos = file_len.saturating_sub(16_384);
     let mut file2 = File::open(path)?;
     file2.seek(SeekFrom::Start(seek_pos))?;
     let tail_reader = BufReader::new(file2);
-    let all_tail: Vec<String> = tail_reader.lines().map_while(Result::ok).collect();
+    let all_tail: Vec<String> = tail_reader.lines().collect::<io::Result<Vec<_>>>()?;
 
     // Skip first partial line if we seeked into the middle of a line
     let skip_first = if seek_pos > 0 { 1 } else { 0 };

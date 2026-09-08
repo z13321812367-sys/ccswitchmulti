@@ -30,8 +30,9 @@
 //!     args: ["-y", "@modelcontextprotocol/server-filesystem"]
 //! ```
 
-use crate::config::{atomic_write, get_app_config_dir};
+use crate::config::atomic_write;
 use crate::error::AppError;
+use crate::failure_semantics::{optional_absolute_env_root, require_absolute_root};
 use crate::settings::{effective_backup_retain_count, get_hermes_override_dir};
 use chrono::Local;
 use serde::{Deserialize, Serialize};
@@ -44,48 +45,41 @@ use std::sync::{Mutex, OnceLock};
 // Path Functions
 // ============================================================================
 
-/// 获取 Hermes 配置目录
+/// Resolve the Hermes configuration root without hiding HOME failure behind a panic.
 ///
-/// 解析顺序对齐 Hermes 自身的 `get_hermes_home()`:
-///   1. CCS 设置 `hermes_config_dir`(显式覆盖)
-///   2. `HERMES_HOME` 环境变量(trim 后非空;按原样,不展开 `~`,与 Hermes `Path(val)` 一致)
-///   3. 平台默认(Windows: `%LOCALAPPDATA%\hermes`,Mac/Linux: `~/.hermes`)
-pub fn get_hermes_dir() -> PathBuf {
+/// Resolution order matches Hermes, but every accepted root is absolute:
+/// 1. validated CC Switch `hermes_config_dir` override;
+/// 2. absolute `HERMES_HOME`;
+/// 3. platform default rooted in an absolute user home / LOCALAPPDATA.
+pub fn try_get_hermes_dir() -> Result<PathBuf, AppError> {
     if let Some(override_dir) = get_hermes_override_dir() {
-        return override_dir;
+        return Ok(require_absolute_root(override_dir, "hermes_config_dir")?);
     }
 
-    if let Some(raw) = std::env::var_os("HERMES_HOME") {
-        let value = raw.to_string_lossy();
-        let trimmed = value.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
-        }
+    if let Some(path) = optional_absolute_env_root("HERMES_HOME")? {
+        return Ok(path);
     }
 
     default_hermes_dir()
 }
 
-/// 平台默认 Hermes 目录(Windows):对齐 Hermes `_get_platform_default_hermes_home()`——
-/// 读 `LOCALAPPDATA` 环境变量,缺失/空时回退 `~\AppData\Local`,再拼 `hermes`。
 #[cfg(target_os = "windows")]
-fn default_hermes_dir() -> PathBuf {
-    windows_local_hermes_dir(
-        std::env::var_os("LOCALAPPDATA").as_deref(),
-        &crate::config::get_home_dir(),
-    )
+fn default_hermes_dir() -> Result<PathBuf, AppError> {
+    if let Some(local_app_data) = optional_absolute_env_root("LOCALAPPDATA")? {
+        return Ok(local_app_data.join("hermes"));
+    }
+    Ok(crate::config::try_get_home_dir_typed()?
+        .join("AppData")
+        .join("Local")
+        .join("hermes"))
 }
 
-/// 平台默认 Hermes 目录(Mac/Linux):`~/.hermes`。
 #[cfg(not(target_os = "windows"))]
-fn default_hermes_dir() -> PathBuf {
-    crate::config::get_home_dir().join(".hermes")
+fn default_hermes_dir() -> Result<PathBuf, AppError> {
+    Ok(crate::config::try_get_home_dir_typed()?.join(".hermes"))
 }
 
-/// Windows `%LOCALAPPDATA%\hermes` 路径计算(纯函数,便于跨平台单测)。
-/// 对齐 Hermes 的 `os.environ.get("LOCALAPPDATA", "").strip()`:trim 后为空
-/// (缺失/空/纯空白)则回退 `<home>\AppData\Local\hermes`。
-#[cfg(any(target_os = "windows", test))]
+#[cfg(test)]
 fn windows_local_hermes_dir(localappdata: Option<&std::ffi::OsStr>, home: &Path) -> PathBuf {
     localappdata
         .map(|value| value.to_string_lossy().trim().to_string())
@@ -95,11 +89,20 @@ fn windows_local_hermes_dir(localappdata: Option<&std::ffi::OsStr>, home: &Path)
         .join("hermes")
 }
 
-/// 获取 Hermes 配置文件路径
-///
-/// 返回 `~/.hermes/config.yaml`
+pub fn try_get_hermes_config_path() -> Result<PathBuf, AppError> {
+    Ok(try_get_hermes_dir()?.join("config.yaml"))
+}
+
+// Tests deliberately control CC_SWITCH_TEST_HOME and may use concise path helpers.
+// Production code must use the fallible functions above.
+#[cfg(test)]
+pub fn get_hermes_dir() -> PathBuf {
+    try_get_hermes_dir().expect("Hermes test root")
+}
+
+#[cfg(test)]
 pub fn get_hermes_config_path() -> PathBuf {
-    get_hermes_dir().join("config.yaml")
+    try_get_hermes_config_path().expect("Hermes test config path")
 }
 
 fn hermes_write_lock() -> &'static Mutex<()> {
@@ -145,7 +148,7 @@ pub struct HermesModelConfig {
 ///
 /// 如果文件不存在，返回空 Mapping
 pub fn read_hermes_config() -> Result<serde_yaml::Value, AppError> {
-    let path = get_hermes_config_path();
+    let path = try_get_hermes_config_path()?;
     if !path.exists() {
         return Ok(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
     }
@@ -361,7 +364,10 @@ fn replace_yaml_section(
 // ============================================================================
 
 fn create_hermes_backup(source: &str) -> Result<PathBuf, AppError> {
-    let backup_dir = get_app_config_dir().join("backups").join("hermes");
+    let backup_dir = crate::config::try_get_app_config_dir()
+        .map_err(AppError::Config)?
+        .join("backups")
+        .join("hermes");
     fs::create_dir_all(&backup_dir).map_err(|e| AppError::io(&backup_dir, e))?;
 
     let base_id = format!("hermes_{}", Local::now().format("%Y%m%d_%H%M%S"));
@@ -433,7 +439,7 @@ fn write_yaml_section_to_config_locked(
     section_key: &str,
     value: &serde_yaml::Value,
 ) -> Result<HermesWriteOutcome, AppError> {
-    let config_path = get_hermes_config_path();
+    let config_path = try_get_hermes_config_path()?;
     let raw = if config_path.exists() {
         fs::read_to_string(&config_path).map_err(|e| AppError::io(&config_path, e))?
     } else {
@@ -1035,14 +1041,14 @@ impl MemoryKind {
     }
 }
 
-fn memories_dir() -> PathBuf {
-    get_hermes_dir().join("memories")
+fn memories_dir() -> Result<PathBuf, AppError> {
+    Ok(try_get_hermes_dir()?.join("memories"))
 }
 
 /// Read a Hermes memory file as a markdown blob. Returns an empty string
 /// when the file doesn't exist yet (first-run case).
 pub fn read_memory(kind: MemoryKind) -> Result<String, AppError> {
-    let path = memories_dir().join(kind.filename());
+    let path = memories_dir()?.join(kind.filename());
     match fs::read_to_string(&path) {
         Ok(content) => Ok(content),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
@@ -1054,7 +1060,7 @@ pub fn read_memory(kind: MemoryKind) -> Result<String, AppError> {
 /// directories as needed, so `~/.hermes/memories/` is materialized on first
 /// write without a separate `create_dir_all` call.
 pub fn write_memory(kind: MemoryKind, content: &str) -> Result<(), AppError> {
-    let path = memories_dir().join(kind.filename());
+    let path = memories_dir()?.join(kind.filename());
     atomic_write(&path, content.as_bytes())
 }
 
@@ -2329,7 +2335,7 @@ user_profile_enabled: false
             // Blank HERMES_HOME is ignored (matches Hermes' `.strip()` non-empty check),
             // so resolution must reach the platform default, never the literal blank path.
             assert_ne!(dir, PathBuf::from("   "));
-            assert_eq!(dir, default_hermes_dir());
+            assert_eq!(dir, default_hermes_dir().expect("default Hermes dir"));
         });
     }
 

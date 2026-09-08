@@ -13,76 +13,90 @@ const PROVIDER_ID: &str = "opencode";
 ///
 /// Respects `XDG_DATA_HOME` on all platforms; falls back to
 /// `~/.local/share/opencode/`.
-pub(crate) fn get_opencode_base_dir() -> PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-        let xdg = PathBuf::from(xdg.trim());
-        if xdg.is_absolute() {
-            return xdg.join("opencode");
-        }
-        if !xdg.as_os_str().is_empty() {
-            log::warn!(
-                "Ignoring relative XDG_DATA_HOME for OpenCode discovery: {}",
-                xdg.display()
-            );
-        }
+fn try_get_opencode_base_dir() -> Result<PathBuf, String> {
+    match crate::failure_semantics::optional_absolute_env_root("XDG_DATA_HOME") {
+        Ok(Some(root)) => return Ok(root.join("opencode")),
+        Ok(None) => {}
+        Err(err) => return Err(err.to_string()),
     }
-    crate::config::get_home_dir().join(".local/share/opencode")
+    Ok(crate::config::try_get_home_dir_typed()
+        .map_err(|err| err.to_string())?
+        .join(".local/share/opencode"))
 }
 
-/// Return the OpenCode JSON storage directory (legacy flat-file layout).
-pub(crate) fn get_opencode_data_dir() -> PathBuf {
-    get_opencode_base_dir().join("storage")
+pub(crate) fn get_opencode_data_dir() -> Result<PathBuf, String> {
+    Ok(try_get_opencode_base_dir()?.join("storage"))
 }
 
-fn get_opencode_db_path() -> PathBuf {
-    get_opencode_base_dir().join("opencode.db")
+fn get_opencode_db_path() -> Result<PathBuf, String> {
+    Ok(try_get_opencode_base_dir()?.join("opencode.db"))
 }
 
-/// Scan sessions from both the legacy JSON files and the newer SQLite database,
-/// merging results with SQLite taking precedence on ID conflicts.
-pub fn scan_sessions() -> Vec<SessionMeta> {
-    let json_sessions = scan_sessions_json();
-    let sqlite_sessions = scan_sessions_sqlite();
-
+pub fn scan_sessions() -> Result<Vec<SessionMeta>, String> {
+    let json_sessions = scan_sessions_json()?;
+    let sqlite_sessions = scan_sessions_sqlite()?;
     if sqlite_sessions.is_empty() {
-        return json_sessions;
+        return Ok(json_sessions);
     }
     if json_sessions.is_empty() {
-        return sqlite_sessions;
+        return Ok(sqlite_sessions);
     }
-
-    // Deduplicate: keep SQLite version when the same session_id exists in both
     let sqlite_ids: std::collections::HashSet<String> = sqlite_sessions
         .iter()
-        .map(|s| s.session_id.clone())
+        .map(|session| session.session_id.clone())
         .collect();
-
     let mut merged = sqlite_sessions;
-    for s in json_sessions {
-        if !sqlite_ids.contains(&s.session_id) {
-            merged.push(s);
+    for session in json_sessions {
+        if !sqlite_ids.contains(&session.session_id) {
+            merged.push(session);
         }
     }
-    merged
+    Ok(merged)
 }
 
-fn scan_sessions_json() -> Vec<SessionMeta> {
-    let storage = get_opencode_data_dir();
+fn scan_sessions_json() -> Result<Vec<SessionMeta>, String> {
+    let storage = get_opencode_data_dir()?;
     let session_dir = storage.join("session");
     if !session_dir.exists() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-
     let mut json_files = Vec::new();
-    collect_json_files(&session_dir, &mut json_files);
-
+    collect_json_files_strict(&session_dir, &mut json_files)?;
     let mut sessions = Vec::new();
     for path in json_files {
-        if let Some(meta) = parse_session(&storage, &path) {
-            sessions.push(meta);
+        match parse_session_checked(&storage, &path) {
+            Ok(meta) => sessions.push(meta),
+            Err(err) => log::warn!(
+                "Skipping unreadable OpenCode session {}: {err}",
+                path.display()
+            ),
         }
     }
-    sessions
+    Ok(sessions)
+}
+
+fn collect_json_files_strict(root: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
+    let entries = std::fs::read_dir(root).map_err(|err| {
+        format!(
+            "Failed to enumerate OpenCode session storage {}: {err}",
+            root.display()
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|err| {
+            format!(
+                "Failed to enumerate OpenCode session entry in {}: {err}",
+                root.display()
+            )
+        })?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_json_files_strict(&path, files)?;
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+            files.push(path);
+        }
+    }
+    Ok(())
 }
 
 /// Parse a SQLite source reference in the format `sqlite:<db_path>:<session_id>`.
@@ -98,44 +112,40 @@ fn parse_sqlite_source(source: &str) -> Option<(PathBuf, String)> {
     Some((db_path, session_id))
 }
 
-fn scan_sessions_sqlite() -> Vec<SessionMeta> {
-    let db_path = get_opencode_db_path();
+fn scan_sessions_sqlite() -> Result<Vec<SessionMeta>, String> {
+    let db_path = get_opencode_db_path()?;
     if !db_path.exists() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-
-    let conn = match Connection::open_with_flags(
+    let conn = Connection::open_with_flags(
         &db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut stmt = match conn.prepare(
+    )
+    .map_err(|err| {
+        format!(
+            "Failed to open OpenCode session database {}: {err}",
+            db_path.display()
+        )
+    })?;
+    let mut stmt = conn.prepare(
         "SELECT id, title, directory, time_created, time_updated FROM session ORDER BY time_updated DESC",
-    ) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-
+    ).map_err(|err| format!("Failed to prepare OpenCode session query: {err}"))?;
     let db_display = db_path.display().to_string();
-
-    let iter = match stmt.query_map([], |row| {
-        let session_id: String = row.get(0)?;
-        let title: String = row.get(1)?;
-        let directory: String = row.get(2)?;
-        let created: i64 = row.get(3)?;
-        let updated: i64 = row.get(4)?;
-        Ok((session_id, title, directory, created, updated))
-    }) {
-        Ok(rows) => rows,
-        Err(_) => return Vec::new(),
-    };
-
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })
+        .map_err(|err| format!("Failed to query OpenCode sessions: {err}"))?;
     let mut sessions = Vec::new();
-    for row in iter.flatten() {
-        let (session_id, title, directory, created, updated) = row;
+    for row in rows {
+        let (session_id, title, directory, created, updated) =
+            row.map_err(|err| format!("Failed to decode OpenCode session row: {err}"))?;
         let display_title = if title.is_empty() {
             path_basename(&directory)
         } else {
@@ -157,7 +167,7 @@ fn scan_sessions_sqlite() -> Vec<SessionMeta> {
             resume_command: Some(format!("opencode session resume {session_id}")),
         });
     }
-    sessions
+    Ok(sessions)
 }
 
 pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
@@ -390,7 +400,7 @@ pub fn delete_session_sqlite(session_id: &str, source: &str) -> Result<bool, Str
     let db_path = db_path
         .canonicalize()
         .map_err(|e| format!("Failed to canonicalize SQLite database path: {e}"))?;
-    let expected_db_path = get_opencode_db_path()
+    let expected_db_path = get_opencode_db_path()?
         .canonicalize()
         .map_err(|e| format!("Failed to canonicalize expected OpenCode database path: {e}"))?;
 
@@ -425,11 +435,17 @@ pub fn delete_session_sqlite(session_id: &str, source: &str) -> Result<bool, Str
     Ok(deleted > 0)
 }
 
-fn parse_session(storage: &Path, path: &Path) -> Option<SessionMeta> {
-    let data = std::fs::read_to_string(path).ok()?;
-    let value: Value = serde_json::from_str(&data).ok()?;
+fn parse_session_checked(storage: &Path, path: &Path) -> Result<SessionMeta, String> {
+    let data = std::fs::read_to_string(path)
+        .map_err(|err| format!("Failed to read OpenCode session {}: {err}", path.display()))?;
+    let value: Value = serde_json::from_str(&data)
+        .map_err(|err| format!("Failed to parse OpenCode session {}: {err}", path.display()))?;
 
-    let session_id = value.get("id").and_then(Value::as_str)?.to_string();
+    let session_id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("OpenCode session has no id: {}", path.display()))?
+        .to_string();
     let title = value
         .get("title")
         .and_then(Value::as_str)
@@ -469,7 +485,7 @@ fn parse_session(storage: &Path, path: &Path) -> Option<SessionMeta> {
         get_first_user_summary(storage, &session_id)
     };
 
-    Some(SessionMeta {
+    Ok(SessionMeta {
         provider_id: PROVIDER_ID.to_string(),
         session_id: session_id.clone(),
         title: display_title,
@@ -810,7 +826,7 @@ mod tests {
         .expect("insert session 2");
         drop(conn);
 
-        let sessions = scan_sessions_sqlite();
+        let sessions = scan_sessions_sqlite().expect("scan sqlite sessions");
 
         #[allow(deprecated)]
         if let Some(value) = original_xdg {
@@ -829,6 +845,33 @@ mod tests {
         assert_eq!(
             sessions[1].source_path.as_deref(),
             Some(expected_source.as_str())
+        );
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn scan_sessions_sqlite_surfaces_schema_errors() {
+        let _guard = opencode_env_lock().lock().expect("lock");
+        let temp = tempdir().expect("tempdir");
+        let original_xdg = std::env::var_os("XDG_DATA_HOME");
+        std::env::set_var("XDG_DATA_HOME", temp.path());
+        let base_dir = temp.path().join("opencode");
+        std::fs::create_dir_all(&base_dir).expect("create base dir");
+        let db_path = base_dir.join("opencode.db");
+        let conn = Connection::open(&db_path).expect("open sqlite db");
+        conn.execute_batch("CREATE TABLE unrelated (id TEXT PRIMARY KEY);")
+            .expect("create incompatible schema");
+        drop(conn);
+        let result = scan_sessions_sqlite();
+        if let Some(value) = original_xdg {
+            std::env::set_var("XDG_DATA_HOME", value);
+        } else {
+            std::env::remove_var("XDG_DATA_HOME");
+        }
+        let err = result.expect_err("missing session table must be observable");
+        assert!(
+            err.contains("Failed to prepare OpenCode session query"),
+            "{err}"
         );
     }
 

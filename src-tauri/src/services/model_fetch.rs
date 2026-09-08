@@ -102,9 +102,6 @@ const ZHIPU_MODEL_OVERVIEW_MD_URL: &str =
 /// 仅当 provider 的 `api` 前缀能匹配当前成功的 `/models` endpoint 时才使用。
 const MODELS_DEV_API_URL: &str = "https://models.dev/api.json";
 
-/// 404/405 响应体截断长度：避免把几十 KB HTML 404 页整页保留到错误串里。
-const ERROR_BODY_MAX_CHARS: usize = 512;
-
 /// 已知的「Anthropic 协议兼容子路径」后缀；按长度降序，最长前缀优先匹配。
 /// baseURL 命中这些后缀时，候选列表会追加「剥离后缀再拼 /v1/models / /models」的版本。
 const KNOWN_COMPAT_SUFFIXES: &[&str] = &[
@@ -298,8 +295,18 @@ pub async fn fetch_models(options: FetchModelsRequest<'_>) -> Result<Vec<Fetched
             continue;
         }
 
-        let body = truncate_body(response.text().await.unwrap_or_default());
-        return Err(format!("HTTP {status}: {body}"));
+        let body_detail = match response.bytes().await {
+            Ok(body) => {
+                let rendered = String::from_utf8_lossy(&body);
+                format!(
+                    "body-shape={}, {}",
+                    crate::diagnostics::text_shape_hint(&rendered),
+                    crate::diagnostics::payload_fingerprint(&body)
+                )
+            }
+            Err(error) => format!("body-unavailable={}", request_error_kind(&error)),
+        };
+        return Err(format!("HTTP {status}: {body_detail}"));
     }
 
     let details = if candidate_failures.is_empty() {
@@ -928,17 +935,6 @@ pub fn build_models_url_candidates(
     Ok(unique)
 }
 
-/// 截断响应体到 [`ERROR_BODY_MAX_CHARS`] 字符，避免 HTML 404 页占用错误串。
-fn truncate_body(body: String) -> String {
-    if body.chars().count() <= ERROR_BODY_MAX_CHARS {
-        body
-    } else {
-        let mut s: String = body.chars().take(ERROR_BODY_MAX_CHARS).collect();
-        s.push('…');
-        s
-    }
-}
-
 /// 若 baseURL 以任一已知兼容子路径结尾，返回剥离后的剩余部分；否则 `None`。
 ///
 /// 依赖 [`KNOWN_COMPAT_SUFFIXES`] 按长度降序排列，确保最长前缀优先命中
@@ -981,6 +977,20 @@ mod tests {
         assert!(!should_try_next_models_candidate(
             StatusCode::TOO_MANY_REQUESTS
         ));
+    }
+
+    #[test]
+    fn fail_fast_http_diagnostics_do_not_require_raw_body() {
+        let secret = b"{\"token\":\"super-secret\"}";
+        let rendered = String::from_utf8_lossy(secret);
+        let detail = format!(
+            "body-shape={}, {}",
+            crate::diagnostics::text_shape_hint(&rendered),
+            crate::diagnostics::payload_fingerprint(secret)
+        );
+        assert!(detail.contains("body-shape=json-like"));
+        assert!(detail.contains("bytes="));
+        assert!(!detail.contains("super-secret"));
     }
 
     #[test]
