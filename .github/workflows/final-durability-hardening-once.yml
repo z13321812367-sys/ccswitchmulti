@@ -150,11 +150,10 @@ jobs:
       - name: Run all-feature Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --all-features
 
-      - name: Commit verified durability fixes and remove one-shot workflow
+      - name: Commit verified durability fixes
         shell: bash
         run: |
           set -euo pipefail
-          git rm .github/workflows/final-durability-hardening-once.yml
           git add src-tauri/src/config.rs scripts/check_rust_failure_boundaries.py .github/workflows/ci.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
