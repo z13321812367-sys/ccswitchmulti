@@ -138,6 +138,9 @@ jobs:
       - name: Check permanent failure boundaries
         run: python scripts/check_rust_failure_boundaries.py
 
+      - name: Format generated Rust
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml
+
       - name: Check Rust formatting
         run: cargo fmt --check --manifest-path src-tauri/Cargo.toml
 
