@@ -1,5 +1,4 @@
 name: Final Durability Hardening Once
-# Retrigger after the workflow has been registered on the branch.
 
 on:
   push:
@@ -38,17 +37,14 @@ jobs:
               raise SystemExit(f"expected one atomic-write contract marker, found {config.count(old_contract)}")
           config = config.replace(old_contract, new_contract)
 
-          old_sync = '''    #[cfg(unix)]
-          if let Ok(directory) = fs::File::open(parent) {
-              if let Err(err) = directory.sync_all() {
-                  // 文件本身已经成功替换；目录 fsync 在部分文件系统上可能不支持，因此只记录。
-                  log::debug!(
-                      "目录元数据同步失败（文件内容已成功替换）: path={}, error={err}",
-                      parent.display()
-                  );
-              }
-          }
-          '''
+          start_marker = "    #[cfg(unix)]\n    if let Ok(directory) = fs::File::open(parent) {"
+          end_marker = "\n\n    Ok(())\n}"
+          start = config.find(start_marker)
+          if start < 0:
+              raise SystemExit("atomic-write parent-sync start marker not found")
+          end = config.find(end_marker, start)
+          if end < 0:
+              raise SystemExit("atomic-write parent-sync end marker not found")
           new_sync = '''    #[cfg(unix)]
           {
               let directory = fs::File::open(parent).map_err(|err| AppError::IoContext {
@@ -65,11 +61,8 @@ jobs:
                   ),
                   source: err,
               })?;
-          }
-          '''
-          if config.count(old_sync) != 1:
-              raise SystemExit(f"expected one swallow-directory-sync block, found {config.count(old_sync)}")
-          config = config.replace(old_sync, new_sync)
+          }'''
+          config = config[:start] + new_sync + config[end:]
           config_path.write_text(config, encoding="utf-8")
 
           policy_path = Path("scripts/check_rust_failure_boundaries.py")
