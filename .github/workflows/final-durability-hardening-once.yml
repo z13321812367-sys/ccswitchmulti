@@ -1,0 +1,165 @@
+name: Final Durability Hardening Once
+
+on:
+  push:
+    branches: [fix/global-hardening-20260904]
+    paths:
+      - ".github/workflows/final-durability-hardening-once.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  harden:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout hardening branch
+        uses: actions/checkout@v6
+        with:
+          ref: fix/global-hardening-20260904
+          fetch-depth: 0
+
+      - name: Apply durability and cross-platform CI invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          config_path = Path("src-tauri/src/config.rs")
+          config = config_path.read_text(encoding="utf-8")
+
+          old_contract = "/// - 任何写入/替换错误都会清理临时文件，旧目标保持不变（文件系统自身故障除外）。"
+          new_contract = """/// - 替换前的写入/替换失败会清理临时文件并保留旧目标；
+          /// - Unix 替换后必须同步父目录；目录同步失败返回错误，因为新内容可能已可见但持久化尚未确认。"""
+          if config.count(old_contract) != 1:
+              raise SystemExit(f"expected one atomic-write contract marker, found {config.count(old_contract)}")
+          config = config.replace(old_contract, new_contract)
+
+          old_sync = '''    #[cfg(unix)]
+          if let Ok(directory) = fs::File::open(parent) {
+              if let Err(err) = directory.sync_all() {
+                  // 文件本身已经成功替换；目录 fsync 在部分文件系统上可能不支持，因此只记录。
+                  log::debug!(
+                      "目录元数据同步失败（文件内容已成功替换）: path={}, error={err}",
+                      parent.display()
+                  );
+              }
+          }
+          '''
+          new_sync = '''    #[cfg(unix)]
+          {
+              let directory = fs::File::open(parent).map_err(|err| AppError::IoContext {
+                  context: format!(
+                      "无法打开父目录以确认原子写入持久化: {}",
+                      parent.display()
+                  ),
+                  source: err,
+              })?;
+              directory.sync_all().map_err(|err| AppError::IoContext {
+                  context: format!(
+                      "父目录同步失败，无法确认原子写入持久化（新内容可能已可见）: {}",
+                      parent.display()
+                  ),
+                  source: err,
+              })?;
+          }
+          '''
+          if config.count(old_sync) != 1:
+              raise SystemExit(f"expected one swallow-directory-sync block, found {config.count(old_sync)}")
+          config = config.replace(old_sync, new_sync)
+          config_path.write_text(config, encoding="utf-8")
+
+          policy_path = Path("scripts/check_rust_failure_boundaries.py")
+          policy = policy_path.read_text(encoding="utf-8")
+          marker = '''if 'let legacy_dir = PathBuf::from(trimmed).join(".cc-switch")' in config_text:
+              failures.append("src-tauri/src/config.rs: Windows legacy HOME must be validated before DB fallback")
+          '''
+          guard = '''if 'let legacy_dir = PathBuf::from(trimmed).join(".cc-switch")' in config_text:
+              failures.append("src-tauri/src/config.rs: Windows legacy HOME must be validated before DB fallback")
+
+          # A successful rename is not a durable commit on Unix until the parent directory entry is
+          # synced. Returning success after a directory-sync failure would recreate the same
+          # acknowledged-but-not-durable persistence failure class this hardening pass removes.
+          if not re.search(r"directory\\.sync_all\\(\\)\\.map_err", config_text):
+              failures.append(
+                  "src-tauri/src/config.rs: atomic writes must propagate parent-directory durability sync failures"
+              )
+          '''
+          if policy.count(marker) != 1:
+              raise SystemExit(f"expected one policy insertion marker, found {policy.count(marker)}")
+          policy = policy.replace(marker, guard)
+          policy_path.write_text(policy, encoding="utf-8")
+
+          ci_path = Path(".github/workflows/ci.yml")
+          ci = ci_path.read_text(encoding="utf-8")
+          if "backend-windows:" in ci:
+              raise SystemExit("Windows backend gate already exists unexpectedly")
+          windows_job = '''
+
+            backend-windows:
+              name: Backend Windows Durability
+              runs-on: windows-latest
+              steps:
+                - name: Checkout
+                  uses: actions/checkout@v6
+
+                - name: Setup Rust
+                  uses: dtolnay/rust-toolchain@stable
+
+                - name: Create frontend dist placeholder
+                  shell: pwsh
+                  run: New-Item -ItemType Directory -Force dist | Out-Null
+
+                - name: Compile and link all Windows targets and features
+                  run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features --no-run
+
+                - name: Exercise Windows atomic replacement
+                  run: cargo test --manifest-path src-tauri/Cargo.toml --all-features atomic_write_replaces_complete_file
+          '''
+          ci = ci.rstrip() + windows_job + "\n"
+          ci_path.write_text(ci, encoding="utf-8")
+          PY
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install Linux system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev \
+            libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+            || sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.0-dev
+          sudo apt-get install -y --no-install-recommends libsoup-3.0-dev \
+            || sudo apt-get install -y --no-install-recommends libsoup2.4-dev
+
+      - name: Create frontend dist placeholder
+        run: mkdir -p dist
+
+      - name: Check permanent failure boundaries
+        run: python scripts/check_rust_failure_boundaries.py
+
+      - name: Check Rust formatting
+        run: cargo fmt --check --manifest-path src-tauri/Cargo.toml
+
+      - name: Strict Clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+
+      - name: Run all-feature Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --all-features
+
+      - name: Commit verified durability fixes and remove one-shot workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/final-durability-hardening-once.yml
+          git add src-tauri/src/config.rs scripts/check_rust_failure_boundaries.py .github/workflows/ci.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "fix: enforce durable atomic commit boundaries"
+          git push origin HEAD:fix/global-hardening-20260904
