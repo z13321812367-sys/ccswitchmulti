@@ -1,4 +1,5 @@
 name: Final Durability Hardening Once
+# Retrigger after the workflow has been registered on the branch.
 
 on:
   push:
