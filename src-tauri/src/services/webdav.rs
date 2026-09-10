@@ -118,7 +118,7 @@ fn webdav_transport_error(
         ("网络请求失败", "network request failed")
     };
 
-    let safe_url = redact_url(target_url);
+    let safe_url = crate::diagnostics::redact_url_for_log(target_url);
     AppError::localized(
         key,
         format!("WebDAV {op_zh}失败（{zh_reason}）: {safe_url}"),
@@ -202,7 +202,10 @@ pub async fn ensure_remote_directories(
         let status = resp.status();
         match status {
             s if s == StatusCode::CREATED || s.is_success() => {
-                log::info!("[WebDAV] MKCOL ok: {}", redact_url(&dir_url));
+                log::info!(
+                    "[WebDAV] MKCOL ok: {}",
+                    crate::diagnostics::redact_url_for_log(&dir_url)
+                );
             }
             // Ambiguous — verify directory actually exists via PROPFIND
             s if s == StatusCode::METHOD_NOT_ALLOWED
@@ -347,7 +350,7 @@ async fn propfind_exists(
         Err(e) => {
             log::warn!(
                 "[WebDAV] PROPFIND check failed for {}: {e}",
-                redact_url(url)
+                crate::diagnostics::redact_url_for_log(url)
             );
             Ok(false)
         }
@@ -367,7 +370,7 @@ pub fn is_jianguoyun(url: &str) -> bool {
 
 /// Build an `AppError` with service-specific hints for WebDAV failures.
 pub fn webdav_status_error(op: &str, status: StatusCode, url: &str) -> AppError {
-    let safe_url = redact_url(url);
+    let safe_url = crate::diagnostics::redact_url_for_log(url);
     let mut zh = format!("WebDAV {op} 失败: {status} ({safe_url})");
     let mut en = format!("WebDAV {op} failed: {status} ({safe_url})");
     let jgy = is_jianguoyun(url);
@@ -400,36 +403,6 @@ pub fn webdav_status_error(op: &str, status: StatusCode, url: &str) -> AppError 
     AppError::localized("webdav.http.status", zh, en)
 }
 
-fn redact_url(raw: &str) -> String {
-    match Url::parse(raw) {
-        Ok(mut parsed) => {
-            let _ = parsed.set_username("");
-            let _ = parsed.set_password(None);
-
-            let mut out = format!("{}://", parsed.scheme());
-            if let Some(host) = parsed.host_str() {
-                out.push_str(host);
-            }
-            if let Some(port) = parsed.port() {
-                out.push(':');
-                out.push_str(&port.to_string());
-            }
-            out.push_str(parsed.path());
-
-            let mut keys: Vec<String> = parsed.query_pairs().map(|(k, _)| k.into_owned()).collect();
-            keys.sort();
-            keys.dedup();
-            if !keys.is_empty() {
-                out.push_str("?[keys:");
-                out.push_str(&keys.join(","));
-                out.push(']');
-            }
-            out
-        }
-        Err(_) => raw.split('?').next().unwrap_or(raw).to_string(),
-    }
-}
-
 fn response_too_large_error(url: &str, max_bytes: usize) -> AppError {
     let max_mb = max_bytes / 1024 / 1024;
     AppError::localized(
@@ -437,12 +410,12 @@ fn response_too_large_error(url: &str, max_bytes: usize) -> AppError {
         format!(
             "WebDAV 响应体超过上限（{} MB）: {}",
             max_mb,
-            redact_url(url)
+            crate::diagnostics::redact_url_for_log(url)
         ),
         format!(
             "WebDAV response body exceeds limit ({} MB): {}",
             max_mb,
-            redact_url(url)
+            crate::diagnostics::redact_url_for_log(url)
         ),
     )
 }
@@ -520,7 +493,9 @@ mod tests {
 
     #[test]
     fn redact_url_hides_credentials_and_query_values() {
-        let redacted = redact_url("https://alice:secret@example.com:8443/dav?token=abc&foo=1");
+        let redacted = crate::diagnostics::redact_url_for_log(
+            "https://alice:secret@example.com:8443/dav?token=abc&foo=1",
+        );
         assert_eq!(redacted, "https://example.com:8443/dav?[keys:foo,token]");
         assert!(!redacted.contains("secret"));
     }

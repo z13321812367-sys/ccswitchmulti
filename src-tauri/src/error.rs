@@ -1,4 +1,6 @@
 use std::path::Path;
+
+use crate::failure_semantics::RootResolutionError;
 use std::sync::PoisonError;
 
 use thiserror::Error;
@@ -7,6 +9,8 @@ use thiserror::Error;
 pub enum AppError {
     #[error("配置错误: {0}")]
     Config(String),
+    #[error(transparent)]
+    Root(#[from] RootResolutionError),
     #[error("无效输入: {0}")]
     InvalidInput(String),
     #[error("IO 错误: {path}: {source}")]

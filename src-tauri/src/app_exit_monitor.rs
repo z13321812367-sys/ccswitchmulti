@@ -211,9 +211,17 @@ fn get_app_config_dir() -> PathBuf {
 }
 
 fn default_app_config_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".cc-switch")
+    match crate::config::try_get_home_dir() {
+        Ok(home) => home.join(".cc-switch"),
+        Err(err) => {
+            let fallback = crate::config::emergency_observability_dir();
+            eprintln!(
+                "[CC-Switch] HOME unavailable for crash/exit diagnostics: {err}; using {}",
+                fallback.display()
+            );
+            fallback
+        }
+    }
 }
 
 fn now_string() -> String {

@@ -24,7 +24,7 @@ pub fn prompt_file_path(app: &AppType) -> Result<PathBuf, AppError> {
         AppType::Gemini => get_gemini_dir(),
         AppType::OpenCode => get_opencode_dir(),
         AppType::OpenClaw => get_openclaw_dir(),
-        AppType::Hermes => crate::hermes_config::get_hermes_dir(),
+        AppType::Hermes => crate::hermes_config::try_get_hermes_dir()?,
         AppType::ClaudeDesktop => unreachable!("handled above"),
     };
 
@@ -46,7 +46,11 @@ fn get_base_dir_with_fallback(
     primary_path
         .parent()
         .map(|p| p.to_path_buf())
-        .or_else(|| dirs::home_dir().map(|h| h.join(fallback_dir)))
+        .or_else(|| {
+            crate::config::try_get_home_dir()
+                .ok()
+                .map(|h| h.join(fallback_dir))
+        })
         .ok_or_else(|| {
             AppError::localized(
                 "home_dir_not_found",

@@ -229,24 +229,6 @@ fn sign_request(
 // ─── Error helpers ───────────────────────────────────────────
 
 /// Redact a URL for safe inclusion in error messages (strips query parameters).
-fn redact_url(raw: &str) -> String {
-    match Url::parse(raw) {
-        Ok(parsed) => {
-            let mut out = format!("{}://", parsed.scheme());
-            if let Some(host) = parsed.host_str() {
-                out.push_str(host);
-            }
-            if let Some(port) = parsed.port() {
-                out.push(':');
-                out.push_str(&port.to_string());
-            }
-            out.push_str(parsed.path());
-            out
-        }
-        Err(_) => raw.split('?').next().unwrap_or(raw).to_string(),
-    }
-}
-
 fn s3_transport_error(
     key: &'static str,
     op_zh: &str,
@@ -271,7 +253,7 @@ fn s3_transport_error(
 }
 
 fn s3_status_error(op: &str, status: StatusCode, url: &str) -> AppError {
-    let safe_url = redact_url(url);
+    let safe_url = crate::diagnostics::redact_url_without_query_for_log(url);
     let mut zh = format!("S3 {op} 失败: {status} ({safe_url})");
     let mut en = format!("S3 {op} failed: {status} ({safe_url})");
 
@@ -290,11 +272,15 @@ fn response_too_large_error(url: &str, max_bytes: usize) -> AppError {
     let max_mb = max_bytes / 1024 / 1024;
     AppError::localized(
         "s3.response_too_large",
-        format!("S3 响应体超过上限（{} MB）: {}", max_mb, redact_url(url)),
+        format!(
+            "S3 响应体超过上限（{} MB）: {}",
+            max_mb,
+            crate::diagnostics::redact_url_without_query_for_log(url)
+        ),
         format!(
             "S3 response body exceeds limit ({} MB): {}",
             max_mb,
-            redact_url(url)
+            crate::diagnostics::redact_url_without_query_for_log(url)
         ),
     )
 }
@@ -814,7 +800,7 @@ mod tests {
 
     #[test]
     fn redact_url_strips_query_params() {
-        let r = redact_url(
+        let r = crate::diagnostics::redact_url_without_query_for_log(
             "https://mybucket.s3.us-east-1.amazonaws.com/file.txt?X-Amz-Credential=AKID&X-Amz-Signature=abc",
         );
         assert!(!r.contains("AKID"));
@@ -825,7 +811,9 @@ mod tests {
 
     #[test]
     fn redact_url_preserves_path() {
-        let r = redact_url("https://minio.local:9000/bucket/path/to/file.json");
+        let r = crate::diagnostics::redact_url_without_query_for_log(
+            "https://minio.local:9000/bucket/path/to/file.json",
+        );
         assert_eq!(r, "https://minio.local:9000/bucket/path/to/file.json");
     }
 

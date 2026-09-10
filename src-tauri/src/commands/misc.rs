@@ -1296,7 +1296,12 @@ fn push_unique_path(paths: &mut Vec<std::path::PathBuf>, path: std::path::PathBu
 
 fn push_env_single_dir(paths: &mut Vec<std::path::PathBuf>, value: Option<std::ffi::OsString>) {
     if let Some(raw) = value {
-        push_unique_path(paths, std::path::PathBuf::from(raw));
+        let path = std::path::PathBuf::from(raw);
+        if path.is_absolute() {
+            push_unique_path(paths, path);
+        } else if !path.as_os_str().is_empty() {
+            log::warn!("Ignoring relative CLI install root: {}", path.display());
+        }
     }
 }
 
@@ -1306,10 +1311,16 @@ fn extend_from_path_list(
     suffix: Option<&str>,
 ) {
     if let Some(raw) = value {
-        for p in std::env::split_paths(&raw) {
+        for base in std::env::split_paths(&raw) {
+            if !base.is_absolute() {
+                if !base.as_os_str().is_empty() {
+                    log::warn!("Ignoring relative CLI path-list root: {}", base.display());
+                }
+                continue;
+            }
             let dir = match suffix {
-                Some(s) => p.join(s),
-                None => p,
+                Some(suffix) => base.join(suffix),
+                None => base,
             };
             push_unique_path(paths, dir);
         }
@@ -1429,7 +1440,7 @@ fn extend_windows_cli_manager_search_paths(paths: &mut Vec<std::path::PathBuf>, 
 /// 额外扫描 Bun 默认全局安装路径（~/.bun/bin）
 /// 和 Go 安装路径（~/go/bin、$GOPATH/*/bin）。
 fn opencode_extra_search_paths(
-    home: &Path,
+    home: Option<&Path>,
     opencode_install_dir: Option<std::ffi::OsString>,
     xdg_bin_dir: Option<std::ffi::OsString>,
     gopath: Option<std::ffi::OsString>,
@@ -1439,7 +1450,7 @@ fn opencode_extra_search_paths(
     push_env_single_dir(&mut paths, opencode_install_dir);
     push_env_single_dir(&mut paths, xdg_bin_dir);
 
-    if !home.as_os_str().is_empty() {
+    if let Some(home) = home {
         push_unique_path(&mut paths, home.join("bin"));
         push_unique_path(&mut paths, home.join(".opencode").join("bin"));
         push_unique_path(&mut paths, home.join(".bun").join("bin"));
@@ -1492,16 +1503,31 @@ fn extend_mise_node_search_paths(paths: &mut Vec<std::path::PathBuf>, home: &Pat
 /// 单探兜底 (`scan_cli_version`) 与全量枚举 (`enumerate_tool_installations`) 共用，
 /// 确保两条路径看到的是同一组安装位置。
 fn build_tool_search_paths(tool: &str) -> Vec<std::path::PathBuf> {
-    let home = dirs::home_dir().unwrap_or_default();
-
-    // 常见的安装路径（原生安装优先）
+    let home = crate::config::try_get_home_dir().ok();
     let mut search_paths: Vec<std::path::PathBuf> = Vec::new();
-    if !home.as_os_str().is_empty() {
+
+    if let Some(home) = home.as_ref() {
         push_unique_path(&mut search_paths, home.join(".local/bin"));
         push_unique_path(&mut search_paths, home.join(".npm-global/bin"));
         push_unique_path(&mut search_paths, home.join("n/bin"));
         push_unique_path(&mut search_paths, home.join(".volta/bin"));
-        extend_mise_node_search_paths(&mut search_paths, &home);
+        extend_mise_node_search_paths(&mut search_paths, home);
+
+        for base in [
+            home.join(".local/state/fnm_multishells"),
+            home.join(".nvm/versions/node"),
+        ] {
+            if let Ok(entries) = std::fs::read_dir(&base) {
+                for entry in entries.flatten() {
+                    let bin_path = entry.path().join("bin");
+                    if bin_path.exists() {
+                        push_unique_path(&mut search_paths, bin_path);
+                    }
+                }
+            }
+        }
+    } else {
+        log::warn!("HOME unavailable while discovering CLI tools; skipping home-scoped candidates");
     }
 
     #[cfg(target_os = "macos")]
@@ -1515,8 +1541,8 @@ fn build_tool_search_paths(tool: &str) -> Vec<std::path::PathBuf> {
             std::path::PathBuf::from("/usr/local/bin"),
         );
         if tool == "hermes" {
-            let python_base = home.join("Library").join("Python");
-            if python_base.exists() {
+            if let Some(home) = home.as_ref() {
+                let python_base = home.join("Library").join("Python");
                 if let Ok(entries) = std::fs::read_dir(&python_base) {
                     for entry in entries.flatten() {
                         let bin_path = entry.path().join("bin");
@@ -1544,13 +1570,11 @@ fn build_tool_search_paths(tool: &str) -> Vec<std::path::PathBuf> {
             push_unique_path(&mut search_paths, appdata.join("npm"));
             if tool == "hermes" {
                 let python_base = appdata.join("Python");
-                if python_base.exists() {
-                    if let Ok(entries) = std::fs::read_dir(&python_base) {
-                        for entry in entries.flatten() {
-                            let scripts_path = entry.path().join("Scripts");
-                            if scripts_path.exists() {
-                                push_unique_path(&mut search_paths, scripts_path);
-                            }
+                if let Ok(entries) = std::fs::read_dir(&python_base) {
+                    for entry in entries.flatten() {
+                        let scripts_path = entry.path().join("Scripts");
+                        if scripts_path.exists() {
+                            push_unique_path(&mut search_paths, scripts_path);
                         }
                     }
                 }
@@ -1559,13 +1583,11 @@ fn build_tool_search_paths(tool: &str) -> Vec<std::path::PathBuf> {
         if tool == "hermes" {
             if let Some(local_data) = dirs::data_local_dir() {
                 let programs_python = local_data.join("Programs").join("Python");
-                if programs_python.exists() {
-                    if let Ok(entries) = std::fs::read_dir(&programs_python) {
-                        for entry in entries.flatten() {
-                            let scripts_path = entry.path().join("Scripts");
-                            if scripts_path.exists() {
-                                push_unique_path(&mut search_paths, scripts_path);
-                            }
+                if let Ok(entries) = std::fs::read_dir(&programs_python) {
+                    for entry in entries.flatten() {
+                        let scripts_path = entry.path().join("Scripts");
+                        if scripts_path.exists() {
+                            push_unique_path(&mut search_paths, scripts_path);
                         }
                     }
                 }
@@ -1573,50 +1595,26 @@ fn build_tool_search_paths(tool: &str) -> Vec<std::path::PathBuf> {
         }
         push_unique_path(
             &mut search_paths,
-            std::path::PathBuf::from("C:\\Program Files\\nodejs"),
+            std::path::PathBuf::from(r"C:\Program Files\nodejs"),
         );
-        extend_windows_cli_manager_search_paths(&mut search_paths, &home);
-    }
-
-    let fnm_base = home.join(".local/state/fnm_multishells");
-    if fnm_base.exists() {
-        if let Ok(entries) = std::fs::read_dir(&fnm_base) {
-            for entry in entries.flatten() {
-                let bin_path = entry.path().join("bin");
-                if bin_path.exists() {
-                    push_unique_path(&mut search_paths, bin_path);
-                }
-            }
-        }
-    }
-
-    let nvm_base = home.join(".nvm/versions/node");
-    if nvm_base.exists() {
-        if let Ok(entries) = std::fs::read_dir(&nvm_base) {
-            for entry in entries.flatten() {
-                let bin_path = entry.path().join("bin");
-                if bin_path.exists() {
-                    push_unique_path(&mut search_paths, bin_path);
-                }
-            }
+        if let Some(home) = home.as_ref() {
+            extend_windows_cli_manager_search_paths(&mut search_paths, home);
         }
     }
 
     if tool == "opencode" {
-        let extra_paths = opencode_extra_search_paths(
-            &home,
+        for path in opencode_extra_search_paths(
+            home.as_deref(),
             std::env::var_os("OPENCODE_INSTALL_DIR"),
             std::env::var_os("XDG_BIN_DIR"),
             std::env::var_os("GOPATH"),
-        );
-
-        for path in extra_paths {
+        ) {
             push_unique_path(&mut search_paths, path);
         }
     }
 
-    let path_env = std::env::var_os("PATH");
-    extend_from_cli_path_env(&mut search_paths, path_env);
+    // PATH intentionally retains shell/OS semantics; explicit manager/install roots above do not.
+    extend_from_cli_path_env(&mut search_paths, std::env::var_os("PATH"));
     search_paths
 }
 
@@ -5053,7 +5051,7 @@ mod tests {
         let gopath =
             std::env::join_paths([PathBuf::from("/go/path1"), PathBuf::from("/go/path2")]).ok();
 
-        let paths = opencode_extra_search_paths(&home, install_dir, xdg_bin_dir, gopath);
+        let paths = opencode_extra_search_paths(Some(&home), install_dir, xdg_bin_dir, gopath);
 
         assert_eq!(paths[0], PathBuf::from("/custom/opencode/bin"));
         assert_eq!(paths[1], PathBuf::from("/xdg/bin"));
@@ -5070,7 +5068,7 @@ mod tests {
         let home = PathBuf::from("/home/tester");
         let same_dir = Some(std::ffi::OsString::from("/same/path"));
 
-        let paths = opencode_extra_search_paths(&home, same_dir.clone(), same_dir, None);
+        let paths = opencode_extra_search_paths(Some(&home), same_dir.clone(), same_dir, None);
 
         let count = paths
             .iter()
@@ -5082,7 +5080,7 @@ mod tests {
     #[test]
     fn opencode_extra_search_paths_deduplicates_bun_default_dir() {
         let home = PathBuf::from("/home/tester");
-        let paths = opencode_extra_search_paths(&home, None, None, None);
+        let paths = opencode_extra_search_paths(Some(&home), None, None, None);
 
         let count = paths
             .iter()

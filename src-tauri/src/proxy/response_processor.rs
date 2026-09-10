@@ -103,7 +103,7 @@ pub(crate) async fn read_decoded_body(
         "[{tag}] 已接收上游响应体: status={}, bytes={}, headers={}",
         status.as_u16(),
         raw_bytes.len(),
-        format_headers(&headers)
+        crate::diagnostics::format_headers_for_log(&headers)
     );
 
     let mut body_bytes = raw_bytes.clone();
@@ -155,7 +155,7 @@ pub async fn handle_streaming(
         "[{}] 已接收上游流式响应: status={}, headers={}",
         ctx.tag,
         status.as_u16(),
-        format_headers(response.headers())
+        crate::diagnostics::format_headers_for_log(response.headers())
     );
     // 检查流式响应是否被压缩（SSE 通常不压缩，如果压缩则 SSE 解析会失败）
     if let Some(encoding) = get_content_encoding(response.headers()) {
@@ -225,9 +225,9 @@ pub async fn handle_non_streaming(
     strip_hop_by_hop_response_headers(&mut response_headers);
 
     log::debug!(
-        "[{}] 上游响应体内容: {}",
+        "[{}] 上游响应体诊断: {}",
         ctx.tag,
-        String::from_utf8_lossy(&body_bytes)
+        crate::diagnostics::payload_fingerprint(&body_bytes)
     );
 
     // 解析并记录使用量。关闭 usage logging 时直接跳过，避免非流式响应整包 JSON parse。
@@ -796,17 +796,6 @@ pub fn create_logged_passthrough_stream(
             guard.disarm();
         }
     }
-}
-
-fn format_headers(headers: &HeaderMap) -> String {
-    headers
-        .iter()
-        .map(|(key, value)| {
-            let value_str = value.to_str().unwrap_or("<non-utf8>");
-            format!("{key}={value_str}")
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 #[cfg(test)]

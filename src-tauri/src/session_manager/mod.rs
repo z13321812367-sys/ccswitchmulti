@@ -55,23 +55,77 @@ pub struct DeleteSessionOutcome {
     pub error: Option<String>,
 }
 
-pub fn scan_sessions() -> Vec<SessionMeta> {
-    let (r1, r2, r3, r4, r5, r6) = std::thread::scope(|s| {
-        let h1 = s.spawn(codex::scan_sessions);
-        let h2 = s.spawn(claude::scan_sessions);
-        let h3 = s.spawn(opencode::scan_sessions);
-        let h4 = s.spawn(openclaw::scan_sessions);
-        let h5 = s.spawn(gemini::scan_sessions);
-        let h6 = s.spawn(hermes::scan_sessions);
-        (
-            h1.join().unwrap_or_default(),
-            h2.join().unwrap_or_default(),
-            h3.join().unwrap_or_default(),
-            h4.join().unwrap_or_default(),
-            h5.join().unwrap_or_default(),
-            h6.join().unwrap_or_default(),
-        )
-    });
+#[derive(Debug, thiserror::Error)]
+pub enum SessionScanError {
+    #[error("{provider} session storage error at {path}: {detail}")]
+    Storage {
+        provider: &'static str,
+        path: PathBuf,
+        detail: String,
+    },
+    #[error("{provider} session scan failed: {detail}")]
+    Provider {
+        provider: &'static str,
+        detail: String,
+    },
+    #[error("{provider} session worker panicked")]
+    WorkerPanic { provider: &'static str },
+}
+
+impl SessionScanError {
+    pub(crate) fn storage(
+        provider: &'static str,
+        path: impl Into<PathBuf>,
+        err: impl std::fmt::Display,
+    ) -> Self {
+        Self::Storage {
+            provider,
+            path: path.into(),
+            detail: err.to_string(),
+        }
+    }
+
+    fn provider(provider: &'static str, detail: impl Into<String>) -> Self {
+        Self::Provider {
+            provider,
+            detail: detail.into(),
+        }
+    }
+}
+
+pub fn scan_sessions() -> Result<Vec<SessionMeta>, SessionScanError> {
+    let (r1, r2, r3, r4, r5, r6) = std::thread::scope(|scope| -> Result<_, SessionScanError> {
+        let h1 = scope.spawn(codex::scan_sessions);
+        let h2 = scope.spawn(claude::scan_sessions);
+        let h3 = scope.spawn(opencode::scan_sessions);
+        let h4 = scope.spawn(openclaw::scan_sessions);
+        let h5 = scope.spawn(gemini::scan_sessions);
+        let h6 = scope.spawn(hermes::scan_sessions);
+
+        let r1 = h1
+            .join()
+            .map_err(|_| SessionScanError::WorkerPanic { provider: "Codex" })??;
+        let r2 = h2
+            .join()
+            .map_err(|_| SessionScanError::WorkerPanic { provider: "Claude" })??;
+        let r3 = h3
+            .join()
+            .map_err(|_| SessionScanError::WorkerPanic {
+                provider: "OpenCode",
+            })?
+            .map_err(|err| SessionScanError::provider("OpenCode", err))?;
+        let r4 = h4.join().map_err(|_| SessionScanError::WorkerPanic {
+            provider: "OpenClaw",
+        })??;
+        let r5 = h5
+            .join()
+            .map_err(|_| SessionScanError::WorkerPanic { provider: "Gemini" })??;
+        let r6 = h6
+            .join()
+            .map_err(|_| SessionScanError::WorkerPanic { provider: "Hermes" })?
+            .map_err(|err| SessionScanError::provider("Hermes", err))?;
+        Ok((r1, r2, r3, r4, r5, r6))
+    })?;
 
     let mut sessions = Vec::new();
     sessions.extend(r1);
@@ -80,14 +134,13 @@ pub fn scan_sessions() -> Vec<SessionMeta> {
     sessions.extend(r4);
     sessions.extend(r5);
     sessions.extend(r6);
-
     sessions.sort_by(|a, b| {
-        let a_ts = a.last_active_at.or(a.created_at).unwrap_or(0);
-        let b_ts = b.last_active_at.or(b.created_at).unwrap_or(0);
-        b_ts.cmp(&a_ts)
+        b.last_active_at
+            .or(b.created_at)
+            .unwrap_or(0)
+            .cmp(&a.last_active_at.or(a.created_at).unwrap_or(0))
     });
-
-    sessions
+    Ok(sessions)
 }
 
 pub fn load_messages(provider_id: &str, source_path: &str) -> Result<Vec<SessionMessage>, String> {
@@ -191,10 +244,12 @@ fn provider_roots(provider_id: &str) -> Result<Vec<PathBuf>, String> {
     let roots = match provider_id {
         "codex" => codex::session_roots(),
         "claude" => vec![crate::config::get_claude_config_dir().join("projects")],
-        "opencode" => vec![opencode::get_opencode_data_dir()],
+        "opencode" => vec![opencode::get_opencode_data_dir()?],
         "openclaw" => vec![crate::openclaw_config::get_openclaw_dir().join("agents")],
         "gemini" => vec![crate::gemini_config::get_gemini_dir().join("tmp")],
-        "hermes" => vec![crate::hermes_config::get_hermes_dir().join("sessions")],
+        "hermes" => vec![crate::hermes_config::try_get_hermes_dir()
+            .map_err(|err| err.to_string())?
+            .join("sessions")],
         _ => return Err(format!("Unsupported provider: {provider_id}")),
     };
 

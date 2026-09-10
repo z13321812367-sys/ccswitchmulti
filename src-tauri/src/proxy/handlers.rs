@@ -588,12 +588,18 @@ async fn handle_claude_transform(
                 // 现场诊断（content-type/body 摘要），否则命中嗅探臂的用户只拿到
                 // 裸聚合错误、丢失非嗅探臂已有的诊断增强（C7）
                 aggregated.map_err(|e| {
-                    log::error!("[Claude] SSE 聚合兜底失败: {e}, body: {body_str}");
+                    log::error!(
+                        "[Claude] SSE 聚合兜底失败: {e}, body: {}",
+                        crate::diagnostics::text_fingerprint(&body_str)
+                    );
                     aggregate_fallback_error(e, &response_headers, &body_str)
                 })?
             }
             Err(e) => {
-                log::error!("[Claude] 解析上游响应失败: {e}, body: {body_str}");
+                log::error!(
+                    "[Claude] 解析上游响应失败: {e}, body: {}",
+                    crate::diagnostics::text_fingerprint(&body_str)
+                );
                 return Err(upstream_body_parse_error(
                     "Failed to parse upstream response",
                     &e,
@@ -2084,12 +2090,18 @@ async fn handle_codex_chat_to_responses_transform(
             log::warn!("[Codex] 上游对非流请求返回未标记的 SSE 体，按 Chat SSE 聚合兜底");
             // 聚合也失败时：保留全量 body 服务端日志，并给客户端错误附带现场诊断（C7）
             chat_sse_to_response_value(&body_str).map_err(|e| {
-                log::error!("[Codex] SSE 聚合兜底失败: {e}, body: {body_str}");
+                log::error!(
+                    "[Codex] SSE 聚合兜底失败: {e}, body: {}",
+                    crate::diagnostics::text_fingerprint(&body_str)
+                );
                 aggregate_fallback_error(e, &response_headers, &body_str)
             })?
         }
         Err(e) => {
-            log::error!("[Codex] 解析 Chat 上游响应失败: {e}, body: {body_str}");
+            log::error!(
+                "[Codex] 解析 Chat 上游响应失败: {e}, body: {}",
+                crate::diagnostics::text_fingerprint(&body_str)
+            );
             return Err(upstream_body_parse_error(
                 "Failed to parse upstream chat response",
                 &e,
@@ -2695,10 +2707,11 @@ fn body_diagnostics_suffix(headers: &axum::http::HeaderMap, body: &str) -> Strin
             .unwrap_or("<none>")
     };
     format!(
-        "(content-type: {}; content-encoding: {}; body[..120]: '{}')",
+        "(content-type: {}; content-encoding: {}; body-shape: {}; body: {})",
         header_str("content-type"),
         header_str("content-encoding"),
-        body_snippet(body, 120),
+        crate::diagnostics::text_shape_hint(body),
+        crate::diagnostics::text_fingerprint(body),
     )
 }
 
@@ -2713,24 +2726,6 @@ fn error_event_message(error: &Value) -> Option<String> {
         return (!s.is_empty()).then(|| s.to_string());
     }
     None
-}
-
-/// 取 body 前 `max_chars` 个字符的单行摘要：\r 丢弃、\n 折叠为字面 \n、
-/// 其余控制字符替换为 �，超长加省略号。
-fn body_snippet(body: &str, max_chars: usize) -> String {
-    let mut snippet = String::new();
-    for c in body.chars().take(max_chars) {
-        match c {
-            '\n' => snippet.push_str("\\n"),
-            '\r' => {}
-            c if c.is_control() => snippet.push('\u{FFFD}'),
-            c => snippet.push(c),
-        }
-    }
-    if body.chars().nth(max_chars).is_some() {
-        snippet.push('…');
-    }
-    snippet
 }
 
 /// 解析单个 SSE 块的 event 名与 data 负载（多行 data 按规范以 \n 连接）。
@@ -3271,8 +3266,8 @@ async fn log_usage(
 #[cfg(test)]
 mod tests {
     use super::{
-        body_looks_like_sse, body_snippet, chat_sse_to_response_value,
-        codex_catalog_models_response, codex_proxy_error_json, external_openai_api_models_response,
+        body_looks_like_sse, chat_sse_to_response_value, codex_catalog_models_response,
+        codex_proxy_error_json, external_openai_api_models_response,
         external_openai_api_unsupported_response, resolve_external_codex_router_target,
         resolve_forward_error_provider_for_logging, responses_sse_to_response_value,
         should_handle_as_codex_client, should_use_claude_transform_streaming, transform,
@@ -3397,7 +3392,10 @@ mod tests {
             ProxyError::TransformError(msg) => {
                 assert!(msg.contains("content-type: text/html"), "{msg}");
                 assert!(msg.contains("content-encoding: gzip"), "{msg}");
-                assert!(msg.contains("<html>\\nblocked</html>"), "{msg}");
+                assert!(msg.contains("body-shape: markup"), "{msg}");
+                assert!(msg.contains("body: bytes=21, sha256="), "{msg}");
+                assert!(!msg.contains("<html>"), "{msg}");
+                assert!(!msg.contains("blocked"), "{msg}");
             }
             other => panic!("expected TransformError, got {other:?}"),
         }
@@ -3556,18 +3554,6 @@ data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant
         let response = chat_sse_to_response_value(sse).unwrap();
 
         assert_eq!(response["choices"][0]["message"]["content"], "hi");
-    }
-
-    #[test]
-    fn body_snippet_sanitizes_controls_and_truncates() {
-        assert_eq!(
-            body_snippet("<html>\r\nblocked\u{0}</html>", 120),
-            "<html>\\nblocked\u{FFFD}</html>"
-        );
-        let long = "a".repeat(200);
-        let snippet = body_snippet(&long, 120);
-        assert_eq!(snippet.chars().count(), 121); // 120 个字符 + 省略号
-        assert!(snippet.ends_with('…'));
     }
 
     #[test]

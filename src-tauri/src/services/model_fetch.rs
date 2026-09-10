@@ -59,6 +59,35 @@ struct ModelEntry {
 }
 
 const FETCH_TIMEOUT_SECS: u64 = 15;
+const MAX_CANDIDATE_FAILURE_DETAILS: usize = 8;
+
+fn should_try_next_models_candidate(status: StatusCode) -> bool {
+    status == StatusCode::NOT_FOUND
+        || status == StatusCode::METHOD_NOT_ALLOWED
+        || status.is_server_error()
+}
+
+fn request_error_kind(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_request() {
+        "request"
+    } else if error.is_body() {
+        "body"
+    } else if error.is_decode() {
+        "decode"
+    } else {
+        "transport"
+    }
+}
+
+fn record_candidate_failure(failures: &mut Vec<String>, detail: String) {
+    if failures.len() < MAX_CANDIDATE_FAILURE_DETAILS {
+        failures.push(detail);
+    }
+}
 
 /// 智谱官方模型概览 markdown。
 ///
@@ -72,9 +101,6 @@ const ZHIPU_MODEL_OVERVIEW_MD_URL: &str =
 /// 原版只把它用于定价导入，但该 API 也包含 `limit.context`。这里作为通用兜底：
 /// 仅当 provider 的 `api` 前缀能匹配当前成功的 `/models` endpoint 时才使用。
 const MODELS_DEV_API_URL: &str = "https://models.dev/api.json";
-
-/// 404/405 响应体截断长度：避免把几十 KB HTML 404 页整页保留到错误串里。
-const ERROR_BODY_MAX_CHARS: usize = 512;
 
 /// 已知的「Anthropic 协议兼容子路径」后缀；按长度降序，最长前缀优先匹配。
 /// baseURL 命中这些后缀时，候选列表会追加「剥离后缀再拼 /v1/models / /models」的版本。
@@ -178,10 +204,14 @@ pub async fn fetch_models(options: FetchModelsRequest<'_>) -> Result<Vec<Fetched
         options.models_url_override,
     )?;
     let client = crate::proxy::http_client::get();
-    let mut last_err: Option<String> = None;
+    let mut candidate_failures: Vec<String> = Vec::new();
 
-    for url in &candidates {
-        log::debug!("[ModelFetch] Trying endpoint: {url}");
+    for (index, url) in candidates.iter().enumerate() {
+        let ordinal = index + 1;
+        log::debug!(
+            "[ModelFetch] Trying endpoint: {}",
+            crate::diagnostics::redact_url_for_log(url)
+        );
         let mut request_builder = client
             .get(url)
             .header("Authorization", format!("Bearer {}", options.api_key))
@@ -193,22 +223,57 @@ pub async fn fetch_models(options: FetchModelsRequest<'_>) -> Result<Vec<Fetched
         }
         let response = match request_builder.send().await {
             Ok(r) => r,
-            Err(e) => {
-                return Err(format!("Request failed: {e}"));
+            Err(error) => {
+                let kind = request_error_kind(&error);
+                log::debug!(
+                    "[ModelFetch] candidate {ordinal}/{} transport failure: {kind}",
+                    candidates.len()
+                );
+                record_candidate_failure(
+                    &mut candidate_failures,
+                    format!("candidate {ordinal}: transport {kind}"),
+                );
+                continue;
             }
         };
 
         let status = response.status();
 
         if status.is_success() {
-            let resp: ModelsResponse = response
-                .json()
-                .await
-                .map_err(|e| format!("Failed to parse response: {e}"))?;
+            let body = match response.bytes().await {
+                Ok(body) => body,
+                Err(error) => {
+                    let kind = request_error_kind(&error);
+                    record_candidate_failure(
+                        &mut candidate_failures,
+                        format!("candidate {ordinal}: response body {kind}"),
+                    );
+                    continue;
+                }
+            };
+            let resp: ModelsResponse = match serde_json::from_slice(&body) {
+                Ok(resp) => resp,
+                Err(error) => {
+                    log::debug!(
+                        "[ModelFetch] candidate {ordinal}/{} returned invalid JSON: {error}",
+                        candidates.len()
+                    );
+                    record_candidate_failure(
+                        &mut candidate_failures,
+                        format!("candidate {ordinal}: invalid JSON ({error})"),
+                    );
+                    continue;
+                }
+            };
+            let Some(data) = resp.data else {
+                record_candidate_failure(
+                    &mut candidate_failures,
+                    format!("candidate {ordinal}: response missing data array"),
+                );
+                continue;
+            };
 
-            let mut models: Vec<FetchedModel> = resp
-                .data
-                .unwrap_or_default()
+            let mut models: Vec<FetchedModel> = data
                 .into_iter()
                 .map(|m| FetchedModel {
                     context_window: extract_context_window(&m.extra),
@@ -222,20 +287,34 @@ pub async fn fetch_models(options: FetchModelsRequest<'_>) -> Result<Vec<Fetched
             return Ok(models);
         }
 
-        if status == StatusCode::NOT_FOUND || status == StatusCode::METHOD_NOT_ALLOWED {
-            let body = truncate_body(response.text().await.unwrap_or_default());
-            last_err = Some(format!("HTTP {status}: {body}"));
+        if should_try_next_models_candidate(status) {
+            record_candidate_failure(
+                &mut candidate_failures,
+                format!("candidate {ordinal}: HTTP {status}"),
+            );
             continue;
         }
 
-        let body = truncate_body(response.text().await.unwrap_or_default());
-        return Err(format!("HTTP {status}: {body}"));
+        let body_detail = match response.bytes().await {
+            Ok(body) => {
+                let rendered = String::from_utf8_lossy(&body);
+                format!(
+                    "body-shape={}, {}",
+                    crate::diagnostics::text_shape_hint(&rendered),
+                    crate::diagnostics::payload_fingerprint(&body)
+                )
+            }
+            Err(error) => format!("body-unavailable={}", request_error_kind(&error)),
+        };
+        return Err(format!("HTTP {status}: {body_detail}"));
     }
 
-    Err(format!(
-        "All candidates failed: {}",
-        last_err.unwrap_or_else(|| "no candidates".to_string())
-    ))
+    let details = if candidate_failures.is_empty() {
+        "no candidate diagnostics".to_string()
+    } else {
+        candidate_failures.join("; ")
+    };
+    Err(format!("All model endpoint candidates failed: {details}"))
 }
 
 /// 构造「模型列表端点」的候选 URL 列表
@@ -856,17 +935,6 @@ pub fn build_models_url_candidates(
     Ok(unique)
 }
 
-/// 截断响应体到 [`ERROR_BODY_MAX_CHARS`] 字符，避免 HTML 404 页占用错误串。
-fn truncate_body(body: String) -> String {
-    if body.chars().count() <= ERROR_BODY_MAX_CHARS {
-        body
-    } else {
-        let mut s: String = body.chars().take(ERROR_BODY_MAX_CHARS).collect();
-        s.push('…');
-        s
-    }
-}
-
 /// 若 baseURL 以任一已知兼容子路径结尾，返回剥离后的剩余部分；否则 `None`。
 ///
 /// 依赖 [`KNOWN_COMPAT_SUFFIXES`] 按长度降序排列，确保最长前缀优先命中
@@ -892,6 +960,47 @@ fn ends_with_version_segment(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn candidate_retry_policy_continues_discovery_only_for_compatible_failures() {
+        assert!(should_try_next_models_candidate(StatusCode::NOT_FOUND));
+        assert!(should_try_next_models_candidate(
+            StatusCode::METHOD_NOT_ALLOWED
+        ));
+        assert!(should_try_next_models_candidate(
+            StatusCode::INTERNAL_SERVER_ERROR
+        ));
+        assert!(should_try_next_models_candidate(StatusCode::BAD_GATEWAY));
+        assert!(!should_try_next_models_candidate(StatusCode::BAD_REQUEST));
+        assert!(!should_try_next_models_candidate(StatusCode::UNAUTHORIZED));
+        assert!(!should_try_next_models_candidate(StatusCode::FORBIDDEN));
+        assert!(!should_try_next_models_candidate(
+            StatusCode::TOO_MANY_REQUESTS
+        ));
+    }
+
+    #[test]
+    fn fail_fast_http_diagnostics_do_not_require_raw_body() {
+        let secret = b"{\"token\":\"super-secret\"}";
+        let rendered = String::from_utf8_lossy(secret);
+        let detail = format!(
+            "body-shape={}, {}",
+            crate::diagnostics::text_shape_hint(&rendered),
+            crate::diagnostics::payload_fingerprint(secret)
+        );
+        assert!(detail.contains("body-shape=json-like"));
+        assert!(detail.contains("bytes="));
+        assert!(!detail.contains("super-secret"));
+    }
+
+    #[test]
+    fn candidate_failure_details_are_bounded() {
+        let mut failures = Vec::new();
+        for index in 0..(MAX_CANDIDATE_FAILURE_DETAILS + 3) {
+            record_candidate_failure(&mut failures, format!("candidate {index}"));
+        }
+        assert_eq!(failures.len(), MAX_CANDIDATE_FAILURE_DETAILS);
+    }
 
     #[test]
     fn test_candidates_plain_root() {

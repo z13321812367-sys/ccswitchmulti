@@ -2,56 +2,64 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::session_manager::{SessionMessage, SessionMeta};
+use crate::session_manager::{SessionMessage, SessionMeta, SessionScanError};
 
 use super::utils::{parse_timestamp_to_ms, truncate_summary};
 
 const PROVIDER_ID: &str = "gemini";
 
-pub fn scan_sessions() -> Vec<SessionMeta> {
+pub fn scan_sessions() -> Result<Vec<SessionMeta>, SessionScanError> {
     let gemini_dir = crate::gemini_config::get_gemini_dir();
     let tmp_dir = gemini_dir.join("tmp");
     if !tmp_dir.exists() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
+    let project_dirs = std::fs::read_dir(&tmp_dir)
+        .map_err(|err| SessionScanError::storage("Gemini", &tmp_dir, err))?;
     let mut sessions = Vec::new();
-
-    // Iterate over project directories: tmp/<project_name>/chats/session-*.json
-    let project_dirs = match std::fs::read_dir(&tmp_dir) {
-        Ok(entries) => entries,
-        Err(_) => return Vec::new(),
-    };
-
-    for entry in project_dirs.flatten() {
+    for entry in project_dirs {
+        let entry = entry.map_err(|err| SessionScanError::storage("Gemini", &tmp_dir, err))?;
         let chats_dir = entry.path().join("chats");
         if !chats_dir.is_dir() {
             continue;
         }
 
-        let chat_files = match std::fs::read_dir(&chats_dir) {
-            Ok(entries) => entries,
-            Err(_) => continue,
+        let chat_files = std::fs::read_dir(&chats_dir)
+            .map_err(|err| SessionScanError::storage("Gemini", &chats_dir, err))?;
+        let project_root_file = entry.path().join(".project_root");
+        let project_dir = match std::fs::read_to_string(&project_root_file) {
+            Ok(value) => Some(value),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) => {
+                log::warn!(
+                    "Gemini optional project-root metadata unreadable at {}: {err}",
+                    project_root_file.display()
+                );
+                None
+            }
         };
 
-        let project_root_file = entry.path().join(".project_root");
-        let project_dir = std::fs::read_to_string(project_root_file).ok();
-
-        for file_entry in chat_files.flatten() {
+        for file_entry in chat_files {
+            let file_entry =
+                file_entry.map_err(|err| SessionScanError::storage("Gemini", &chats_dir, err))?;
             let path = file_entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
                 continue;
             }
-            if let Some(meta) = parse_session(&path) {
-                sessions.push(SessionMeta {
+            match parse_session_checked(&path) {
+                Ok(meta) => sessions.push(SessionMeta {
                     project_dir: project_dir.clone(),
                     ..meta
-                });
+                }),
+                Err(err) => log::warn!(
+                    "Skipping unreadable Gemini session {}: {err}",
+                    path.display()
+                ),
             }
         }
     }
-
-    sessions
+    Ok(sessions)
 }
 
 pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
@@ -113,12 +121,7 @@ pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
 }
 
 pub fn delete_session(_root: &Path, path: &Path, session_id: &str) -> Result<bool, String> {
-    let meta = parse_session(path).ok_or_else(|| {
-        format!(
-            "Failed to parse Gemini session metadata: {}",
-            path.display()
-        )
-    })?;
+    let meta = parse_session_checked(path)?;
 
     if meta.session_id != session_id {
         return Err(format!(
@@ -137,11 +140,17 @@ pub fn delete_session(_root: &Path, path: &Path, session_id: &str) -> Result<boo
     Ok(true)
 }
 
-fn parse_session(path: &Path) -> Option<SessionMeta> {
-    let data = std::fs::read_to_string(path).ok()?;
-    let value: Value = serde_json::from_str(&data).ok()?;
+fn parse_session_checked(path: &Path) -> Result<SessionMeta, String> {
+    let data = std::fs::read_to_string(path)
+        .map_err(|err| format!("Failed to read Gemini session {}: {err}", path.display()))?;
+    let value: Value = serde_json::from_str(&data)
+        .map_err(|err| format!("Failed to parse Gemini session {}: {err}", path.display()))?;
 
-    let session_id = value.get("sessionId").and_then(Value::as_str)?.to_string();
+    let session_id = value
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("Gemini session has no sessionId: {}", path.display()))?
+        .to_string();
 
     let created_at = value.get("startTime").and_then(parse_timestamp_to_ms);
     let last_active_at = value.get("lastUpdated").and_then(parse_timestamp_to_ms);
@@ -160,7 +169,7 @@ fn parse_session(path: &Path) -> Option<SessionMeta> {
 
     let source_path = path.to_string_lossy().to_string();
 
-    Some(SessionMeta {
+    Ok(SessionMeta {
         provider_id: PROVIDER_ID.to_string(),
         session_id: session_id.clone(),
         title: title.clone(),

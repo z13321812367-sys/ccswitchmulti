@@ -1,4 +1,4 @@
-﻿//! 数据库备份和恢复
+//! 数据库备份和恢复
 //!
 //! 提供 SQL 导出/导入和二进制快照备份功能。
 
@@ -819,7 +819,9 @@ fn quote_sql_identifier(identifier: &str) -> String {
 
 /// 返回当前用户目录字符串；获取失败时跳过路径改写，避免生成错误路径。
 fn current_home_string() -> Option<String> {
-    dirs::home_dir().map(|path| path.to_string_lossy().to_string())
+    crate::config::try_get_home_dir()
+        .ok()
+        .map(|path| path.to_string_lossy().to_string())
 }
 
 /// 将本机用户目录替换为同步占位符，让远端快照不绑定上传设备。

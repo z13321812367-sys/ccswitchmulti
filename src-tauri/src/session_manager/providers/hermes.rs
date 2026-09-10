@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 use serde_json::Value;
 
-use crate::hermes_config::get_hermes_dir;
+use crate::hermes_config::try_get_hermes_dir;
 use crate::session_manager::{SessionMessage, SessionMeta};
 
 use super::utils::{
@@ -14,94 +14,87 @@ use super::utils::{
 
 const PROVIDER_ID: &str = "hermes";
 
-fn get_hermes_db_path() -> PathBuf {
-    get_hermes_dir().join("state.db")
-}
-
-fn get_hermes_sessions_dir() -> PathBuf {
-    get_hermes_dir().join("sessions")
+fn get_hermes_db_path() -> Result<PathBuf, String> {
+    Ok(try_get_hermes_dir()
+        .map_err(|err| err.to_string())?
+        .join("state.db"))
 }
 
 /// Scan sessions from both SQLite database and JSONL transcript files,
 /// with SQLite taking precedence on ID conflicts.
-pub fn scan_sessions() -> Vec<SessionMeta> {
-    let sqlite_sessions = scan_sessions_sqlite();
-    let jsonl_sessions = scan_sessions_jsonl();
+pub fn scan_sessions() -> Result<Vec<SessionMeta>, String> {
+    let root = try_get_hermes_dir().map_err(|err| err.to_string())?;
+    let sqlite_sessions = scan_sessions_sqlite(&root.join("state.db"))?;
+    let jsonl_sessions = scan_sessions_jsonl(&root.join("sessions"))?;
 
     if sqlite_sessions.is_empty() {
-        return jsonl_sessions;
+        return Ok(jsonl_sessions);
     }
     if jsonl_sessions.is_empty() {
-        return sqlite_sessions;
+        return Ok(sqlite_sessions);
     }
 
     let sqlite_ids: std::collections::HashSet<String> = sqlite_sessions
         .iter()
-        .map(|s| s.session_id.clone())
+        .map(|session| session.session_id.clone())
         .collect();
-
     let mut merged = sqlite_sessions;
-    for s in jsonl_sessions {
-        if !sqlite_ids.contains(&s.session_id) {
-            merged.push(s);
+    for session in jsonl_sessions {
+        if !sqlite_ids.contains(&session.session_id) {
+            merged.push(session);
         }
     }
-    merged
+    Ok(merged)
 }
 
 // ── SQLite scanning ─────────────────────────────────────────────────
 
-fn scan_sessions_sqlite() -> Vec<SessionMeta> {
-    let db_path = get_hermes_db_path();
+fn scan_sessions_sqlite(db_path: &Path) -> Result<Vec<SessionMeta>, String> {
     if !db_path.exists() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
-    let conn = match Connection::open_with_flags(
-        &db_path,
+    let conn = Connection::open_with_flags(
+        db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
+    )
+    .map_err(|err| {
+        format!(
+            "Failed to open Hermes session database {}: {err}",
+            db_path.display()
+        )
+    })?;
 
-    // Check if sessions table exists
     let has_sessions: bool = conn
         .query_row(
             "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='sessions'",
             [],
             |row| row.get(0),
         )
-        .unwrap_or(false);
-
+        .map_err(|err| format!("Failed to inspect Hermes session schema: {err}"))?;
     if !has_sessions {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
-    // Query sessions — use flexible column access via pragma
-    let columns = get_table_columns(&conn, "sessions");
-
-    let query = "SELECT * FROM sessions ORDER BY rowid DESC LIMIT 500";
-    let mut stmt = match conn.prepare(query) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut sessions = Vec::new();
-    let rows = match stmt.query_map([], |row| Ok(row_to_json(row, &columns))) {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
-    };
+    let columns = get_table_columns(&conn, "sessions")?;
+    let mut stmt = conn
+        .prepare("SELECT * FROM sessions ORDER BY rowid DESC LIMIT 500")
+        .map_err(|err| format!("Failed to prepare Hermes session query: {err}"))?;
+    let rows = stmt
+        .query_map([], |row| Ok(row_to_json(row, &columns)))
+        .map_err(|err| format!("Failed to query Hermes sessions: {err}"))?;
 
     let db_source = format!("sqlite:{}", db_path.display());
-
-    for row_result in rows.flatten() {
-        if let Some(meta) = sqlite_row_to_session_meta(&row_result, &db_source) {
-            sessions.push(meta);
+    let mut sessions = Vec::new();
+    for row_result in rows {
+        let row =
+            row_result.map_err(|err| format!("Failed to decode Hermes session row: {err}"))?;
+        match sqlite_row_to_session_meta(&row, &db_source) {
+            Some(meta) => sessions.push(meta),
+            None => log::warn!("Skipping malformed Hermes SQLite session row without a usable id"),
         }
     }
-
-    sessions
+    Ok(sessions)
 }
 
 fn sqlite_row_to_session_meta(row: &Value, db_source: &str) -> Option<SessionMeta> {
@@ -148,20 +141,19 @@ fn sqlite_row_to_session_meta(row: &Value, db_source: &str) -> Option<SessionMet
 }
 
 /// Get column names for a table.
-fn get_table_columns(conn: &Connection, table: &str) -> Vec<String> {
+fn get_table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, String> {
     let query = format!("PRAGMA table_info({table})");
-    let mut stmt = match conn.prepare(&query) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    let rows = match stmt.query_map([], |row| {
-        let name: String = row.get(1)?;
-        Ok(name)
-    }) {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
-    };
-    rows.flatten().collect()
+    let mut stmt = conn
+        .prepare(&query)
+        .map_err(|err| format!("Failed to inspect Hermes table columns: {err}"))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|err| format!("Failed to query Hermes table columns: {err}"))?;
+    let mut columns = Vec::new();
+    for row in rows {
+        columns.push(row.map_err(|err| format!("Failed to decode Hermes table column: {err}"))?);
+    }
+    Ok(columns)
 }
 
 /// Convert a SQLite row to a JSON Value using known column names.
@@ -236,7 +228,7 @@ pub fn delete_session_sqlite(session_id: &str, source: &str) -> Result<bool, Str
     let db_path = db_path
         .canonicalize()
         .map_err(|e| format!("Failed to canonicalize Hermes database path: {e}"))?;
-    let expected_db_path = get_hermes_db_path()
+    let expected_db_path = get_hermes_db_path()?
         .canonicalize()
         .map_err(|e| format!("Failed to canonicalize expected Hermes database path: {e}"))?;
 
@@ -282,29 +274,35 @@ fn parse_sqlite_source(source: &str) -> Option<(PathBuf, String)> {
 
 // ── JSONL scanning ──────────────────────────────────────────────────
 
-fn scan_sessions_jsonl() -> Vec<SessionMeta> {
-    let sessions_dir = get_hermes_sessions_dir();
+fn scan_sessions_jsonl(sessions_dir: &Path) -> Result<Vec<SessionMeta>, String> {
     if !sessions_dir.exists() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
-    let entries = match std::fs::read_dir(&sessions_dir) {
-        Ok(e) => e,
-        Err(_) => return Vec::new(),
-    };
-
+    let entries = std::fs::read_dir(sessions_dir).map_err(|err| {
+        format!(
+            "Failed to read Hermes sessions directory {}: {err}",
+            sessions_dir.display()
+        )
+    })?;
     let mut sessions = Vec::new();
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry =
+            entry.map_err(|err| format!("Failed to enumerate Hermes session entry: {err}"))?;
         let path = entry.path();
-        let ext = path.extension().and_then(|e| e.to_str());
+        let ext = path.extension().and_then(|ext| ext.to_str());
         if ext != Some("jsonl") && ext != Some("json") {
             continue;
         }
-        if let Some(meta) = parse_jsonl_session(&path) {
-            sessions.push(meta);
+        match parse_jsonl_session(&path) {
+            Some(meta) => sessions.push(meta),
+            None => log::warn!(
+                "Skipping malformed or unreadable Hermes session file: {}",
+                path.display()
+            ),
         }
     }
-    sessions
+    Ok(sessions)
 }
 
 fn parse_jsonl_session(path: &Path) -> Option<SessionMeta> {

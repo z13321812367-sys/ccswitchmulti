@@ -1,22 +1,25 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
+use futures::FutureExt;
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
-use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 
 use crate::error::AppError;
+use crate::services::auto_sync_common::{
+    auto_sync_wait_duration, enqueue_change_signal, panic_message, should_trigger_for_table,
+    ChangeSignalOutcome,
+};
 use crate::services::s3_sync;
 use crate::settings::{self, S3SyncSettings};
 
-const AUTO_SYNC_DEBOUNCE_MS: u64 = 1000;
-pub(crate) const MAX_AUTO_SYNC_WAIT_MS: u64 = 10_000;
-
 static DB_CHANGE_TX: OnceLock<Sender<String>> = OnceLock::new();
 static AUTO_SYNC_SUPPRESS_DEPTH: AtomicUsize = AtomicUsize::new(0);
+static WORKER_CHANNEL_CLOSED_REPORTED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) struct AutoSyncSuppressionGuard;
 
@@ -40,38 +43,6 @@ pub(crate) fn is_auto_sync_suppressed() -> bool {
     AUTO_SYNC_SUPPRESS_DEPTH.load(Ordering::SeqCst) > 0
 }
 
-pub fn should_trigger_for_table(table: &str) -> bool {
-    let normalized = table.trim().to_ascii_lowercase();
-    matches!(
-        normalized.as_str(),
-        "providers"
-            | "provider_endpoints"
-            | "mcp_servers"
-            | "prompts"
-            | "skills"
-            | "skill_repos"
-            | "settings"
-            | "proxy_config"
-    )
-}
-
-pub(crate) fn enqueue_change_signal(tx: &Sender<String>, table: &str) -> bool {
-    match tx.try_send(table.to_string()) {
-        Ok(()) => true,
-        Err(TrySendError::Full(_)) | Err(TrySendError::Closed(_)) => false,
-    }
-}
-
-pub(crate) fn auto_sync_wait_duration(started_at: Instant, now: Instant) -> Option<Duration> {
-    let max_wait = Duration::from_millis(MAX_AUTO_SYNC_WAIT_MS);
-    let debounce = Duration::from_millis(AUTO_SYNC_DEBOUNCE_MS);
-    let elapsed = now.saturating_duration_since(started_at);
-    if elapsed >= max_wait {
-        return None;
-    }
-    Some(debounce.min(max_wait - elapsed))
-}
-
 fn should_run_auto_sync(settings: Option<&S3SyncSettings>) -> bool {
     let Some(sync) = settings else {
         return false;
@@ -79,10 +50,13 @@ fn should_run_auto_sync(settings: Option<&S3SyncSettings>) -> bool {
     sync.enabled && sync.auto_sync
 }
 
-fn persist_auto_sync_error(settings: &mut S3SyncSettings, error: &AppError) {
+fn persist_auto_sync_error(
+    settings: &mut S3SyncSettings,
+    error: &AppError,
+) -> Result<(), AppError> {
     settings.status.last_error = Some(error.to_string());
     settings.status.last_error_source = Some("auto".to_string());
-    let _ = settings::update_s3_sync_status(settings.status.clone());
+    settings::update_s3_sync_status(settings.status.clone())
 }
 
 fn emit_auto_sync_status_updated(app: &AppHandle, status: &str, error: Option<&str>) {
@@ -124,7 +98,11 @@ async fn run_auto_sync_upload(
             Ok(())
         }
         Err(err) => {
-            persist_auto_sync_error(&mut sync_settings, &err);
+            if let Err(persist_err) = persist_auto_sync_error(&mut sync_settings, &err) {
+                log::error!(
+                    "[S3][AutoSync] Upload failed and persisting the error status also failed: upload_error={err}; persistence_error={persist_err}"
+                );
+            }
             emit_auto_sync_status_updated(app, "error", Some(&err.to_string()));
             Err(err)
         }
@@ -141,7 +119,16 @@ pub fn notify_db_changed(table: &str) {
     let Some(tx) = DB_CHANGE_TX.get() else {
         return;
     };
-    let _ = enqueue_change_signal(tx, table);
+    match enqueue_change_signal(tx, table) {
+        ChangeSignalOutcome::Enqueued | ChangeSignalOutcome::Coalesced => {}
+        ChangeSignalOutcome::WorkerUnavailable => {
+            if !WORKER_CHANNEL_CLOSED_REPORTED.swap(true, Ordering::SeqCst) {
+                log::error!(
+                    "[S3][AutoSync] Change-signal channel is closed; the auto-sync worker is unavailable. Further database changes cannot be auto-synced until the worker is reinitialized."
+                );
+            }
+        }
+    }
 }
 
 pub fn start_worker(db: Arc<crate::database::Database>, app: tauri::AppHandle) {
@@ -154,6 +141,7 @@ pub fn start_worker(db: Arc<crate::database::Database>, app: tauri::AppHandle) {
     if DB_CHANGE_TX.set(tx).is_err() {
         return;
     }
+    WORKER_CHANNEL_CLOSED_REPORTED.store(false, Ordering::SeqCst);
 
     tauri::async_runtime::spawn(async move {
         run_worker_loop(db, rx, app).await;
@@ -183,31 +171,24 @@ async fn run_worker_loop(
             "[S3][AutoSync] Triggered by table={first_table}, merged_changes={merged_count}"
         );
 
-        if let Err(err) = run_auto_sync_upload(&db, &app).await {
-            log::warn!("[S3][AutoSync] Upload failed: {err}");
+        match AssertUnwindSafe(run_auto_sync_upload(&db, &app))
+            .catch_unwind()
+            .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => log::warn!("[S3][AutoSync] Upload failed: {err}"),
+            Err(payload) => log::error!(
+                "[S3][AutoSync] Upload panicked; worker will continue processing later changes: {}",
+                panic_message(payload.as_ref())
+            ),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        auto_sync_wait_duration, enqueue_change_signal, is_auto_sync_suppressed,
-        should_run_auto_sync, should_trigger_for_table, AutoSyncSuppressionGuard,
-        MAX_AUTO_SYNC_WAIT_MS,
-    };
+    use super::{is_auto_sync_suppressed, should_run_auto_sync, AutoSyncSuppressionGuard};
     use crate::settings::S3SyncSettings;
-    use std::time::{Duration, Instant};
-    use tokio::sync::mpsc::channel;
-
-    #[test]
-    fn should_trigger_sync_for_config_tables_only() {
-        assert!(should_trigger_for_table("providers"));
-        assert!(should_trigger_for_table("settings"));
-        assert!(!should_trigger_for_table("proxy_request_logs"));
-        assert!(!should_trigger_for_table("provider_health"));
-    }
-
     #[test]
     fn suppression_guard_enables_and_restores_state() {
         assert!(!is_auto_sync_suppressed());
@@ -216,20 +197,6 @@ mod tests {
             assert!(is_auto_sync_suppressed());
         }
         assert!(!is_auto_sync_suppressed());
-    }
-
-    #[test]
-    fn max_wait_caps_flush_latency_for_continuous_events() {
-        let started = Instant::now();
-        let later = started + Duration::from_millis(MAX_AUTO_SYNC_WAIT_MS + 1);
-        assert!(auto_sync_wait_duration(started, later).is_none());
-    }
-
-    #[tokio::test]
-    async fn enqueue_change_signal_drops_when_channel_is_full() {
-        let (tx, _rx) = channel::<String>(1);
-        assert!(enqueue_change_signal(&tx, "providers"));
-        assert!(!enqueue_change_signal(&tx, "providers"));
     }
 
     #[test]

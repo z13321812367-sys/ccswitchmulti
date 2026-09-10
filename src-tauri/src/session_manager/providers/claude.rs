@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::config::get_claude_config_dir;
-use crate::session_manager::{SessionMessage, SessionMeta};
+use crate::session_manager::{SessionMessage, SessionMeta, SessionScanError};
 
 use super::utils::{
     extract_text, parse_timestamp_to_ms, path_basename, read_head_tail_lines, truncate_summary,
@@ -14,19 +14,23 @@ use super::utils::{
 
 const PROVIDER_ID: &str = "claude";
 
-pub fn scan_sessions() -> Vec<SessionMeta> {
+pub fn scan_sessions() -> Result<Vec<SessionMeta>, SessionScanError> {
     let root = get_claude_config_dir().join("projects");
     let mut files = Vec::new();
-    collect_jsonl_files(&root, &mut files);
+    collect_jsonl_files(&root, &mut files)?;
 
     let mut sessions = Vec::new();
     for path in files {
-        if let Some(meta) = parse_session(&path) {
-            sessions.push(meta);
+        match parse_session_checked(&path) {
+            Ok(Some(meta)) => sessions.push(meta),
+            Ok(None) => {}
+            Err(err) => log::warn!(
+                "Skipping unreadable Claude session {}: {err}",
+                path.display()
+            ),
         }
     }
-
-    sessions
+    Ok(sessions)
 }
 
 pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
@@ -35,10 +39,12 @@ pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
     let mut messages = Vec::new();
 
     for line in reader.lines() {
-        let line = match line {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
+        let line = line.map_err(|err| {
+            format!(
+                "Failed to read claude session line from {}: {err}",
+                path.display()
+            )
+        })?;
         let value: Value = match serde_json::from_str(&line) {
             Ok(parsed) => parsed,
             Err(_) => continue,
@@ -86,9 +92,9 @@ pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
 }
 
 pub fn delete_session(_root: &Path, path: &Path, session_id: &str) -> Result<bool, String> {
-    let meta = parse_session(path).ok_or_else(|| {
+    let meta = parse_session_checked(path)?.ok_or_else(|| {
         format!(
-            "Failed to parse Claude session metadata: {}",
+            "Claude agent session is intentionally filtered: {}",
             path.display()
         )
     })?;
@@ -120,12 +126,13 @@ pub fn delete_session(_root: &Path, path: &Path, session_id: &str) -> Result<boo
     Ok(true)
 }
 
-fn parse_session(path: &Path) -> Option<SessionMeta> {
+fn parse_session_checked(path: &Path) -> Result<Option<SessionMeta>, String> {
     if is_agent_session(path) {
-        return None;
+        return Ok(None);
     }
 
-    let (head, tail) = read_head_tail_lines(path, 10, 30).ok()?;
+    let (head, tail) = read_head_tail_lines(path, 10, 30)
+        .map_err(|err| format!("Failed to read Claude session {}: {err}", path.display()))?;
 
     let mut session_id: Option<String> = None;
     let mut project_dir: Option<String> = None;
@@ -224,7 +231,12 @@ fn parse_session(path: &Path) -> Option<SessionMeta> {
     }
 
     let session_id = session_id.or_else(|| infer_session_id_from_filename(path));
-    let session_id = session_id?;
+    let session_id = session_id.ok_or_else(|| {
+        format!(
+            "Claude session has no usable session id: {}",
+            path.display()
+        )
+    })?;
 
     // Title priority: custom-title > first user message > directory basename
     let title = custom_title
@@ -239,7 +251,7 @@ fn parse_session(path: &Path) -> Option<SessionMeta> {
 
     let summary = summary.map(|text| truncate_summary(&text, 160));
 
-    Some(SessionMeta {
+    Ok(Some(SessionMeta {
         provider_id: PROVIDER_ID.to_string(),
         session_id: session_id.clone(),
         title,
@@ -249,7 +261,12 @@ fn parse_session(path: &Path) -> Option<SessionMeta> {
         last_active_at,
         source_path: Some(path.to_string_lossy().to_string()),
         resume_command: Some(format!("claude --resume {session_id}")),
-    })
+    }))
+}
+
+#[cfg(test)]
+fn parse_session(path: &Path) -> Option<SessionMeta> {
+    parse_session_checked(path).expect("parse Claude test session")
 }
 
 fn is_agent_session(path: &Path) -> bool {
@@ -265,24 +282,23 @@ fn infer_session_id_from_filename(path: &Path) -> Option<String> {
         .map(|stem| stem.to_string())
 }
 
-fn collect_jsonl_files(root: &Path, files: &mut Vec<PathBuf>) {
+fn collect_jsonl_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<(), SessionScanError> {
     if !root.exists() {
-        return;
+        return Ok(());
     }
 
-    let entries = match std::fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(_) => return,
-    };
-
-    for entry in entries.flatten() {
+    let entries =
+        std::fs::read_dir(root).map_err(|err| SessionScanError::storage("Claude", root, err))?;
+    for entry in entries {
+        let entry = entry.map_err(|err| SessionScanError::storage("Claude", root, err))?;
         let path = entry.path();
         if path.is_dir() {
-            collect_jsonl_files(&path, files);
+            collect_jsonl_files(&path, files)?;
         } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
             files.push(path);
         }
     }
+    Ok(())
 }
 
 fn remove_path_if_exists(path: &Path) -> std::io::Result<()> {
